@@ -93,12 +93,6 @@ def build_paths(
         root=root,
         athena=athena,
         workspaces=workspaces,
-        state=athena / "state.json",
-        tree=athena / "research_tree.json",
-        sessions=athena / "logs" / "sessions",
-        clarification=athena / "clarification.json",
-        clarification_confirmation=athena / "clarification-confirmation.json",
-        handoffs=athena / "handoffs",
     )
 
 

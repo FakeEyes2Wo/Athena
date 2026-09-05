@@ -15,12 +15,31 @@ class ResearchPaths:
     root: Path
     athena: Path
     workspaces: Path
-    state: Path
-    tree: Path
-    sessions: Path
-    clarification: Path
-    clarification_confirmation: Path
-    handoffs: Path
+
+    @property
+    def state(self) -> Path:
+        """Return the durable research state path."""
+        return self.athena / "state.json"
+
+    @property
+    def tree(self) -> Path:
+        """Return the durable research tree path."""
+        return self.athena / "research_tree.json"
+
+    @property
+    def sessions(self) -> Path:
+        """Return the agent session-log directory."""
+        return self.athena / "logs" / "sessions"
+
+    @property
+    def clarification(self) -> Path:
+        """Return the canonical clarification draft path."""
+        return self.athena / "clarification.json"
+
+    @property
+    def handoffs(self) -> Path:
+        """Return the named handoff directory."""
+        return self.athena / "handoffs"
 
 
 @dataclass(frozen=True)

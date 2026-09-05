@@ -602,7 +602,11 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     frozen_ref = "sha256:" + "f" * 64
     authority = _MemoryBaselineAuthorityStore()
     state = SimpleNamespace(
-        phase="PREPARE", status="RUNNING", eda_dir=None, save=lambda path: None
+        phase="PREPARE",
+        status="RUNNING",
+        eda_dir=None,
+        task_understanding=None,
+        save=lambda path: None,
     )
     supervisor = FakeSupervisor(frozen_ref)
     rt = SimpleNamespace(
@@ -619,6 +623,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
             dataset_path=None,
             target_column=None,
             split_seed=0,
+            task_confirmation_gate=False,
             paths=SimpleNamespace(athena=tmp_path / ".athena"),
         ),
         task_confirmation_gate=False,

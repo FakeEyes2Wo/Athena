@@ -15,12 +15,6 @@ def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
             root=tmp_path,
             athena=athena,
             workspaces=tmp_path / "workspaces",
-            state=athena / "state.json",
-            tree=athena / "research_tree.json",
-            sessions=athena / "logs" / "sessions",
-            clarification=athena / "clarification.json",
-            clarification_confirmation=athena / "clarification-confirmation.json",
-            handoffs=athena / "handoffs",
         ),
         search=SearchLimits(search_limit=4),
     )

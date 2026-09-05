@@ -403,6 +403,14 @@ Read `state.py` completely and traced every public transition and both internal 
 
 Fresh verification across the complete clarification unit directory plus confirmation-gate and continue/resume integrations passed 117 tests; pytest reported only the existing cache-permission warning. Closing the unchanged state row advances reviewed baseline coverage to 249/602. Whole-repository acceptance remains pending.
 
+## Research configuration and path-layout review
+
+Read `config.py` completely and traced every `ResearchConfig`, `SearchLimits`, `SurveyConfig`, and `ResearchPaths` field through bootstrap, runtime services/settings, PREPARE data splitting, survey, Supervisor composition, facade properties, and tests. All runtime option fields have production consumers. The path record, however, stored six values deterministically derived from `athena`; its confirmation-journal field had no reader after persistence consolidation.
+
+Reduce `ResearchPaths` from nine stored fields and constructor arguments to three: `root`, `athena`, and the session-sensitive `workspaces`. Preserve state, tree, sessions, clarification, and handoff access as read-only properties derived from the authoritative state root, and delete `clarification_confirmation` entirely. `build_paths` and the sole manual test construction now pass three fields. Confirmation recovery uses `ClarificationStore.journal_path`, keeping journal naming in its storage owner. This removes six independently supplied path values and makes inconsistent layouts unrepresentable.
+
+Expanded testing exposed a real earlier context regression: `confirmed_task_context_block` read a nonexistent `ResearchRuntime.task_confirmation_gate` convenience attribute. Read the canonical `runtime.config.task_confirmation_gate` instead and update the focused fake runtime to provide the same explicit contract; no defensive fallback was added. The four previously failing regressions pass. Final path/config/clarification/breakpoint/confirmation/continue testing passed 188 tests, and the alternate complete runtime-survey selection passed 156. Targeted pre-commit hooks, Black, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the config row advances reviewed baseline coverage to 250/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -898,7 +906,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/__init__.py` | 18 | Reviewed; retain one lazy runtime export to isolate submodule imports |
 | `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
 | `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; five-field transaction ports, unified persistence root and runtime-owned lifecycle start |
-| `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and metadata fallbacks |
+| `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and reads confirmation policy from canonical config |
 | `src/athena/research/clarification/controller.py` | 323 | Reviewed; four-parameter construction, four attributes and three synchronous pure operations |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
 | `src/athena/research/clarification/generator.py` | 372 | Reviewed; typed generator results replace dictionary compatibility and the internal result is a frozen dataclass |
@@ -908,7 +916,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
 | `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
 | `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
-| `src/athena/research/config.py` | 83 | Pending |
+| `src/athena/research/config.py` | 83 | Reviewed; three stored roots replace nine independently supplied paths |
 | `src/athena/research/contracts.py` | 88 | Pending |
 | `src/athena/research/data_models.py` | 46 | Pending |
 | `src/athena/research/evaluation/__init__.py` | 5 | Pending |

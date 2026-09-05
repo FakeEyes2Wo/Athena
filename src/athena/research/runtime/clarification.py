@@ -88,8 +88,7 @@ async def auto_confirm(runtime: Any, task: str) -> ClarificationDraft:
 
 async def recover_confirmation(runtime: Any) -> None:
     """Recover confirmation files and synchronize projected memory fields."""
-    journal_path = clarification_store(runtime).root / "clarification-confirmation.json"
-    interrupted = journal_path.is_file()
+    interrupted = clarification_store(runtime).journal_path.is_file()
     await recover_confirmation_transaction(runtime)
     if interrupted:
         if runtime.state_path.is_file():
