@@ -93,7 +93,8 @@ from athena.research.runtime.corpus import (
 )
 from athena.research.runtime.events import RuntimeEvents
 from athena.research.runtime.resume_contract import is_continue_command
-from athena.research.runtime.settings import SettingsController
+from athena.research.runtime.settings import apply as apply_settings_impl
+from athena.research.runtime.settings import snapshot as settings_snapshot
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
@@ -147,7 +148,6 @@ class ResearchRuntime:
         self._config = config
         self._services = services
         self._session = session
-        self._settings = SettingsController(self)
         wire_workflow(self)
         if provider is not None:
             self.register_supervisor(provider=provider)
@@ -431,11 +431,11 @@ class ResearchRuntime:
 
     def settings(self) -> dict[str, Any]:
         """Return a GUI-facing snapshot of runtime settings."""
-        return self._settings.snapshot()
+        return settings_snapshot(self)
 
     async def apply_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         """Apply a whitelisted settings patch and persist durable fields."""
-        return await self._settings.apply(patch)
+        return await apply_settings_impl(self, patch)
 
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.

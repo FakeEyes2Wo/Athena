@@ -69,6 +69,12 @@ def test_runtime_service_records_stay_small_and_slotted() -> None:
     assert all("__slots__" in record.__dict__ for record in SERVICE_RECORDS)
 
 
+def test_runtime_does_not_retain_a_settings_proxy(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    assert set(runtime.__dict__) == {"_config", "_services", "_session"}
+
+
 def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
     athena = tmp_path / ".athena"
     config = ResearchConfig(

@@ -651,6 +651,14 @@ Split execution/Git/script/evaluator ownership into the four-field `ExperimentSe
 
 Every service/session record now has at most five fields: the nine field counts are 5, 4, 5, 5, 5, 3, 4, 5, and 5. `services.py` falls from 136 baseline lines to 123, and production code falls by ten net lines after explicit composition migration. The focused service/runtime/integration selection passed 149 tests, the complete research unit suite passed 1,254, and the CLI/TUI/GUI entry selection passed 34. Ruff, Black, Python compilation, old-path searches, shape inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 356/602. Whole-repository acceptance remains pending.
 
+## Runtime settings review
+
+Read `runtime/settings.py` and its complete direct test file, then trace settings reads and updates through the runtime facade, GUI service, gateway handler/transport, CLI/TUI construction, compute configuration, Supervisor option updates, dotenv persistence, and durable state writes. Preserve the fifteen-field whitelist, exact GUI snapshot shape, secret masking, validation/error contracts, partial-application order, manual-mode command path, lazy remote pool creation, local-mode pool shutdown, and single durable save.
+
+Delete `SettingsController`, whose sole attribute was a Runtime reference and whose only constructor was the facade. Replace it with `snapshot(runtime)` and `apply(runtime, patch)` module functions; the public Runtime methods remain unchanged while Runtime instance attributes fall from four to three. Consolidate five integer validators and the two boolean Supervisor-policy updates, bind state/options/compute once per domain, and use one durable-field set for persistence. No compatibility class or `_settings` alias remains.
+
+The module has no classes; its ten functions take at most four parameters. `settings.py` falls from 308 to 298 physical lines, with ten net production lines removed. The unchanged focused baseline passed 78 tests and the final settings/CLI/TUI/GUI selection passed 111; the complete research unit suite passed 1,255. Ruff, Black, Python compilation, AST shape checks, old-symbol searches, hooks, and `git diff --check` passed. The GUI selection emitted the existing Windows asyncio subprocess-transport destructor warning but exited successfully. Closing this row advances reviewed coverage to 357/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1270,7 +1278,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Reviewed; derive availability from one slotted reason and use the typed durable state contract |
 | `src/athena/research/runtime/services.py` | 136 | Reviewed; cap all service/session records at five slotted fields and remove the durable wrapper |
-| `src/athena/research/runtime/settings.py` | 308 | Pending |
+| `src/athena/research/runtime/settings.py` | 308 | Reviewed; delete the one-attribute controller and consolidate validation in module functions |
 | `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |
 | `src/athena/research/script_runner.py` | 388 | Pending |
 | `src/athena/research/splitter.py` | 308 | Pending |
