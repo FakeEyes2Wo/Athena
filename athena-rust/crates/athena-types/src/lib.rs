@@ -1,7 +1,7 @@
 mod ids;
 mod status;
 
-pub use ids::{ArtifactRef, CommitHash, SessionId, ThreadId, TurnId, ValidationError};
+pub use ids::{ArtifactRef, SessionId, ThreadId, TurnId, ValidationError};
 pub use status::{ThreadStatus, TurnStatus};
 
 use serde::{Deserialize, Serialize};

@@ -53,7 +53,6 @@ macro_rules! id_newtype {
 }
 
 id_newtype!(ArtifactRef, "A stable reference to an external artifact.");
-id_newtype!(CommitHash, "A git commit hash.");
 id_newtype!(ThreadId, "A unique thread identifier.");
 id_newtype!(TurnId, "A unique turn identifier.");
 id_newtype!(SessionId, "A unique session identifier.");

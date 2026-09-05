@@ -113,20 +113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "athena-workspace"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "athena-types",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

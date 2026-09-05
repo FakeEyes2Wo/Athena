@@ -19,7 +19,6 @@ depends on protocol + runtime; `athena-agent` implements the runtime
 | `athena-tools` | `Tool`/`ToolExecutor`, read-only registry | `core/tool*.py` | ✅ done |
 | `athena-runtime` | Event journal, per-thread actor, `TurnRunner`, `ThreadManager` | `app_server/{events,submissions,thread_runtime,thread_manager}.py` | ✅ done |
 | `athena-agent` | Provider stream, tool-call loop, sub-agents, `AgentRunner` | `core/agent/*` | ✅ done |
-| `athena-workspace` | `LocalGitWorkspace` (worktree/diff/commit) | `core/gitutils/workspace.py` | ✅ done |
 | `athena-server` | Transport, message processor, execution, subscriptions, lifecycle | `app_server/{transport,server,execution,client,lifecycle}.py` | ✅ done |
 
 ## Build & test

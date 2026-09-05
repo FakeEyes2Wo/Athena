@@ -50,6 +50,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust protocol crate and collapse duplicate error/result surfaces.
 - [x] Review the Rust server crate and replace the temporary transport container.
 - [x] Review the Rust type crate and remove the unconsumed research domain layer.
+- [x] Remove the unconsumed Rust Git-workspace prototype crate.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -141,11 +142,19 @@ Fresh verification passed all five server unit/end-to-end tests, including ready
 
 ## Rust type-contract review
 
-Read all four type source files and the Python-fixture test completely, then trace every export across all remaining Rust crates. The thread/turn DTOs, five validated identifiers, two runtime status enums, and validation error are active cross-crate contracts and remain. After removing the unconsumed Rust research prototype, the seven research-domain types in `domain.rs` had no remaining production caller and existed only to pass their own tests.
+Read all four type source files and the Python-fixture test completely, then trace every export across all remaining Rust crates. The thread/turn DTOs, four validated identifiers, two runtime status enums, and validation error are active cross-crate contracts and remain. After removing the unconsumed Rust research prototype, the seven research-domain types in `domain.rs` had no remaining production caller and existed only to pass their own tests.
 
-Delete `domain.rs` and its `Hypothesis`, `ExperimentPlan`, `DataCard`, task metadata, metric, and hypothesis-status exports rather than retaining a stale second domain model. Remove the fourteen duplicate inline tests and eight fixture cases that only certified those dead types. Replace the public two-layer `NonBlankString` wrapper with direct String-backed ID newtypes, deleting unused `TryFrom<String>` and `AsRef<str>` implementations while preserving validation, `new`, `as_str`, display, and exact Serde behavior. Make the source modules private and move `serde_json` to test-only dependencies.
+Delete `domain.rs` and its `Hypothesis`, `ExperimentPlan`, `DataCard`, task metadata, metric, and hypothesis-status exports rather than retaining a stale second domain model. Remove the fourteen duplicate inline tests and eight fixture cases that only certified those dead types. Replace the public two-layer `NonBlankString` wrapper with direct String-backed ID newtypes, deleting unused `TryFrom<String>` and `AsRef<str>` implementations while preserving validation, `new`, `as_str`, display, and exact Serde behavior. Make the source modules private, move `serde_json` to test-only dependencies, and remove the later-orphaned `CommitHash` identifier with the Git-workspace crate.
 
 Fresh focused verification passed all six retained thread/turn/identifier fixture cases. The complete Rust workspace passed 144 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing five type rows advances reviewed coverage to 164/602. Whole-repository acceptance remains pending.
+
+## Rust Git-workspace prototype review
+
+Read all five `athena-workspace` source files and its real-Git integration test completely, then trace every manifest, type, and constructor reference across the Rust workspace. No remaining crate consumes its worktree manager, branch model, runner, writer, or error types; workspace membership and its own five tests were its only edges after the unused research prototype was removed.
+
+Delete the entire crate instead of retaining a four-field manager and two injectable interfaces with no runtime path. Remove the workspace member/dependency declarations and current README row, regenerate the lockfile, and remove `CommitHash`, whose only production consumer was this crate. The historical WIP inventory remains unchanged because it records the baseline migration state.
+
+After deletion, the complete remaining Rust workspace passed 139 tests. Workspace Clippy with `-D warnings`, Rust formatting, repository reference searches, and `git diff --check` passed. Closing six deleted workspace rows advances reviewed coverage to 170/602 while removing 846 baseline source/test lines plus the crate manifest. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -868,12 +877,12 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-types/src/lib.rs` | 122 | Reviewed; retain thread/turn contracts and delete duplicate inline tests/domain exports |
 | `athena-rust/crates/athena-types/src/status.rs` | 21 | Reviewed; retain two fixture-governed runtime enums |
 | `athena-rust/crates/athena-types/tests/python_fixtures.rs` | 216 | Reviewed; retain six live thread/turn/identifier parity cases |
-| `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Pending |
-| `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Pending |
-| `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Pending |
-| `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Pending |
-| `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Pending |
-| `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Pending |
+| `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Reviewed; delete unconsumed injectable Git process boundary with crate |
+| `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Reviewed; delete crate-local error with its only consumers |
+| `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Reviewed; delete unused facade and workspace member |
+| `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Reviewed; delete unconsumed worktree/review state manager |
+| `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Reviewed; delete orphaned branch record and CommitHash dependency |
+| `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Reviewed; delete self-only five-case integration suite with prototype |
 | `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Reviewed; removed two unused fields and three data-only runtime classes |
 | `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
 | `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
