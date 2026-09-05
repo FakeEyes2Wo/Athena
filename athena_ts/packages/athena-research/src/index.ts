@@ -16,11 +16,10 @@ export {
   PlanRunner,
   PlanTurnResultSchema,
   applyTrustedScore,
-  decideSettlement,
   loadBest,
   readExperimentManifest,
 } from "./supervisor/experiment.js"
-export type { Direction, ExperimentManifest, PlanSettlement, PlanTurnResult } from "./supervisor/experiment.js"
+export type { Direction, ExperimentManifest, PlanTurnResult } from "./supervisor/experiment.js"
 export {
   redact,
   sanitizeTerminalText,

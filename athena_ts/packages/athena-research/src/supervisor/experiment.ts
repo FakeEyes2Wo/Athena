@@ -125,12 +125,6 @@ export function readExperimentManifest(root: string): ExperimentManifest {
   return { version: 1, commands, outputs }
 }
 
-/** 一次 turn 的终态动作。 */
-export interface PlanSettlement {
-  action: "settle" | "wait" | "continue"
-  best_ref: ArtifactRef | null
-  reason: string
-}
 
 export const PlanTurnResultSchema = z
   .strictObject({
@@ -191,35 +185,6 @@ export async function applyTrustedScore(
   return PlanStateSchema.parse({ ...state, stale_rounds: (state.stale_rounds ?? 0) + 1 })
 }
 
-/** 根据 Plan 预算与 Agent 决策返回 turn 的终态动作。 */
-export function decideSettlement(
-  state: PlanState,
-  decision: { decision: "continue" | "submit" | "abandon" },
-  reportRef: ArtifactRef | null = null
-): PlanSettlement {
-  const hasBest = state.best_ref !== undefined && state.best_ref !== null
-  const patienceExhausted =
-    state.patience !== undefined && state.patience !== null && (state.stale_rounds ?? 0) >= state.patience
-  const turnsExhausted = state.turn_limit !== null && state.turns_used >= state.turn_limit
-
-  let settlement: PlanSettlement
-  if (decision.decision === "submit" || decision.decision === "abandon") {
-    settlement = { action: "settle", best_ref: state.best_ref ?? null, reason: decision.decision }
-  } else if (patienceExhausted) {
-    settlement = { action: "settle", best_ref: state.best_ref ?? null, reason: "patience exhausted" }
-  } else if (turnsExhausted) {
-    settlement = hasBest
-      ? { action: "settle", best_ref: state.best_ref ?? null, reason: "turn budget exhausted" }
-      : { action: "wait", best_ref: null, reason: "turn budget exhausted without a trusted best" }
-  } else {
-    settlement = { action: "continue", best_ref: null, reason: "" }
-  }
-
-  if (settlement.action === "settle" && state.kind === "PREPARE" && reportRef === null) {
-    return { action: "wait", best_ref: null, reason: "report required before settlement" }
-  }
-  return settlement
-}
 
 function cleanError(error: string): string {
   return redact(error.split(/\s+/).join(" ")).slice(0, 1000)

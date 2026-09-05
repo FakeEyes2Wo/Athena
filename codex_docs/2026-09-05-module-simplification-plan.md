@@ -23,6 +23,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove redundant execution context/root state and migrate PlanRunner/prepare/DSH callers.
 - [x] Remove the test-only prepare runner factory and validate the real preparation pipeline.
 - [x] Consolidate PlanRunner failure handling and shared directory-presence checks.
+- [x] Remove the unconsumed settlement API and test the active Supervisor policy.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -143,6 +144,12 @@ TypeScript PlanRunner review: complete source and test-file reads, trace prepare
 Share hasAnyFile between experiment and prepare instead of maintaining two recursive implementations. Keep it out of the package barrel; prepare already depends on the experiment module, so this introduces no new cycle or helper file. Preserve missing/unreadable directory handling, skipped failed stat calls, nested traversal and acceptance of zero-byte files. Retain manifest validation, trusted score/state updates, settlement policy and scorer/storage/execution boundaries; no business-policy rewrite is implied by this cleanup.
 
 The pre-change PlanRunner/prepare/Supervisor/DSH selection returned 52 passed. Four new cases cover recursive directory presence and missing/malformed/schema-invalid frozen evaluator artifacts; existing fake execution now asserts the unchanged 120-second limit. All five package builds passed, and the full workspace returned 458 passed across 53 files with `npm test -- --testTimeout=30000`, including 35 PlanRunner/manifest/settlement tests. Removed helper/configuration searches and git diff --check passed; default-timeout reliability is not claimed. Baseline file-review coverage is now 75/602. Next module: inspect script_runner.ts and evaluation.ts, their data contracts and active callers; DSH remains reviewed only at affected call sites. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+
+Settlement follow-up corrects the preceding retention statement: the Supervisor invokes its own private decideSettlement, not the similarly named export from experiment.ts. Delete the unused exported function, PlanSettlement type, eleven exclusive tests and their decision helper. Keep the actually used Supervisor implementation unchanged, including its two-field result; do not introduce the dead function's reason strings or PREPARE report gate into that path. PREPARE still validates its required report in its real execution pipeline. The package API regression rejects the removed export.
+
+Add seven policy cases against the actual Supervisor method for submit, abandon, patience exhaustion, exhausted turns with/without a best result, remaining budget and unlimited turns. These complement the existing end-to-end SEARCH completion test; they are method-level tests, not new end-to-end cases. Baseline PlanRunner/Supervisor/DSH selection returned 44 passed. Review count remains 75/602: this is a correction to an already reviewed module, not another completed file. script_runner.ts has now been fully read, but its caller/test and implementation review remains Pending. Full repository acceptance, main merge/push and temporary branch/worktree cleanup remain unfinished.
+
+Settlement verification: all five package builds passed. Full TypeScript workspace returned 454 passed across 53 files with `npm test -- --testTimeout=30000` (458 minus eleven dead-function cases plus seven active-policy cases). References now resolve only to the Supervisor method, its new tests and the negative package-export assertion; PlanSettlement is absent. git diff --check passed. Default-timeout reliability and full application readiness remain unproven.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |

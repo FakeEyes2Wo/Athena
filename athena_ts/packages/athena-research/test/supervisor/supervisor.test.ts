@@ -200,6 +200,25 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it.each([
+    ["submit", 1, 10, 0, REF, "settle"],
+    ["abandon", 1, 10, 0, null, "settle"],
+    ["continue", 1, 10, 3, REF, "settle"],
+    ["continue", 10, 10, 0, REF, "settle"],
+    ["continue", 10, 10, 0, null, "wait"],
+    ["continue", 1, 10, 0, REF, "continue"],
+    ["continue", 99, null, 0, REF, "continue"],
+  ] as const)("uses the active settlement policy (%s, turns=%s, limit=%s, stale=%s)",
+    (decision, turns, limit, stale, best, action) => {
+      const { supervisor } = coreSupervisor(tmpDir())
+      const state = PlanStateSchema.parse({
+        kind: "SEARCH", context_ref: REF, turns_used: turns, turn_limit: limit,
+        patience: 3, stale_rounds: stale, best_ref: best,
+      })
+      const result = supervisor["decideSettlement"](state, PlanDecisionSchema.parse({ decision, reason: "test" }))
+      expect(result).toEqual({ action, best_ref: action === "settle" ? best : null })
+    })
+
   it("persists structured task understanding through the single writer", async () => {
     const dir = tmpDir()
     const { supervisor, state } = coreSupervisor(dir)

@@ -17,7 +17,6 @@ import {
   PlanRunner,
   PlanTurnResultSchema,
   applyTrustedScore,
-  decideSettlement,
   loadBest,
   hasAnyFile,
   readExperimentManifest,
@@ -27,9 +26,6 @@ import { PlanBestSchema, PlanInputSchema, PlanStateSchema } from "../../src/supe
 const REF = "sha256:" + "a".repeat(64)
 const OTHER_REF = "sha256:" + "c".repeat(64)
 
-function decision(value: string) {
-  return { decision: value as "continue" | "submit" | "abandon" }
-}
 
 function searcState(opts: { staleRounds?: number; bestRef?: string | null } = {}) {
   const payload: Record<string, unknown> = {
@@ -179,81 +175,6 @@ describe("applyTrustedScore", () => {
   })
 })
 
-describe("decideSettlement", () => {
-  it("submit settles historical best", () => {
-    const state = searcState({ staleRounds: 0, bestRef: OTHER_REF })
-    const settlement = decideSettlement(state, decision("submit"), REF)
-    expect(settlement.action).toBe("settle")
-    expect(settlement.best_ref).toBe(OTHER_REF)
-  })
-
-  it("final settlement waits for report", () => {
-    const state = parseOrThrow(PlanStateSchema, { kind: "PREPARE", context_ref: REF, turns_used: 3, turn_limit: 12 })
-    const settlement = decideSettlement(state, decision("submit"))
-    expect(settlement.action).toBe("wait")
-    expect(settlement.reason).toBe("report required before settlement")
-  })
-
-  it("search settles without report", () => {
-    const state = searcState({ bestRef: OTHER_REF })
-    const settlement = decideSettlement(state, decision("submit"))
-    expect(settlement.action).toBe("settle")
-  })
-
-  it.each(["submit", "abandon"])("every final settlement waits for report (%s)", (d) => {
-    const state = parseOrThrow(PlanStateSchema, { kind: "PREPARE", context_ref: REF, turns_used: 3, turn_limit: 12 })
-    const settlement = decideSettlement(state, decision(d))
-    expect(settlement.action).toBe("wait")
-    expect(settlement.reason).toBe("report required before settlement")
-  })
-
-  it("patience exhaustion settles historical best", () => {
-    const state = parseOrThrow(PlanStateSchema, {
-      kind: "SEARCH", context_ref: REF, turns_used: 2, turn_limit: 12, patience: 3, stale_rounds: 3, best_ref: OTHER_REF,
-    })
-    const settlement = decideSettlement(state, decision("continue"), REF)
-    expect(settlement.action).toBe("settle")
-    expect(settlement.best_ref).toBe(OTHER_REF)
-  })
-
-  it("turn exhaustion with best settles", () => {
-    const state = parseOrThrow(PlanStateSchema, {
-      kind: "SEARCH", context_ref: REF, turns_used: 12, turn_limit: 12, patience: 4, best_ref: OTHER_REF,
-    })
-    const settlement = decideSettlement(state, decision("continue"), REF)
-    expect(settlement.action).toBe("settle")
-  })
-
-  it("turn exhaustion without best waits", () => {
-    const state = parseOrThrow(PlanStateSchema, {
-      kind: "SEARCH", context_ref: REF, turns_used: 12, turn_limit: 12, patience: 4,
-    })
-    const settlement = decideSettlement(state, decision("continue"))
-    expect(settlement.action).toBe("wait")
-    expect(settlement.best_ref).toBeNull()
-  })
-
-  it("continue with budget keeps running", () => {
-    const state = searcState({ staleRounds: 1, bestRef: OTHER_REF })
-    const settlement = decideSettlement(state, decision("continue"))
-    expect(settlement.action).toBe("continue")
-  })
-
-  it("abandon without best settles loss", () => {
-    const state = parseOrThrow(PlanStateSchema, { kind: "SEARCH", context_ref: REF, turns_used: 5, turn_limit: 12, patience: 4 })
-    const settlement = decideSettlement(state, decision("abandon"), REF)
-    expect(settlement.action).toBe("settle")
-    expect(settlement.best_ref).toBeNull()
-  })
-
-  it("unlimited turns never exhaust", () => {
-    const state = parseOrThrow(PlanStateSchema, {
-      kind: "SEARCH", context_ref: REF, turns_used: 99, turn_limit: null, patience: 4, stale_rounds: 1, best_ref: OTHER_REF,
-    })
-    const settlement = decideSettlement(state, decision("continue"))
-    expect(settlement.action).toBe("continue")
-  })
-})
 
 async function scoredPlan(store: LocalArtifactStore, opts: { bestMetric: number; staleRounds: number; patience: number }) {
   const best = PlanBestSchema.parse({ metric: opts.bestMetric, commit: "c1", evidence_ref: OTHER_REF })
