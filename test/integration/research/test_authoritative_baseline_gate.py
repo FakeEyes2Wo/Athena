@@ -447,11 +447,11 @@ class _GateHarness(_PrepareHarness):
         self.outputs = outputs
         self.agents.start()
         runner = PhaseRunner(runtime)
-        handoff = runner._run_handoff_agent
+        handoff = PhaseRunner._run_handoff_agent
 
-        async def recording_handoff(**kwargs: Any) -> str:
+        async def recording_handoff(runner: PhaseRunner, **kwargs: Any) -> str:
             self.handoff_calls.append(dict(kwargs))
-            return await handoff(**kwargs)
+            return await handoff(runner, **kwargs)
 
         async def prepared_workspace(_runtime: Any):
             return self.branch
@@ -477,7 +477,7 @@ class _GateHarness(_PrepareHarness):
         )
         self.monkeypatch.setattr(orchestrator, "prepare_evaluators", frozen_evaluators)
         self.monkeypatch.setattr(orchestrator, "prepare_eda", seeded_eda)
-        runner._run_handoff_agent = recording_handoff
+        self.monkeypatch.setattr(PhaseRunner, "_run_handoff_agent", recording_handoff)
         return await runner.run_prepare_phase()
 
 
@@ -697,9 +697,7 @@ async def test_invalid_first_response_repairs_same_baseline_ideator(harness) -> 
     assert result.metric == 1.0
     assert harness.research_provider.turn == 2
     research_calls = [
-        call
-        for call in harness.handoff_calls
-        if call["agent_type"] == "baseline_ideator"
+        call for call in harness.handoff_calls if call["agent_id"] == "baseline_ideator"
     ]
     assert {call["agent_id"] for call in research_calls} == {"baseline_ideator"}
     assert len(research_calls) == 2

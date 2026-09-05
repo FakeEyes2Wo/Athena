@@ -1,21 +1,7 @@
-"""handoff agent 的事件回调必须是可 await 的。
-
-真机（2026-08-29，qwen3.7-plus 跑 TESS 恒星耀发任务）：EDA 的九份
-``EDA_REPORT_*.md`` 全部生成完毕，然后 handoff 在**第一个 agent 事件**上炸掉：
-
-    supervisor> EDA handoff failed (object NoneType can't be used in 'await'
-                expression); writing fallback EDA files.
-    supervisor> PREPARE: 因 EDA 失败跳过 BASELINE_DESIGN，prepare 将基于任务原文降级。
-
-``forward_run_events`` 对每个事件做 ``await publish(...)``，而
-``_run_handoff_agent`` 里的 ``publish`` 是个普通 ``def``、返回 None。两处后果：
-被丢掉的协程从来没被 await（事件根本没投递），以及 ``await None`` 直接抛
-TypeError。于是**每一次运行**的 EDA 产出都被丢弃，PREPARE 降级成只看任务原文——
-报告就躺在磁盘上，没有任何人读。
-"""
+"""Behavior contracts for PREPARE handoff event forwarding."""
 
 import asyncio
-import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,8 +11,6 @@ from athena.research.runtime.phase_runner import PhaseRunner
 
 
 class _Events:
-    """Stand-in for the runtime event bus; ``project_agent_event`` is async."""
-
     def __init__(self) -> None:
         self.seen: list[tuple[str, str]] = []
 
@@ -35,8 +19,6 @@ class _Events:
 
 
 class _Agents:
-    """Emits one journal event then a terminal one, awaiting publish each time."""
-
     def __init__(self) -> None:
         self.reaped: list[str] = []
 
@@ -48,7 +30,10 @@ class _Agents:
 
     async def wait_run(self, run_id):
         return SimpleNamespace(
-            status="COMPLETED", response_ref=None, result_ref=None, error=None
+            status="COMPLETED",
+            response_ref=None,
+            result_ref=None,
+            error=None,
         )
 
     async def run_events(self, run_id, after_sequence=0):
@@ -59,35 +44,23 @@ class _Agents:
         self.reaped.append(agent_id)
 
 
-def _runner(tmp_path: Path, events: _Events, agents: _Agents) -> PhaseRunner:
-    runtime = SimpleNamespace(agents=agents, store=object(), events=events)
-    return PhaseRunner(runtime)
-
-
-def test_the_publish_callback_is_a_coroutine_function(tmp_path: Path) -> None:
-    """``forward_run_events`` 对它做 await；普通函数返回的 None 无法 await。"""
-    source = inspect.getsource(PhaseRunner._run_handoff_agent)
-    assert "async def publish" in source
-
-
 @pytest.mark.asyncio
-async def test_handoff_forwards_events_and_returns_the_output_file(
-    tmp_path: Path,
-) -> None:
+async def test_handoff_forwards_events_reads_output_and_reaps(tmp_path: Path) -> None:
     events, agents = _Events(), _Agents()
     (tmp_path / "EDA_INDEX.md").write_text("# index\n", encoding="utf-8")
+    runtime = SimpleNamespace(agents=agents, store=object(), events=events)
+    runner = PhaseRunner(runtime)
 
-    text = await _runner(tmp_path, events, agents)._run_handoff_agent(
+    text = await runner._run_handoff_agent(
         agent_id="prepare_eda",
-        agent_type="prepare_eda",
-        workspace=str(tmp_path),
+        workspace=tmp_path,
         output_file="EDA_INDEX.md",
         content="finalize",
         reap_after=True,
     )
 
     assert text == "# index\n"
-    # 事件真的被投递了，而不是把协程丢掉
+    assert not hasattr(runner, "__dict__")
     assert events.seen == [
         ("prepare_eda", "agent/text_delta"),
         ("prepare_eda", "run/completed"),
@@ -95,53 +68,24 @@ async def test_handoff_forwards_events_and_returns_the_output_file(
     assert agents.reaped == ["prepare_eda"]
 
 
-@pytest.mark.asyncio
-async def test_a_runtime_without_an_event_bus_still_works(tmp_path: Path) -> None:
-    agents = _Agents()
-    (tmp_path / "EDA_INDEX.md").write_text("# index\n", encoding="utf-8")
-    runtime = SimpleNamespace(agents=agents, store=object(), events=None)
-
-    text = await PhaseRunner(runtime)._run_handoff_agent(
-        agent_id="prepare_eda",
-        agent_type="prepare_eda",
-        workspace=str(tmp_path),
-        output_file="EDA_INDEX.md",
-        content="finalize",
-    )
-
-    assert text == "# index\n"
-
-
 def test_project_agent_event_is_async() -> None:
-    """这条用例钉住上面那条断言的前提：事件投递本身是协程。"""
     from athena.research.runtime.events import RuntimeEvents
 
     assert asyncio.iscoroutinefunction(RuntimeEvents.project_agent_event)
 
 
 def test_no_event_callback_is_left_synchronous() -> None:
-    """同一个 bug 出现过两次：``phase_runner`` 一次，``eda_todo`` 一次。
-
-    ``forward_run_events`` 对每个事件做 ``await publish(...)``。任何交给
-    ``wait_run_events`` 的回调只要写成普通 ``def``，就会在第一个事件上抛
-    ``object NoneType can't be used in 'await' expression``，而且顺手把
-    ``project_agent_event`` 的协程丢掉。两次都只留下一条 RuntimeWarning。
-
-    这条用例守的是整类问题，而不是那两个具体位置。
-    """
-    import re
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parents[3] / "src" / "athena"
-    offenders = []
-    for path in src.rglob("*.py"):
+    source_root = Path(__file__).resolve().parents[3] / "src" / "athena"
+    offenders: list[str] = []
+    for path in source_root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "wait_run_events" not in text:
             continue
         for match in re.finditer(r"^(\s*)def publish\(", text, re.MULTILINE):
             line = text[: match.start()].count("\n") + 1
-            offenders.append(f"{path.relative_to(src)}:{line}")
+            offenders.append(f"{path.relative_to(source_root)}:{line}")
+
     assert not offenders, (
-        "these publish callbacks must be `async def` -- forward_run_events "
-        f"awaits them: {offenders}"
+        "wait_run_events callbacks must be async; synchronous callbacks: "
+        f"{offenders}"
     )

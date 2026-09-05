@@ -369,8 +369,7 @@ class _BaselineResearchRun:
         try:
             await self.handoff_agent(
                 agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
-                agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
-                workspace=str(self.root),
+                workspace=self.root,
                 output_file=DESIGN_FILENAME,
                 content=content,
                 reap_after=False,

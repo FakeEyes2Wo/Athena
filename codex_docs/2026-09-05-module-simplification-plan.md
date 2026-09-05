@@ -659,6 +659,14 @@ Delete `SettingsController`, whose sole attribute was a Runtime reference and wh
 
 The module has no classes; its ten functions take at most four parameters. `settings.py` falls from 308 to 298 physical lines, with ten net production lines removed. The unchanged focused baseline passed 78 tests and the final settings/CLI/TUI/GUI selection passed 111; the complete research unit suite passed 1,255. Ruff, Black, Python compilation, AST shape checks, old-symbol searches, hooks, and `git diff --check` passed. The GUI selection emitted the existing Windows asyncio subprocess-transport destructor warning but exited successfully. Closing this row advances reviewed coverage to 357/602. Whole-repository acceptance remains pending.
 
+## Runtime phase-runner review
+
+Read `runtime/phase_runner.py` completely and trace plan execution, PREPARE handoffs, baseline resume attestation, VALIDATE construction, and independent diff review through bootstrap, Supervisor callbacks, prepare/EDA/baseline modules, breakpoint recovery, authoritative baseline integration, and autonomous research. Retain `PhaseRunner`: its one Runtime reference produces three stable bound callbacks for Supervisor and keeps the composition root from threading Runtime through every phase signature.
+
+Remove the duplicated handoff `agent_type` because all production callers use the same value as `agent_id`; the bound handoff interface falls from six business inputs to five. Accept the already-owned workspace as `Path` instead of converting it to and from a string. Bind the real async event projector directly with `partial`, deleting the nested forwarding function and support for a test-only Runtime without an event bus. Read `final_evaluator_ref` from the guaranteed Supervisor contract rather than through `getattr`, while retaining the explicit `None` fallback policy for legacy projects. Make PhaseRunner slotted with only `_runtime`.
+
+Delete the source-string coroutine test and the impossible no-event Runtime test; the retained behavior test exercises actual awaited event delivery, output reading, reap, and the slotted shape. PhaseRunner falls from 338 baseline lines to 315, with nineteen net production lines removed across its callers. The unchanged focused baseline passed 82 tests; after deleting the two invalid tests, the final phase/authority/autonomous selection passed 80 and the complete research unit suite passed 1,253. Ruff, Black, Python compilation, signature/slot inspection, old-call searches, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 358/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1275,7 +1283,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
 | `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
 | `src/athena/research/runtime/facade.py` | 728 | Pending; grouped constructor retained and six survey forwarders removed; remaining surface still open |
-| `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
+| `src/athena/research/runtime/phase_runner.py` | 338 | Reviewed; use one slotted Runtime owner and reduce the handoff boundary to five inputs |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Reviewed; derive availability from one slotted reason and use the typed durable state contract |
 | `src/athena/research/runtime/services.py` | 136 | Reviewed; cap all service/session records at five slotted fields and remove the durable wrapper |
 | `src/athena/research/runtime/settings.py` | 308 | Reviewed; delete the one-attribute controller and consolidate validation in module functions |

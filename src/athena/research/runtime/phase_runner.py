@@ -9,6 +9,7 @@ run_validation_phase / review_validation_diff）集中到一个组合单元。�
 import json
 import logging
 import math
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from athena.agents.ideator_agent import HandoffResult
 from athena.agents.task_agents import register_validate_agent
+from athena.core.agent.chat import single_turn_chat
 from athena.execution.runtime import ExecutionContext
 from athena.research.clarification.context import confirmed_task_context_block
 from athena.research.contracts import ValidationResult
@@ -39,7 +41,6 @@ from athena.research.supervisor.validation_contracts import (
     ValidationInput,
     ValidationOptions,
 )
-from athena.core.agent.chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -63,7 +64,7 @@ async def _load_trusted_prepare_score(
             raise ValueError("evidence metric is not finite")
         if not isinstance(commit, str) or not commit.strip():
             raise ValueError("evidence commit is blank")
-    except Exception as exc:  # noqa: BLE001 - artifact store trust boundary
+    except Exception as exc:
         raise BaselineAuthorityError(
             "trusted PREPARE evidence is missing, corrupt, or invalid"
         ) from exc
@@ -72,6 +73,8 @@ async def _load_trusted_prepare_score(
 
 class PhaseRunner:
     """Run PREPARE / VALIDATE / plan phases via the runtime's shared infra."""
+
+    __slots__ = ("_runtime",)
 
     def __init__(self, runtime: "ResearchRuntime") -> None:
         self._runtime = runtime
@@ -107,8 +110,7 @@ class PhaseRunner:
         self,
         *,
         agent_id: str,
-        agent_type: str,
-        workspace: str,
+        workspace: Path,
         output_file: str,
         content: str,
         reap_after: bool = False,
@@ -125,41 +127,23 @@ class PhaseRunner:
                 run_id = await rt.agents.followup(agent_id, request)
             else:
                 _id, run_id = await rt.agents.create_root(
-                    agent_type, request, agent_id=agent_id, name=agent_id
+                    agent_id, request, agent_id=agent_id, name=agent_id
                 )
 
-            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one agent journal event to the runtime event bus.
-
-                Must be a coroutine function. ``forward_run_events`` does
-                ``await publish(...)`` on every journal event, and
-                ``project_agent_event`` is itself async. As a plain ``def`` this
-                returned None, so the first event of every handoff run raised
-                ``object NoneType can't be used in 'await' expression`` -- and
-                the coroutine it dropped on the floor meant the events were
-                never projected either.
-
-                Real run (2026-08-29): all nine EDA_REPORT_*.md were written,
-                then the handoff died on its first event and PREPARE fell back
-                to "EDA failed, degrade to the raw task text". The reports were
-                right there on disk and nothing read them.
-                """
-                events_bus = getattr(rt, "events", None)
-                if events_bus is not None:
-                    await events_bus.project_agent_event(agent_id, kind, ref, data)
-
-            summary = await wait_run_events(rt.agents, run_id, publish)
+            summary = await wait_run_events(
+                rt.agents,
+                run_id,
+                partial(rt.events.project_agent_event, agent_id),
+            )
             result = await load_agent_result(summary, rt.store, HandoffResult)
-            path = Path(workspace) / output_file
+            path = workspace / output_file
             # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
             if result is None:
                 if path.is_file():
                     return path.read_text(encoding="utf-8")
-                raise RuntimeError(
-                    summary.error or f"{agent_type} handoff agent failed"
-                )
+                raise RuntimeError(summary.error or f"{agent_id} handoff agent failed")
             if not path.is_file():
-                raise RuntimeError(f"{agent_type} did not write {output_file}")
+                raise RuntimeError(f"{agent_id} did not write {output_file}")
             return path.read_text(encoding="utf-8")
         finally:
             if reap_after:
@@ -241,7 +225,7 @@ class PhaseRunner:
         evaluator_ref = rt.supervisor.evaluator_ref
         if evaluator_ref is None:
             raise RuntimeError("VALIDATE requires a frozen evaluator")
-        final_evaluator_ref = getattr(rt.supervisor, "final_evaluator_ref", None)
+        final_evaluator_ref = rt.supervisor.final_evaluator_ref
         if final_evaluator_ref is None:
             # Legacy projects do not have a separate final evaluator yet. Keep
             # working but make the limitation explicit instead of silently

@@ -688,9 +688,9 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     )
 
     async def fake_handoff(
-        self, agent_id, agent_type, workspace, output_file, content, *, reap_after=False
+        self, agent_id, workspace, output_file, content, *, reap_after=False
     ):
-        del agent_id, agent_type, content, reap_after
+        del agent_id, content, reap_after
         Path(workspace).mkdir(parents=True, exist_ok=True)
         (Path(workspace) / output_file).write_text("stub\n", encoding="utf-8")
 

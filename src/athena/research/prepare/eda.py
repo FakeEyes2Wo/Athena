@@ -133,8 +133,7 @@ async def _collect_reports(
     _register_eda_agent(runtime, workspace)
     await handoff_agent(
         agent_id=PREPARE_EDA_AGENT_ID,
-        agent_type=PREPARE_EDA_AGENT_TYPE,
-        workspace=str(workspace),
+        workspace=workspace,
         output_file="EDA_TODO.md",
         content=task,
     )
@@ -163,8 +162,7 @@ async def _aggregate_reports(
     # Build the stable index and handoff consumed by baseline ideation.
     await handoff_agent(
         agent_id=PREPARE_EDA_AGENT_ID,
-        agent_type=PREPARE_EDA_AGENT_TYPE,
-        workspace=str(workspace),
+        workspace=workspace,
         output_file="EDA_INDEX.md",
         content=(
             "Finalize EDA: read all EDA_REPORT_*.md and write "
