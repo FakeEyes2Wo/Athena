@@ -255,7 +255,6 @@ class GpuPool:
         host = state.host
         scratch = PurePosixPath(host.scratch)
         remote_workspace = str(scratch / "leases" / plan_id / "workspace")
-        remote_data_root = str(scratch / "data")
 
         channel = RemoteChannel(self._transport_factory(host))
         await channel.open()
@@ -263,12 +262,9 @@ class GpuPool:
             host,
             channel=channel,
             remote_workspace=remote_workspace,
-            remote_data_root=remote_data_root,
             gpu_ids=gpu_ids,
             store=self._store,
         )
-        inner.bind_local_root(local_workspace)
-        await inner.prepare_remote()
         mirror = WorkspaceMirror(
             channel, local_root=local_workspace, remote_root=remote_workspace
         )

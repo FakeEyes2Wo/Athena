@@ -91,9 +91,9 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
             host,
             channel=channel,
             remote_workspace=str(scratch / "leases" / "<plan>" / "workspace"),
-            remote_data_root=str(scratch / "data" / "<dataset>"),
             gpu_ids=gpu_ids,
         )
+        backend.set_data_root(str(scratch / "data" / "<dataset>"))
         if not facts.get("python"):
             shortfall = "no python on the host"
         elif not facts.get("gpus"):

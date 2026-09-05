@@ -131,28 +131,20 @@ class SshBackend:
         *,
         channel: RemoteChannel,
         remote_workspace: str,
-        remote_data_root: str | None = None,
         gpu_ids: tuple[int, ...] = (),
         store: ArtifactStore | None = None,
     ) -> None:
         self._host = host
         self._channel = channel
         self._workspace = PurePosixPath(remote_workspace)
-        self._data_root = remote_data_root
+        self._data_root: str | None = None
         self._gpu_ids = gpu_ids
         self._store = store
-        # 本地工作区根，由 bind_local_root 设定；用来把 workdir 折算成远端路径。
-        self._local_workspace = Path.cwd()
 
     @property
     def name(self) -> str:
         """主机名——它要进实验证据的 ``placement`` 块。"""
         return self._host.name
-
-    @property
-    def facts(self) -> dict[str, Any]:
-        """远端握手时报上来的事实（os/shell/python/PATH/现成包/GPU 列表）。"""
-        return dict(self._channel.ready)
 
     @property
     def remote_workspace(self) -> str:
@@ -221,14 +213,6 @@ class SshBackend:
         """远端没有 Athena 管的环境——解释器是现成的（见 ``_environment_lines``）。"""
         return None
 
-    async def prepare_remote(self) -> None:
-        """在远端建好工作区。"""
-        await self._channel.request("mkdir", path=str(self._workspace))
-
-    def remote_path(self) -> str:
-        """远端子进程的 PATH——就是远端自己那一份。"""
-        return str(self._channel.ready.get("path") or "")
-
     def build_env(self) -> dict[str, str]:
         """远端子进程的环境。"""
         env = {
@@ -236,7 +220,7 @@ class SshBackend:
             for key, value in os.environ.items()
             if key in _FORWARDED_HOST_VARS
         }
-        env["PATH"] = self.remote_path()
+        env["PATH"] = str(self._channel.ready.get("path") or "")
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         if self._data_root is not None:
@@ -258,9 +242,14 @@ class SshBackend:
                 "Run platform-split projects with --compute local, or stage the "
                 "split under the remote data root first."
             )
-        cwd = self._remote_cwd(
+        workdir = (
             Path(request.workdir) if request.workdir is not None else workspace_root
         )
+        try:
+            relative = workdir.resolve().relative_to(Path(workspace_root).resolve())
+            cwd = str(self._workspace / PurePosixPath(relative.as_posix()))
+        except (ValueError, OSError):
+            cwd = str(self._workspace)
         # Ensure the remote working directory exists before spawning; this also
         # makes a backend usable without an explicitly bound local root.
         await self._channel.request("mkdir", path=cwd)
@@ -346,17 +335,3 @@ class SshBackend:
     async def aclose(self) -> None:
         """关掉常驻通道。"""
         await self._channel.close()
-
-    def _remote_cwd(self, workdir: Path) -> str:
-        """把本地 workdir 折算成远端路径（工作区之外的一律落回工作区根）。"""
-        try:
-            relative = (
-                Path(workdir).resolve().relative_to(self._local_workspace.resolve())
-            )
-        except (ValueError, OSError):
-            return str(self._workspace)
-        return str(self._workspace / PurePosixPath(relative.as_posix()))
-
-    def bind_local_root(self, local_root: Path) -> None:
-        """记住本地工作区根，用于把 workdir 折算成远端路径。"""
-        self._local_workspace = Path(local_root)

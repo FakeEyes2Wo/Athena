@@ -60,6 +60,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review execution configuration and merge monitoring contracts into their owner.
 - [x] Simplify the GPU-pool lifecycle and remove redundant lease/preflight surface.
 - [x] Review compute diagnostics and derive redundant status fields.
+- [x] Simplify the SSH backend construction and workspace lifecycle.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -236,6 +237,14 @@ Read `check.py` and its complete unit suite, then traced the check/result/printi
 Remove the unread `ScratchUsage.exists` field, reducing that record from five fields to four. Replace the stored `HostCheck.ok` boolean with a property derived from its authoritative error string, reducing retained host state from seven fields to six and removing the corresponding constructor argument at every result path. Preserve raw probe facts, runtime text, GPU details, scratch entries, and dataset fit because each is printed or asserted by the diagnostic contract.
 
 The same 18 compute-check/configuration tests passed before and after the change. Python compilation, Black, `git diff --check`, and field-construction searches passed; pytest reported one existing cache-permission warning. Closing the compute-check row advances reviewed coverage to 220/602. Whole-repository acceptance remains pending.
+
+## SSH backend review
+
+Read `remote/ssh.py` and its complete unit suite, then traced host configuration, transport startup, backend construction, workspace mirroring, dataset staging, diagnostics, execution, output persistence, and cleanup through the pool, compute check, runtime protocol, and remote-experiment integration. Retain `SshHost`, `SshTransport`, and `SshBackend` as the configuration, byte-transport, and execution-policy boundaries; combining them would mix immutable host policy with per-connection process state and per-lease execution state.
+
+Make each `run(workspace_root=...)` call the sole authority for local-to-remote cwd translation, removing the duplicate `_local_workspace` attribute plus `bind_local_root` and `_remote_cwd`. Remove the `remote_data_root` constructor parameter; the existing `set_data_root` now exclusively records the content-addressed path after staging. Delete the redundant `prepare_remote` step because both mirror push and direct execution create their target directories. Inline the single-use remote PATH projection and remove the test-only `facts` property. The backend constructor falls from six parameters to five, retained instance state falls from seven attributes to six, and four public/private helper methods disappear.
+
+The same 29 SSH/backend/environment tests passed before and after the change. The broader SSH, command-request, pool, dataset, compute-check, and remote-experiment selection passed 71 tests. Python compilation, Black, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. Closing the SSH row advances reviewed coverage to 221/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -708,7 +717,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/remote/dataset.py` | 188 | Reviewed; four-field report, mandatory verification, private staging helpers |
 | `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
 | `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
-| `src/athena/execution/remote/ssh.py` | 362 | Pending |
+| `src/athena/execution/remote/ssh.py` | 362 | Reviewed; five-parameter backend construction and per-run cwd ownership |
 | `src/athena/execution/runtime.py` | 895 | Pending |
 | `src/athena/gui/__init__.py` | 9 | Pending |
 | `src/athena/gui/experiments.py` | 59 | Pending |

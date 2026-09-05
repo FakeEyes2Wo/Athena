@@ -41,10 +41,9 @@ async def backend(tmp_path):
         SshHost(name="gpu-01", alias="gpu01.lab"),
         channel=channel,
         remote_workspace=workspace.as_posix(),
-        remote_data_root=data.as_posix(),
         gpu_ids=(2, 3),
     )
-    backend.bind_local_root(workspace)
+    backend.set_data_root(data.as_posix())
     try:
         yield backend
     finally:
@@ -148,7 +147,7 @@ def test_the_runtime_block_says_the_interpreter_is_fixed(backend) -> None:
     机器就没有 uv，而那个变量指向的还是一个我们凭空建的空目录。
     """
     backend._channel.ready = {
-        **backend.facts,
+        **backend.channel.ready,
         "packages": {"torch": "2.5.1+cu124", "numpy": "2.1.3"},
     }
     summary = backend.describe(Path("/ignored"))
@@ -332,7 +331,6 @@ async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
         remote_workspace=workspace.as_posix(),
         store=store,
     )
-    backend.bind_local_root(workspace)
 
     try:
         result = await backend.run(
