@@ -84,7 +84,8 @@ Create all artifacts needed for a trusted baseline:
 Install every third-party dependency (numpy, pandas, scikit-learn, ...) into
 the shared environment root, not into a workspace-local venv. The deterministic
 runner resolves a bare `python` manifest command only through
-`$ATHENA_ENV_ROOT/.venv`, so run `uv add --project "$ATHENA_ENV_ROOT" <package>`
+the environment root's `.venv`, so run the `uv add --project ... <package>` command exactly as the Runtime
+block spells it (the env-var syntax there already matches this shell)
 for each dependency and then `uv sync` before submitting. Declare the manifest
 `commands` with the bare executable `"python"` (for example
 `["python", "solution/train_model.py"]`); never hardcode a nested venv or
@@ -108,7 +109,7 @@ re-exploring the whole workspace. Record at minimum:
   or OpenAlex work/citation evidence, and training strategy from the three baseline
   artifacts; include the same facts in the Markdown report.
 - **How to run the baseline**: the exact `experiment.json` `commands` and how
-  dependencies resolve (`$ATHENA_ENV_ROOT`).
+  dependencies resolve (the environment root named in the Runtime block).
 - **How to evaluate**: the frozen evaluator entrypoint and its run command
   (read from the evaluator contract context, not from this workspace).
 - **Key files**: `experiment.json`, baseline source directory, the

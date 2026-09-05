@@ -178,7 +178,9 @@ Create inside `evaluate/`:
   readable for checkpoint reuse, but all newly generated bundles use the full
   declaration above.
 - `eval_metrics.py`, the entrypoint. It runs with `evaluate/` as its working
-  directory after the predictions directory is materialized next to it. It must
+  directory after the `predictions/` directory is materialized inside it.
+  Resolve predictions relative to your own directory — `./predictions/`, or
+  `Path(__file__).resolve().parent / "predictions"` — never one level up. It must
   read the ground-truth labels (in whatever format the task uses) and the
   `predictions/` directory according to `metric.json`, compute the primary
   metric, and print exactly one JSON line to stdout (nothing else):
@@ -219,7 +221,8 @@ Create inside `evaluate/`:
   ```
 
 Install every third-party dependency into the shared environment root, not into
-a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
+a workspace-local venv: run the `uv add --project ... <package>` command exactly as the Runtime
+block spells it for
 each dependency and then `uv sync`. Keep `evaluate.py` dependency-light and
 deterministic.
 

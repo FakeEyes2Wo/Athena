@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+from athena.agents.prompt_agent import load_prompt
 from athena.core.artifact_store import LocalArtifactStore
 from athena.research.script_runner import (
     BundleMetadata,
@@ -250,6 +251,72 @@ def test_a_failed_command_carries_its_stderr_into_the_message() -> None:
     assert "4800 prediction ids not in labels" in str(caught.value)
     # 类型不变，既有的 SubprocessError 捕获点照常生效
     assert isinstance(caught.value, subprocess.CalledProcessError)
+
+
+@pytest.mark.asyncio
+async def test_run_dir_materializes_predictions_inside_the_evaluator_root(
+    tmp_path, monkeypatch
+) -> None:
+    """预测目录落在 evaluator 根【内部】，而它同时就是入口脚本的 cwd。"""
+    evaluator = tmp_path / "evaluate"
+    evaluator.mkdir()
+    (evaluator / "evaluate.py").write_text("", encoding="utf-8")
+    (evaluator / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+    seen: dict[str, bool] = {}
+
+    def run_evaluator(_cmd, *, cwd):
+        seen["inside"] = (cwd / "predictions" / "p.csv").is_file()
+        seen["beside"] = (cwd.parent / "predictions" / "p.csv").is_file()
+        return json.dumps({"primary": 1.0})
+
+    monkeypatch.setattr("athena.research.script_runner._run_cmd_capture", run_evaluator)
+    runner = DataScriptRunner(
+        store=LocalArtifactStore(tmp_path / "artifacts"), workdir=tmp_path / "runs"
+    )
+
+    await runner.run_dir(
+        evaluator,
+        {},
+        extra_files={"predictions/p.csv": b"id,pred\n1,0\n"},
+        output_schema={"primary": None},
+    )
+
+    assert seen == {"inside": True, "beside": False}
+
+
+def test_evaluator_prompt_does_not_send_the_entrypoint_one_level_up() -> None:
+    """提示词必须与上面那条落点一致，否则 Agent 会照着错的契约找文件。
+
+    原文写的是预测目录 materialize 在 evaluate/ 的 "next to it"（旁边）。
+    2026-09-03 的 TESS 轮里评估器严格照做——``base_dir.parent / "predictions"``
+    ——于是什么也找不到、静默 ``sys.exit(1)``，连拒 10 次耗尽轮次预算。
+    """
+    prompt = load_prompt("evaluator")
+
+    assert "next to it" not in prompt
+    assert "predictions/` directory is materialized inside it" in prompt
+
+
+def test_stderr_detail_keeps_the_tail_when_a_tool_floods_the_head() -> None:
+    """噪音在前、错误在后时，反馈必须保住错误那一端。
+
+    ``uv run`` 先往 stderr 写进度：VIRTUAL_ENV 不匹配警告、Using CPython、
+    Creating virtual environment、hardlink 回退警告、Installed N packages。
+    实测这段前缀就有 500-800 字符，真正的 traceback 排在它后面。只取头部时
+    Agent 收到的反馈正好停在 "Installed"，一个字的错误也看不到——2026-09-03
+    的 TESS 轮里评估器因此连拒 10 次，每次都在盲改，直到轮次预算耗尽。
+    """
+    from athena.research.script_runner import ScriptCommandError
+
+    noise = "warning: Failed to hardlink files; falling back to full copy. " * 12
+    stderr = noise + "ValueError: 4800 prediction ids not in labels"
+    assert len(noise) > 600
+
+    message = str(ScriptCommandError(1, ["uv", "run", "x.py"], "", stderr))
+
+    assert "4800 prediction ids not in labels" in message
 
 
 def test_a_successful_command_still_returns_its_output() -> None:

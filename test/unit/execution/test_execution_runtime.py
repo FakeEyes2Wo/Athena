@@ -553,3 +553,39 @@ async def test_runtime_does_not_persist_success(tmp_path: Path) -> None:
     )
     assert result.ok
     assert result.output_ref is None
+
+
+def test_runtime_summary_states_powershell_conventions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PowerShell 下必须点明约定，否则 Agent 会写 POSIX 命令白烧轮次。
+
+    2026-09-03 的 TESS 轮：baseline Agent 在 pwsh 上写 `ls -la`、`%VAR%`、
+    `$VAR`，17 次工具调用换来 "parameter cannot be found" / "NOT SET" /
+    "is not recognized"。它最终训出了 PR-AUC 0.7973 的可用基线，却在提交前
+    耗尽 PREPARE 轮次预算。摘要里只有 shell 的文件名，没有任何约定说明。
+    """
+    monkeypatch.setattr(
+        "athena.execution.runtime.EnvironmentManager.shell_parts",
+        lambda self: (r"C:\Program Files\PowerShell\pwsh.exe", ["-Command"]),
+    )
+
+    summary = _runtime(tmp_path).runtime_summary(tmp_path)
+
+    assert "$env:" in summary
+    assert "POSIX" in summary
+
+
+def test_agent_prompts_do_not_hardcode_posix_env_syntax() -> None:
+    """提示词不能写死 `$ATHENA_ENV_ROOT`——PowerShell 下它展开成空串。
+
+    `runtime_summary` 用 `env_ref()` 渲染出正确形式（pwsh 上是
+    `$env:ATHENA_ENV_ROOT`），静态提示词却硬编码 POSIX 形式，两者矛盾。
+    Agent 信了提示词，`uv add --project "" lightgbm` 报
+    "a value is required for '--project <PROJECT>'"。
+    """
+    from athena.agents.prompt_agent import load_prompt
+
+    for name in ("prepare", "evaluator"):
+        prompt = load_prompt(name)
+        assert "$ATHENA_ENV_ROOT" not in prompt, name
