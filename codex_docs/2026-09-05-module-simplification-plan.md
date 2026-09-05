@@ -343,6 +343,14 @@ Remove lifecycle `start` from `ConfirmationDependencies`: commit deliberately do
 
 The complete clarification selection passed 113 tests and the GUI unit/handler selection passed 59. Python compilation, Black, blocking Ruff, code-style hard rules, removed-function/parameter searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the confirmation row advances reviewed baseline coverage to 241/602. Whole-repository acceptance remains pending.
 
+## Confirmed task context review
+
+Read `context.py` completely and traced every result field, provider dependency, metadata fallback, renderer, export, and loader call through PREPARE, Ideator, Plan, VALIDATE, runtime recovery, and tests. Production consumers use only the verified model-visible string; the six-field `ConfirmedTaskContext` record's five metadata fields were asserted only by its own tests, while `task_context_block` had no callers. The state, artifact store, and named handoff path remain necessary to enforce the three-way integrity gate.
+
+Delete the result class, its render method, the uncalled public wrapper, and state/file metadata projection chain. Remove the unreferenced `_athena` root fallback and unavailable state/store guards; the runtime contract supplies all three dependencies. Bind the derived handoff path once and make `load()` return the final prompt block directly. Migrate PlanRuntime and tests to the string interface. Preserve the gated short-circuit before inspecting state so deliberately minimal gated runtimes still fail with the canonical handoff error. Production code falls by 135 net lines without compatibility aliases.
+
+The context and phase-preflight focus passed 13 tests, and the broad context/Supervisor/rolling-search/human-plan selection passed 394 tests. Python compilation, Black, blocking Ruff, code-style hard rules, removed-structure searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the context row advances reviewed baseline coverage to 242/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -838,7 +846,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/__init__.py` | 18 | Reviewed; retain one lazy runtime export to isolate submodule imports |
 | `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
 | `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; seven-field transaction ports and runtime-owned lifecycle start |
-| `src/athena/research/clarification/context.py` | 230 | Pending |
+| `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and metadata fallbacks |
 | `src/athena/research/clarification/controller.py` | 323 | Pending |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
 | `src/athena/research/clarification/generator.py` | 372 | Pending |

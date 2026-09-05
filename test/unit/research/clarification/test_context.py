@@ -36,7 +36,7 @@ def _state(tmp_path: Path, *, draft: bool = True):
 
 
 @pytest.mark.asyncio
-async def test_provider_loads_confirmed_context_with_metadata(tmp_path: Path) -> None:
+async def test_provider_loads_confirmed_context(tmp_path: Path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     handoff = (
         "# TASK_CLARIFICATION\n\n"
@@ -55,13 +55,8 @@ async def test_provider_loads_confirmed_context_with_metadata(tmp_path: Path) ->
         store=store,
         state_root=tmp_path,
     )
-    context = await provider.load()
+    block = await provider.load()
 
-    assert context.draft_id == "draft-1"
-    assert context.revision == 4
-    assert context.original_task == "predict churn"
-    assert context.handoff_ref == ref
-    block = context.render_prompt_block()
     assert "Confirmed task contract (authoritative)" in block
     assert "--- end of confirmed task contract ---" in block
     assert handoff in block
@@ -83,10 +78,9 @@ async def test_from_runtime_uses_stable_config_paths(tmp_path: Path) -> None:
         store=store,
     )
 
-    context = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
+    block = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
 
-    assert context.handoff_ref == ref
-    assert context.original_task == "predict churn"
+    assert handoff in block
 
 
 @pytest.mark.asyncio
@@ -139,7 +133,9 @@ async def test_provider_rejects_corrupt_named_handoff(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_checkpoint_without_draft_metadata_loads(tmp_path: Path) -> None:
+async def test_confirmed_context_does_not_require_draft_metadata(
+    tmp_path: Path,
+) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     handoff = "# legacy handoff"
     ref = await store.put_text(handoff)
@@ -152,11 +148,9 @@ async def test_legacy_checkpoint_without_draft_metadata_loads(tmp_path: Path) ->
     provider = ConfirmedTaskContextProvider(
         state=state, store=store, state_root=tmp_path
     )
-    context = await provider.load()
+    block = await provider.load()
 
-    assert context.draft_id is None
-    assert context.revision is None
-    assert context.handoff_text == handoff
+    assert handoff in block
 
 
 @pytest.mark.asyncio
@@ -196,7 +190,7 @@ async def test_recovery_materializes_named_handoff_for_legacy_checkpoint(
     assert not handoff_path.exists()
 
     await recover_confirmation(runtime)
-    context = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
+    block = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
 
     assert handoff_path.read_text(encoding="utf-8") == handoff
-    assert context.handoff_text == handoff
+    assert handoff in block

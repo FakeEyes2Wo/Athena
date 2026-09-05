@@ -128,13 +128,11 @@ class PlanRuntime:
 
     async def _confirmed_task_context(self, state: ResearchState | None = None) -> str:
         """Load the authoritative task snapshot for a new or legacy Plan."""
-        return (
-            await ConfirmedTaskContextProvider(
-                state or self._state,
-                self._deps.runtime.store,
-                self._deps.paths.state_path.parent,
-            ).load()
-        ).render_prompt_block()
+        return await ConfirmedTaskContextProvider(
+            state or self._state,
+            self._deps.runtime.store,
+            self._deps.paths.state_path.parent,
+        ).load()
 
     async def run_turn(self, plan_id: str) -> CompletedPlanTurn:
         """Run one Plan Agent turn and persist failures for the next prompt."""
