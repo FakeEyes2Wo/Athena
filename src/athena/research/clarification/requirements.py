@@ -1,44 +1,28 @@
 """Pure task-contract requirements and unresolved-field rules."""
 
-import re
 from collections.abc import Iterable
 
 from athena.research.clarification.models import DraftUnderstanding, UnresolvedItem
 
-_CRITICAL_FIELDS = {
-    "classification": (
-        "dataset",
-        "target",
-        "primary_metric",
-        "direction",
-        "evaluation_plan",
-    ),
-    "regression": (
-        "dataset",
-        "target",
-        "primary_metric",
-        "direction",
-        "evaluation_plan",
-    ),
-    "ranking": (
-        "dataset",
-        "target",
-        "primary_metric",
-        "direction",
-        "evaluation_plan",
-    ),
-    "other": ("dataset", "primary_metric", "direction", "evaluation_plan"),
-}
+_PREDICTIVE_TASKS = {"classification", "regression", "ranking"}
+_PREDICTIVE_FIELDS = (
+    "dataset",
+    "target",
+    "primary_metric",
+    "direction",
+    "evaluation_plan",
+)
+_OTHER_FIELDS = ("dataset", "primary_metric", "direction", "evaluation_plan")
 
 
 def normalize_task(task: str) -> str:
     """Return the stable identity form used by start/resume conflict checks."""
-    return " ".join(re.split(r"\s+", task.strip())).casefold()
+    return " ".join(task.split()).casefold()
 
 
 def required_critical_fields(task_type: str) -> tuple[str, ...]:
     """Return fields that must be known or explicitly acknowledged."""
-    return _CRITICAL_FIELDS.get(task_type, _CRITICAL_FIELDS["other"])
+    return _PREDICTIVE_FIELDS if task_type in _PREDICTIVE_TASKS else _OTHER_FIELDS
 
 
 def initial_task_understanding(

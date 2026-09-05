@@ -389,6 +389,14 @@ Merge `ConfirmationJournalStore` into `ClarificationStore` without a compatibili
 
 The transaction baseline passed 17 tests. Final verification across the complete clarification unit directory plus confirmation-gate and continue/resume integrations passed 111 tests. Targeted pre-commit hooks, Python compilation, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the persistence row advances reviewed baseline coverage to 247/602. Whole-repository acceptance remains pending.
 
+## Clarification requirement-policy review
+
+Read `requirements.py` completely and traced task identity, initial understanding, critical-field derivation, unresolved canonicalization, and resolved-field removal through generator selection, controller conflict checks, runtime auto-confirm, state transitions, and tests. Retain the module as the shared pure policy boundary; merging it into the state machine would force runtime auto-confirm to depend on unrelated transition operations.
+
+Replace the four-entry critical-field mapping with one predictive-task set and two shared field tuples, eliminating three identical classification/regression/ranking declarations. Replace regex-based whitespace normalization with `str.split`, which already collapses and trims all whitespace, and delete the `re` dependency. Production code falls by 16 net lines. Add parameterized coverage for all predictive types, other/unknown fallback, order endpoints, and mixed whitespace normalization.
+
+The requirements/models/controller/runtime-RPC baseline passed 38 tests and final verification passed 44. Targeted pre-commit hooks, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the requirements row advances reviewed baseline coverage to 248/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -892,7 +900,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/llm_generator.py` | 422 | Reviewed; delete four one-call wrappers and give the reporting tool sole ownership of deduplication state |
 | `src/athena/research/clarification/models.py` | 144 | Reviewed; retain seven distinct durable schemas and active cross-field invariants |
 | `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
-| `src/athena/research/clarification/requirements.py` | 96 | Pending |
+| `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
 | `src/athena/research/clarification/state.py` | 231 | Pending |
 | `src/athena/research/config.py` | 83 | Pending |
 | `src/athena/research/contracts.py` | 88 | Pending |
