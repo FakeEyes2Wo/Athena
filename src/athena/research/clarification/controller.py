@@ -13,7 +13,7 @@ from athena.research.clarification.errors import (
 )
 from athena.research.clarification.generator import (
     ClarificationFinalStep,
-    ClarificationGenerator,
+    ClarificationGeneratorInput,
     ClarificationQuestionStep,
     ClarificationTurnResult,
     PublicProgressSink,
@@ -73,7 +73,7 @@ class ClarificationController:
         self,
         store: ClarificationStore,
         broker: HumanBroker,
-        generator: ClarificationGenerator,
+        generator: ClarificationGeneratorInput,
         options: ClarificationOptions | None = None,
     ) -> None:
         """Bind the three workflow ports and stable identity policy."""

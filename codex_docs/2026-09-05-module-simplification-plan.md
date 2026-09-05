@@ -359,6 +359,14 @@ Replace the private three-field option wrapper plus separate progress attribute 
 
 Controller, runtime-RPC, continue/resume, and confirmation-gate verification passed 55 tests. Python compilation, Black, blocking Ruff, code-style hard rules, constructor/export/sync-method searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the controller row advances reviewed baseline coverage to 243/602. Whole-repository acceptance remains pending.
 
+## Clarification generator contract review
+
+Read `generator.py` completely and traced its models, protocols, deterministic policy, normalization helpers, and progress publication through the controller, LLM generator, runtime bootstrap, state transitions, and direct tests. Retain synchronous and asynchronous `next_step` implementations and function-style dependency injection because both are active controller inputs. Retain the strict model envelope and public-summary normalization because they govern the LLM boundary and public progress channel.
+
+Delete the uncalled production `generate_step` wrapper and the dictionary-result compatibility paths, which existed only in direct tests. Replace the internal Pydantic `ClarificationTurnResult` with a frozen dataclass because it is constructed only from already-validated typed results and is never serialized. Replace the previous `Any` input with an explicit union covering protocol objects and generator callables. The controller annotation now reflects its real injection surface; malformed typed results still fail at the generator boundary. Production code falls by 17 net lines without compatibility aliases.
+
+The generator/controller baseline passed 38 tests. Final generator, controller, LLM-generator, and runtime-RPC verification passed 61 tests. Targeted pre-commit hooks (including Black and Athena code-style rules), Python compilation, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the generator row advances reviewed baseline coverage to 244/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -857,7 +865,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and metadata fallbacks |
 | `src/athena/research/clarification/controller.py` | 323 | Reviewed; four-parameter construction, four attributes and three synchronous pure operations |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
-| `src/athena/research/clarification/generator.py` | 372 | Pending |
+| `src/athena/research/clarification/generator.py` | 372 | Reviewed; typed generator results replace dictionary compatibility and the internal result is a frozen dataclass |
 | `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |
 | `src/athena/research/clarification/llm_generator.py` | 422 | Pending |
 | `src/athena/research/clarification/models.py` | 144 | Pending |

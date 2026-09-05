@@ -12,7 +12,6 @@ from athena.research.clarification.generator import (
     ClarificationQuestionStep,
     DeterministicClarificationGenerator,
     PublicProgress,
-    generate_step,
     generate_turn,
     publish_public_progress,
 )
@@ -25,7 +24,7 @@ async def test_deterministic_generator_asks_first_missing_requirement() -> None:
         "predict churn", "s-1", "draft-1", datetime(2026, 9, 1, tzinfo=UTC)
     )
 
-    step = await generate_step(DeterministicClarificationGenerator(), draft)
+    step = DeterministicClarificationGenerator().next_step(draft)
 
     assert isinstance(step, ClarificationQuestionStep)
     assert step.field == "dataset"
@@ -96,7 +95,7 @@ def test_clarification_model_output_accepts_both_step_variants_and_is_strict() -
 
 
 @pytest.mark.asyncio
-async def test_generate_turn_wraps_raw_step_and_preserves_public_update() -> None:
+async def test_generate_turn_normalizes_generator_outputs() -> None:
     draft = new_draft(
         "predict churn", "s-1", "draft-1", datetime(2026, 9, 1, tzinfo=UTC)
     )
@@ -108,49 +107,14 @@ async def test_generate_turn_wraps_raw_step_and_preserves_public_update() -> Non
         public_update=PublicProgress(stage="question", summary="Need dataset"),
         step=deterministic.step,
     )
-    wrapped = await generate_turn(lambda _draft: output, draft)
+
+    class ModelGenerator:
+        def next_step(self, _draft):
+            return output
+
+    wrapped = await generate_turn(ModelGenerator(), draft)
     assert wrapped.public_update == output.public_update
     assert wrapped.step == output.step
-    assert await generate_step(lambda _draft: output, draft) == output.step
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "step",
-    [
-        {
-            "kind": "question",
-            "field": "dataset",
-            "prompt": "Which dataset?",
-            "choices": [
-                {"label": "Provided", "value": "provided"},
-                {"label": "Later", "value": "later"},
-            ],
-            "allow_custom": True,
-            "allow_skip": True,
-        },
-        {
-            "kind": "final",
-            "understanding": {"title": "Task", "task_type": "other"},
-            "unresolved": [],
-        },
-    ],
-)
-async def test_generate_turn_validates_dict_envelopes(
-    step: dict[str, object],
-) -> None:
-    draft = new_draft(
-        "predict churn", "s-1", "draft-1", datetime(2026, 9, 1, tzinfo=UTC)
-    )
-    result = await generate_turn(
-        lambda _draft: {
-            "public_update": {"stage": "synthesis", "summary": "safe"},
-            "step": step,
-        },
-        draft,
-    )
-    assert result.public_update == PublicProgress(stage="synthesis", summary="safe")
-    assert result.step.kind == step["kind"]
 
 
 @pytest.mark.asyncio

@@ -3,8 +3,9 @@
 import inspect
 import logging
 import unicodedata
-from collections.abc import Awaitable
-from typing import Annotated, Any, Literal, Protocol
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -101,16 +102,17 @@ class ClarificationModelOutput(BaseModel):
     step: ClarificationStep
 
 
-class ClarificationTurnResult(BaseModel):
+@dataclass(frozen=True)
+class ClarificationTurnResult:
     """Normalized result consumed by the clarification controller."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     step: ClarificationStep
     public_update: PublicProgress | None = None
 
 
 class PublicProgressSink(Protocol):
+    """Publish one sanitized clarification progress event."""
+
     async def __call__(
         self,
         *,
@@ -135,6 +137,17 @@ class ClarificationGenerator(Protocol):
     ):
         """Return the next policy decision for the current evidence."""
         ...
+
+
+ClarificationGeneratorInput = (
+    ClarificationGenerator
+    | Callable[
+        [ClarificationDraft],
+        Awaitable[ClarificationStep | ClarificationModelOutput]
+        | ClarificationStep
+        | ClarificationModelOutput,
+    ]
+)
 
 
 _QUESTIONS = {
@@ -279,50 +292,20 @@ def _directed_value(
     return values.pop() if len(values) == 1 else None
 
 
-async def generate_step(
-    generator: ClarificationGenerator | Any, draft: ClarificationDraft
-) -> ClarificationStep:
-    """Invoke and validate one generator step at the policy boundary."""
-    return (await generate_turn(generator, draft)).step
-
-
 async def generate_turn(
-    generator: ClarificationGenerator | Any, draft: ClarificationDraft
+    generator: ClarificationGeneratorInput, draft: ClarificationDraft
 ) -> ClarificationTurnResult:
-    """Invoke a generator and normalize legacy and model-envelope results."""
+    """Invoke a generator and normalize its typed result."""
     method = getattr(generator, "next_step", generator)
     result = method(draft)
     if inspect.isawaitable(result):
         result = await result
-    if isinstance(result, ClarificationTurnResult):
-        return result
     if isinstance(result, ClarificationModelOutput):
         return ClarificationTurnResult(
             step=result.step, public_update=result.public_update
         )
-    if isinstance(result, dict) and {
-        "public_update",
-        "step",
-    }.issubset(result):
-        output = ClarificationModelOutput.model_validate(result)
-        return ClarificationTurnResult(
-            step=output.step, public_update=output.public_update
-        )
     if isinstance(result, (ClarificationQuestionStep, ClarificationFinalStep)):
         return ClarificationTurnResult(step=result)
-    if isinstance(result, dict) and result.get("kind") == "question":
-        return ClarificationTurnResult(
-            step=ClarificationQuestionStep.model_validate(result)
-        )
-    if isinstance(result, dict) and result.get("kind") == "final":
-        return ClarificationTurnResult(
-            step=ClarificationFinalStep.model_validate(result)
-        )
-    if isinstance(result, dict):
-        # Validate unknown/malformed step kinds through the strict discriminated union.
-        ClarificationModelOutput.model_validate(
-            {"public_update": {"stage": "analysis", "summary": "safe"}, "step": result}
-        )
     raise TypeError(f"generator returned {type(result).__name__}")
 
 
@@ -355,6 +338,7 @@ async def publish_public_progress(
 __all__ = [
     "ClarificationFinalStep",
     "ClarificationGenerator",
+    "ClarificationGeneratorInput",
     "ClarificationModelOutput",
     "ClarificationQuestionStep",
     "ClarificationStep",
@@ -365,7 +349,6 @@ __all__ = [
     "ProgressStage",
     "PublicProgress",
     "PublicProgressSink",
-    "generate_step",
     "generate_turn",
     "normalize_public_summary",
     "publish_public_progress",
