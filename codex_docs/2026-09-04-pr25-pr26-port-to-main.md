@@ -58,17 +58,52 @@ PR #26（`fix/validate-repair-loop-feedback`）已合并，但 base 是 PR #25 �
 `test/unit`：2458 passed（见下一节的前置条件），`test/integration/research/test_validate_agent_contract.py`：14 passed。
 `test_experiment.py` 44 passed、`test_validation_plan.py` 46 passed，与两个 PR 声明的数字一致。
 
-## 阻断项：main 缺少 `athena/research/exp_docs.py`
+## 与 main 的合并（2026-09-05 复核）
 
-`origin/main` 的 `supervisor/phases.py:13` 与 `supervisor/settlement.py:10` 都 import
-`athena.research.exp_docs` 的 `task_metric_name`、`write_reports`、`write_stage_doc`，
-而这个模块**在本仓库的任何 ref 与任何历史提交里都不存在**——`git log --all
---diff-filter=A -- src/athena/research/exp_docs.py` 无结果。import 由合并提交
-`ae922b9` 带入。
+`origin/main` 此后又推进了 88 个提交，本节记录对当时那版 main 的复核结果。
 
-后果：任何 import 到 `athena.research.supervisor` 的测试模块都无法收集。在干净的
-`origin/db2555f` 上执行 `pytest test/unit` 得到 **54 个收集错误**。
+### 曾经的阻断项已经解除
 
-本分支不含该模块（它属于另一条未完成的功能，其契约无从推断，凭空补写有冲突风险）。
-上面的验证数字是在本地临时补一个 import 桩后取得的，桩没有提交。该模块补齐前，
-`main` 与本分支都跑不完整个测试套件。
+写这份文档时，`supervisor/phases.py` 与 `supervisor/settlement.py` 都 import
+`athena.research.exp_docs`，而该模块在任何 ref 与任何历史提交里都不存在（由合并提交
+`ae922b9` 带入 import 却没带文件），导致 54 个测试模块无法收集，本分支的验证只能靠
+一个本地 import 桩完成、桩未提交。
+
+main 已用 `research/experiment_documents/`（models / projector / store）取代它，
+`phases.py` 不再引用 `exp_docs`。**现在 `origin/main` 收集错误为 0**，本分支的验证
+不再需要任何桩。
+
+### 仍未解除的一项
+
+`BaselineAuthorityStore` 仍然只是 `prepare/authority.py` 里的一个 Protocol，全仓库
+没有生产实现（只有两个集成测试里的内存替身），`cli.py` 与 `athena_tui/entrypoint.py`
+都不传它。因此 `prepare_baseline_design` 里那句
+
+```python
+if authority is None:
+    raise BaselineAuthorityError("PREPARE requires an external baseline authority capability")
+```
+
+仍会在 PREPARE 第一步抛出——**基于检索的 baseline 门禁至今无法启用**。本分支不含该
+实现：它属于另一条未完成的功能，契约无从推断。
+
+### 试合并的结果
+
+在一个临时 worktree 里把本分支并进 `origin/main` 并跑 `test/unit`（用 `PYTHONPATH`
+指向该 worktree 的 `src`，否则可编辑安装会让测试跑到主仓库的源码上）：
+
+| | 失败 | 通过 | 收集错误 |
+|---|---|---|---|
+| `origin/main` 自身 | 19 | 2598 | 0 |
+| 合并后 | 20 | **2668** | 0 |
+
+净增 70 个通过用例。多出的那一条 `test_predictions_api.py::test_post_to_wrong_route_is_404`
+是不稳定用例：两棵树单独跑该文件都是 22 passed，而本分支从未触碰 `serving/`。
+
+首次试合并曾出现 **2 条真实回归**，都在 main 新增的 skip-validate 续跑用例上。根因是
+移植 PR26 的 SEARCH 前置门禁时把冻结评估器的判据映射到了 `state.evaluator_ref`，而
+权威记录在 SOTA 实验上（`fork.py` 正是从基线记录里读的）；续跑时该字段为空，门禁把
+合法续跑判成 `SEARCH/FAILED`。该判据同时是冗余的——有 SOTA 就必然有评估器。已改为
+只查 SOTA（提交 `d9096c9`），这也正是 2026-09-02 那次事故真正需要的判据。
+
+这个缺陷在旧 main 上无法暴露，因为那两条续跑测试是这 88 个提交里才有的。
