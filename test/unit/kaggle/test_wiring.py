@@ -4,7 +4,11 @@ from athena.agents.task_agents import register_general_agent, register_plan_agen
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.kaggle.auth import KaggleCredentials
-from athena.kaggle.wiring import AGENT_KAGGLE_TOOLS, build_kaggle_stack, build_kaggle_tools
+from athena.kaggle.tool import (
+    AGENT_KAGGLE_TOOLS,
+    build_kaggle_stack,
+    build_kaggle_tools,
+)
 
 EXPECTED_TOOLS = {
     "kaggle_list_competitions",

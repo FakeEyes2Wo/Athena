@@ -2,7 +2,7 @@
 
 from athena.kaggle.pipeline import run_kaggle
 from athena.kaggle.schemas import KaggleRunRequest
-from athena.kaggle.wiring import (
+from athena.kaggle.tool import (
     AGENT_KAGGLE_TOOLS,
     KaggleStack,
     build_kaggle_stack,

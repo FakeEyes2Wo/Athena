@@ -14,7 +14,7 @@ from athena.core.agent.tools.user_input import RequestUserInputTool
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolSpec
-from athena.kaggle.tool import KaggleGetCompetitionTool
+from athena.kaggle.tool import KAGGLE_GET_COMPETITION, KaggleTool
 
 SUPERVISOR_AGENT_ID = "supervisor"
 SUPERVISOR_AGENT_TYPE = "supervisor"
@@ -391,7 +391,7 @@ def supervisor_tool_registry(
     registry.register(RequestUserInputTool())
     # 供 Supervisor 在任务理解时查询竞赛主指标（LLM 决定，非程序决定）。
     if kaggle_stack is not None:
-        registry.register(KaggleGetCompetitionTool(kaggle_stack))
+        registry.register(KaggleTool(kaggle_stack, KAGGLE_GET_COMPETITION))
     return registry
 
 

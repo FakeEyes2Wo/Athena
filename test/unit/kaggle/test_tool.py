@@ -1,4 +1,4 @@
-"""KaggleRunTool 的单元测试：假客户端 + 真实 artifact 存储，验证取数内联。"""
+"""Kaggle 工具的单元测试：假客户端 + 真实 artifact 存储，验证取数内联。"""
 
 import asyncio
 from pathlib import Path
@@ -6,11 +6,12 @@ from pathlib import Path
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool_types import ToolContext
 from athena.kaggle.tool import (
-    KaggleGetDiscussionTool,
-    KaggleListDiscussionsTool,
-    KaggleRunTool,
+    KAGGLE_GET_DISCUSSION,
+    KAGGLE_LIST_DISCUSSIONS,
+    KAGGLE_RUN,
+    KaggleStack,
+    KaggleTool,
 )
-from athena.kaggle.wiring import KaggleStack
 
 
 class FakeClient:
@@ -56,7 +57,7 @@ def _stack(tmp_path) -> KaggleStack:
 
 
 async def test_kaggle_run_fetches_data_and_notebooks(tmp_path) -> None:
-    tool = KaggleRunTool(_stack(tmp_path))
+    tool = KaggleTool(_stack(tmp_path), KAGGLE_RUN)
     ctx = ToolContext("kaggle_run", "c1", _noop_emit, asyncio.Event())
     result = await tool.execute({"competition": "titanic"}, ctx)
     assert result.success
@@ -69,7 +70,7 @@ async def test_kaggle_run_fetches_data_and_notebooks(tmp_path) -> None:
 async def test_kaggle_run_skips_download_when_disabled(tmp_path) -> None:
     stack = _stack(tmp_path)
     stack.download = False
-    tool = KaggleRunTool(stack)
+    tool = KaggleTool(stack, KAGGLE_RUN)
     ctx = ToolContext("kaggle_run", "c2", _noop_emit, asyncio.Event())
     result = await tool.execute({"competition": "titanic"}, ctx)
     assert result.success
@@ -103,7 +104,7 @@ async def test_kaggle_list_discussions_returns_threads() -> None:
         artifacts=LocalArtifactStore("."),
         download_root=Path("."),
     )
-    tool = KaggleListDiscussionsTool(stack)
+    tool = KaggleTool(stack, KAGGLE_LIST_DISCUSSIONS)
     ctx = ToolContext("kaggle_list_discussions", "d1", _noop_emit, asyncio.Event())
     result = await tool.execute({"competition": "x"}, ctx)
     assert result.success
@@ -118,7 +119,7 @@ async def test_kaggle_get_discussion_returns_source() -> None:
         artifacts=LocalArtifactStore("."),
         download_root=Path("."),
     )
-    tool = KaggleGetDiscussionTool(stack)
+    tool = KaggleTool(stack, KAGGLE_GET_DISCUSSION)
     ctx = ToolContext("kaggle_get_discussion", "d2", _noop_emit, asyncio.Event())
     result = await tool.execute(
         {"discussion": "https://www.kaggle.com/competitions/x/discussion/12345"}, ctx

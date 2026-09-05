@@ -14,7 +14,7 @@ from athena.kaggle.schemas import (
 )
 
 if TYPE_CHECKING:
-    from athena.kaggle.wiring import KaggleStack
+    from athena.kaggle.tool import KaggleStack
 
 
 async def run_kaggle(

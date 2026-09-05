@@ -18,13 +18,13 @@ from athena.agents.kaggle_handoff_agent import (
 )
 from athena.agents.task_agents import GeneralResult, register_general_agent
 from athena.core.tool import ToolRegistry
-from athena.kaggle.wiring import kaggle_slug_from_task
+from athena.kaggle.tool import kaggle_slug_from_task
+from athena.research.contracts import GeneralTurnOutcome
+from athena.research.supervisor.experiment import load_agent_result
 from athena.research.turns.common import (
     MAX_KAGGLE_HANDOFF_CHARS,
     wait_run_with_heartbeat,
 )
-from athena.research.contracts import GeneralTurnOutcome
-from athena.research.supervisor.experiment import load_agent_result
 from athena.retrieval.web_search import build_web_tools
 
 

@@ -319,6 +319,14 @@ Delete the class and inline its connect, optional download, notebook search, tim
 
 The complete Kaggle selection passed 37 tests before and 40 after the change. Three new parameterized cases prove the documented stage degradation contracts: connection failure returns an empty report, while download and notebook-search failures return partial complete reports. The Kaggle CLI help path, Python compilation, Black, blocking Ruff, code-style hard rules, removed-class/old-signature searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the pipeline row advances reviewed baseline coverage to 234/602. The tool and wiring rows remain Pending for their own complete reviews.
 
+## Kaggle tool and composition review
+
+Read `tool.py` and `wiring.py` completely and traced all nine tool classes, specifications, handlers, names, stack fields, construction options, and registrations through the package facade, Supervisor, runtime bootstrap, general turn, CLI, and direct tests. Every `KaggleStack` field and builder option has a live configuration or execution consumer. Retain that four-field resource aggregate and the nine distinct LLM operations, but not nine classes or a separate factory module.
+
+Replace the nine concrete `StackTool` subclasses with one two-attribute `KaggleTool` binding a shared stack to a name. Move operation behavior into private two-parameter handlers and derive immutable specifications plus dispatch from one declarative registry. Consolidate the shared result limit, three identical evidence-tool tuples, and serial-operation policy. Merge the composition root into `tool.py`, delete `wiring.py` rather than leaving a compatibility shell, migrate all consumers, and remove one explicit default builder argument. The production change deletes one file and eight classes while falling by six net lines.
+
+All nine old and new `ToolSpec` objects compare equal, proving descriptions, input schemas, names, and concurrency flags are unchanged. The complete Kaggle/Supervisor selection passed 44 tests and the TUI/autonomous-research integration selection passed 14. Package construction exposed the same nine tools. Python compilation, Black, blocking Ruff, code-style hard rules, deleted-module/class/factory searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both rows advances reviewed baseline coverage to 236/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -805,8 +813,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/kaggle/client.py` | 418 | Reviewed; private JSON transport, one decoder and one-field API errors |
 | `src/athena/kaggle/pipeline.py` | 156 | Reviewed; delete one-shot five-attribute class and reduce runner to two parameters |
 | `src/athena/kaggle/schemas.py` | 63 | Reviewed; delete unconstructed discussion summary and retain live request/report models |
-| `src/athena/kaggle/tool.py` | 444 | Pending |
-| `src/athena/kaggle/wiring.py` | 124 | Pending |
+| `src/athena/kaggle/tool.py` | 444 | Reviewed; one declarative registry and one named tool replace nine concrete classes |
+| `src/athena/kaggle/wiring.py` | 124 | Reviewed; merged into tool composition root and deleted |
 | `src/athena/memory/__init__.py` | 13 | Reviewed; retain public exports |
 | `src/athena/memory/compaction.py` | 138 | Reviewed; retain checkpoint consumed by ThreadRuntime |
 | `src/athena/memory/context_manager.py` | 118 | Reviewed; retain token and rollback owner |

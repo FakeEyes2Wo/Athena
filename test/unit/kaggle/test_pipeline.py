@@ -7,7 +7,7 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.kaggle.pipeline import run_kaggle
 from athena.kaggle.schemas import KaggleRunRequest
-from athena.kaggle.wiring import KaggleStack
+from athena.kaggle.tool import KaggleStack
 
 
 class FakeKaggleClient:

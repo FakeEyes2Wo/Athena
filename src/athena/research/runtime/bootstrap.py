@@ -294,7 +294,6 @@ def register_supervisor(runtime: Any, provider: object) -> None:
     supervisor_kaggle = build_kaggle_stack(
         download_root=runtime.root,
         artifacts=runtime.store,
-        download=True,
     )
     ask_user_factory = (
         (lambda _thread, _turn: runtime.config.ask_user)
