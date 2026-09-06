@@ -3,7 +3,7 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-10
-Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `test/unit/`
+Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 
 ## 首读
 
@@ -21,6 +21,13 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [TESS 数据划分与评估口径](tess-workflow-and-evaluation.md) | current | PREPARE/SEARCH/FINAL 隔离、训练约束与指标定义 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
 | [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
+
+## 归档与专题
+
+- [`codex_docs/`](codex_docs/)：实现完成报告、验证记录和当前工作索引的归档副本。
+- [`diff_docs/`](diff_docs/)：机制差异与改进记录。
+- [`night_docs/`](night_docs/)：夜间巡检和架构记录。
+- [`dsh_docs/`](dsh_docs/)：DSH 专题历史资料，不属于 Athena 主运行路径。
 
 ## AutoResearch 设计（2026-08-15）
 

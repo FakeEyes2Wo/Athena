@@ -51,7 +51,7 @@ packages = ["src/athena", "src/athena_tui", "src/gui_gateway"]
 default-groups = ["dev"]
 
 [tool.pytest.ini_options]
-testpaths = ["test", "tests"]
+testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-m 'not slow'"

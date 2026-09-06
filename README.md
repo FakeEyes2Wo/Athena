@@ -115,7 +115,7 @@ TESS 的 `train/search/final` 数据隔离、阈值选择和指标定义见
 ## 开发验证
 
 ```bash
-uv run pytest -q tests test/unit
+uv run pytest -q tests
 cd athena-gui
 npm test
 ```

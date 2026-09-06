@@ -3,7 +3,7 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-07-30
-Source of truth: `pyproject.toml`, `tests/`, `test/unit/`
+Source of truth: `pyproject.toml`, `tests/`
 
 ## 环境
 
@@ -14,22 +14,22 @@ uv sync
 ## 全量测试
 
 ```bash
-uv run pytest -q tests test/unit
+uv run pytest -q tests
 ```
 
 Windows 工作区亦可使用：
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q tests test/unit
+.venv/Scripts/python.exe -m pytest -q tests
 ```
 
 ## 分层
 
-- `tests/`：AI4ML 领域、GUI gateway、持久化、工作流及集成测试。
-- `test/unit/app_server/`：从独立 app_server 迁入的黑盒/竞态测试，不依赖 v3
+- `tests/`：AI4ML 领域、GUI gateway、持久化、工作流、集成及单元测试。
+- `tests/unit/app_server/`：从独立 app_server 迁入的黑盒/竞态测试。
   旧接口。
-- `test/unit/`：Agent、Tool、Memory、GitWorkspace 与执行 handler 单元测试。
-- `test/fixtures/`：跨版本持久化合同夹具。
+- `tests/unit/`：Agent、Tool、Memory、GitWorkspace 与执行 handler 单元测试。
+- `tests/fixtures/`：跨版本持久化合同夹具。
 
 ## 门禁
 

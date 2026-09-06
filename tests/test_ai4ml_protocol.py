@@ -1,4 +1,4 @@
-import re
+﻿import re
 
 import pytest
 from pydantic import ValidationError

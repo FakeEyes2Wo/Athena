@@ -1,4 +1,4 @@
-"""Protocol contract test: lock Python / Rust / TS GUI method names in sync.
+﻿"""Protocol contract test: lock Python / Rust / TS GUI method names in sync.
 
 Reads the three layers' single sources of truth and asserts they agree, so a
 rename on one side fails loudly here:

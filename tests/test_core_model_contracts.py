@@ -1,4 +1,4 @@
-import athena.research.contracts as research_contracts
+﻿import athena.research.contracts as research_contracts
 
 from athena.core.contracts import EventEnvelope, new_id
 from athena.core.research_models import (

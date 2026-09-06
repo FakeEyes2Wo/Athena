@@ -1,4 +1,4 @@
-"""GUI gateway WebSocket 传输层的端到端测试。"""
+﻿"""GUI gateway WebSocket 传输层的端到端测试。"""
 
 import asyncio
 import json

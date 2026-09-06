@@ -1,4 +1,4 @@
-import json
+﻿import json
 import math
 import os
 from pathlib import Path
@@ -242,7 +242,7 @@ def test_sota_requires_eligible_successful_experiment() -> None:
     assert tree.best_experiment_id() == "exp_baseline"
 
 
-FIXTURE = Path("test/fixtures/research_tree_v2.json")
+FIXTURE = Path("tests/fixtures/research_tree_v2.json")
 
 
 def fixture_payload() -> dict[str, object]:

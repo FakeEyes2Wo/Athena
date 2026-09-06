@@ -5,7 +5,7 @@
 > `docs/research_core_mechanisms_ch.md`。
 
 > Status: historical implementation plan. The current research layout and ownership
-> are recorded in [`codex_docs/2026-09-02-research-layout-simplification-goal.md`](../codex_docs/2026-09-02-research-layout-simplification-goal.md).
+> are recorded in [`codex_docs/2026-09-02-research-layout-simplification-goal.md`](codex_docs/2026-09-02-research-layout-simplification-goal.md).
 > The numbered task snapshots below are retained for audit history and are not a
 > source of truth for present module paths.
 

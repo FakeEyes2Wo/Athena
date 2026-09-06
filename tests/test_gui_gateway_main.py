@@ -1,4 +1,4 @@
-"""gui_gateway.__main__ entrypoint tests: runtime factory options."""
+﻿"""gui_gateway.__main__ entrypoint tests: runtime factory options."""
 
 from pathlib import Path
 

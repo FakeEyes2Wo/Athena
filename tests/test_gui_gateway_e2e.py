@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -14,11 +14,11 @@ from athena.research.config import (
     TaskConfig,
 )
 from gui_gateway.__main__ import start_server
-from test.integration.research.test_continue_resume_surfaces import (
+from tests.integration.research.test_continue_resume_surfaces import (
     assert_confirmed_contract_unchanged,
     build_phase_failure_harness,
 )
-from test.unit._support import make_project
+from tests.unit._support import make_project
 
 
 async def _response(ws, request_id: int) -> dict:
