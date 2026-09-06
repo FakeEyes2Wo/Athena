@@ -16,6 +16,7 @@ from athena.research.supervisor.deps import (
     Publish,
     SupervisorDeps,
     SupervisorTurn,
+    ValidationMode,
 )
 from athena.research.supervisor.phases import PhaseMachine, _final_report_text
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
@@ -196,18 +197,15 @@ class Supervisor:
         *,
         direction: Literal["maximize", "minimize"] | None = None,
         tolerance: float | None = None,
-        auto_validate: bool | None = None,
-        skip_validate: bool | None = None,
+        validation_mode: ValidationMode | None = None,
     ) -> None:
-        """Update four runtime research options, including ``skip_validate``."""
+        """Update runtime comparison and validation policy."""
         if direction is not None:
             self._deps.search.direction = direction
         if tolerance is not None:
             self._deps.search.tolerance = tolerance
-        if auto_validate is not None:
-            self._deps.phases.auto_validate = auto_validate
-        if skip_validate is not None:
-            self._deps.phases.skip_validate = skip_validate
+        if validation_mode is not None:
+            self._deps.phases.validation_mode = validation_mode
 
     async def update_waiting_plan_budget(self, **payload: object) -> dict[str, object]:
         """Extend one exhausted Plan so SEARCH may resume it."""

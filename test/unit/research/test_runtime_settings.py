@@ -104,7 +104,7 @@ def test_research_runtime_composes_skip_validate(tmp_path) -> None:
 
     assert runtime.config.research.policy.skip_validate is True
     assert runtime.session.options.skip_validate is True
-    assert runtime.supervisor._deps.phases.skip_validate is True
+    assert runtime.supervisor._deps.phases.validation_mode == "skip"
     assert runtime.settings()["skip_validate"] is True
 
 
@@ -129,9 +129,8 @@ async def test_apply_settings_updates_skip_validate_without_changing_auto_valida
 
     assert snapshot["skip_validate"] is True
     assert runtime.session.options.skip_validate is True
-    assert runtime.supervisor._deps.phases.skip_validate is True
+    assert runtime.supervisor._deps.phases.validation_mode == "skip"
     assert runtime.session.options.auto_validate is True
-    assert runtime.supervisor._deps.phases.auto_validate is True
 
 
 @pytest.mark.asyncio

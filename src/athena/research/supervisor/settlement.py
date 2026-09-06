@@ -277,8 +277,8 @@ class PlanSettlement:
             )
             outcome = False
         await self._owner._publish_document_outcome(outcome)
-        if self._deps.phases.on_plan_settled is not None:
-            await self._deps.phases.on_plan_settled(plan_id)
+        if self._deps.search.on_plan_settled is not None:
+            await self._deps.search.on_plan_settled(plan_id)
         try:
             await self._deps.runtime.agents.reap(plan_id)
         except Exception:

@@ -667,6 +667,14 @@ Remove the duplicated handoff `agent_type` because all production callers use th
 
 Delete the source-string coroutine test and the impossible no-event Runtime test; the retained behavior test exercises actual awaited event delivery, output reading, reap, and the slotted shape. PhaseRunner falls from 338 baseline lines to 315, with nineteen net production lines removed across its callers. The unchanged focused baseline passed 82 tests; after deleting the two invalid tests, the final phase/authority/autonomous selection passed 80 and the complete research unit suite passed 1,253. Ruff, Black, Python compilation, signature/slot inspection, old-call searches, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 358/602. Whole-repository acceptance remains pending.
 
+## Supervisor dependency-record review
+
+Read the Supervisor package marker and dependency records completely, then trace every group construction, mutation, and field read through runtime bootstrap/settings, phase execution, SEARCH settlement, Plan streaming, and direct Supervisor tests. The package-level `Supervisor` reexport had no repository caller; delete it and retain the package marker only. Retain the five dependency groups because they separate paths, infrastructure, model turns, phase actions, and SEARCH policy without passing the whole Runtime into Supervisor collaborators.
+
+Make every dependency record slotted and cap every group at five fields. Move Agent-event publication from phase actions to research actions and Plan-settlement cleanup to SEARCH services. Replace the conflicting `auto_validate`/`skip_validate` fields with one `validation_mode` literal; runtime configuration still accepts and stores both public booleans, then resolves them once with skip taking precedence. `Supervisor.configure_options` falls from four keyword options to three. Delete the dependency module's redundant `__all__` and the tests that preserved the removed eight-argument positional constructor. No compatibility fields or facade remain.
+
+The package marker falls from five lines to one and `deps.py` from 111 baseline lines to 79. The unchanged focused baseline and final selection both passed 414 tests; the complete research unit/integration suite passed 1,380. Python compilation, old-field/call/import searches, dependency-shape inspection, and `git diff --check` passed. Closing these two rows advances reviewed coverage to 360/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1290,8 +1298,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |
 | `src/athena/research/script_runner.py` | 388 | Pending |
 | `src/athena/research/splitter.py` | 308 | Pending |
-| `src/athena/research/supervisor/__init__.py` | 5 | Pending |
-| `src/athena/research/supervisor/deps.py` | 111 | Pending |
+| `src/athena/research/supervisor/__init__.py` | 5 | Reviewed; remove unused Supervisor reexport and retain package marker |
+| `src/athena/research/supervisor/deps.py` | 111 | Reviewed; slot five focused groups and collapse validation policy to one mode |
 | `src/athena/research/supervisor/evaluator_plan.py` | 425 | Pending |
 | `src/athena/research/supervisor/events.py` | 277 | Pending |
 | `src/athena/research/supervisor/experiment.py` | 555 | Pending |

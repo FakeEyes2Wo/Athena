@@ -147,10 +147,10 @@ class PhaseMachine:
             await self._search.run_search()
             if self._run.is_stopped():
                 return
-            if self._deps.phases.skip_validate:
+            if self._deps.phases.validation_mode == "skip":
                 await self._finalize_without_validation()
                 return
-            if self._deps.phases.auto_validate:
+            if self._deps.phases.validation_mode == "auto":
                 await self._transition_phase("VALIDATE")
             elif self._search_limit_reached() and self._state.status == "RUNNING":
                 self._state.status = "WAITING"

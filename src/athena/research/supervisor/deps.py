@@ -27,9 +27,20 @@ ValidationPhase = Callable[["CommitHash", float], Awaitable[object]]
 IdeatorTurn = Callable[[int], Awaitable[list["Hypothesis"]]]
 GeneralTurn = Callable[[str, str | None], Awaitable["GeneralTurnOutcome"]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
+ValidationMode = Literal["manual", "auto", "skip"]
 
 
-@dataclass(frozen=True)
+def resolve_validation_mode(
+    auto_validate: bool,
+    skip_validate: bool,
+) -> ValidationMode:
+    """Collapse public validation flags into one Supervisor policy."""
+    if skip_validate:
+        return "skip"
+    return "auto" if auto_validate else "manual"
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorPaths:
     """Locate durable supervisor state and project workspaces."""
 
@@ -38,7 +49,7 @@ class SupervisorPaths:
     tree_path: Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SupervisorRuntime:
     """Provide the artifact, Agent, and Git runtimes used by Plans."""
 
@@ -48,7 +59,7 @@ class SupervisorRuntime:
     documents: "DocumentProjector"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResearchActions:
     """Provide model-backed research turns without owning their results."""
 
@@ -56,23 +67,21 @@ class ResearchActions:
     supervisor: SupervisorTurn
     ideator: IdeatorTurn | None = None
     general: GeneralTurn | None = None
+    publish_agent_event: PublishAgentEvent | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PhaseActions:
     """Provide phase entry points and outward event callbacks."""
 
     publish: Publish
     prepare: PreparePhase | None = None
     validation: ValidationPhase | None = None
-    publish_agent_event: PublishAgentEvent | None = None
-    on_plan_settled: Callable[[str], Awaitable[None]] | None = None
-    auto_validate: bool = False
     prepare_resume_is_attested: _PrepareResumeIsAttested | None = None
-    skip_validate: bool = False
+    validation_mode: ValidationMode = "manual"
 
 
-@dataclass
+@dataclass(slots=True)
 class SearchServices:
     """Own SEARCH scheduling and comparison policy services."""
 
@@ -80,9 +89,10 @@ class SearchServices:
     recovery: "Recovery"
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
+    on_plan_settled: Callable[[str], Awaitable[None]] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class SupervisorDeps:
     """Expose five focused dependency groups to supervisor collaborators."""
 
@@ -91,21 +101,3 @@ class SupervisorDeps:
     research: ResearchActions
     phases: PhaseActions
     search: SearchServices
-
-
-__all__ = [
-    "GeneralTurn",
-    "IdeatorTurn",
-    "PhaseActions",
-    "PlanTurn",
-    "PreparePhase",
-    "Publish",
-    "PublishAgentEvent",
-    "ResearchActions",
-    "SearchServices",
-    "SupervisorDeps",
-    "SupervisorPaths",
-    "SupervisorRuntime",
-    "SupervisorTurn",
-    "ValidationPhase",
-]

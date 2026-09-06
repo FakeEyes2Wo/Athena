@@ -261,7 +261,7 @@ async def test_skipped_validation_projects_after_completed_state_is_saved(tmp_pa
     await supervisor._phases._run_prepare()
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
-    supervisor.configure_options(skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     documents = CanonicalObservingDocuments(supervisor)
     supervisor._deps.runtime = supervisor._deps.runtime.__class__(
         store=supervisor._deps.runtime.store,
@@ -475,7 +475,7 @@ async def test_search_settlement_keeps_canonical_result_when_projection_raises(
         documents=documents,
     )
     supervisor._deps.phases.publish = publish
-    supervisor._deps.phases.on_plan_settled = on_settled
+    supervisor._deps.search.on_plan_settled = on_settled
 
     await supervisor._plans.settle_plan(
         "h_candidate",

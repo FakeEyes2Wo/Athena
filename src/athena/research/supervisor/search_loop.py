@@ -149,8 +149,8 @@ class SearchLoop:
             try:
                 completed = task.result()
             except (
-                Exception
-            ) as exc:  # noqa: BLE001 - task boundary catches all failures
+                Exception  # noqa: BLE001 - task boundary catches all failures
+            ) as exc:
                 # A Plan task may fail after leaving the scheduler's task set.
                 # Park SEARCH with durable feedback so recovery can retry it.
                 plan = self._state.plans.get(plan_id)
@@ -318,7 +318,7 @@ class SearchLoop:
         if settlement.action == "continue":
             self._plans.save_state()
         elif settlement.action == "wait":
-            if self._deps.phases.auto_validate or self._deps.phases.skip_validate:
+            if self._deps.phases.validation_mode != "manual":
                 # auto 模式无人补充缺失的 report / 延长预算 → 用历史 best 结算，
                 # 释放并发槽让调度器继续 GENERATE，搜索得以收敛（否则死锁）。
                 await self._plans.settle_plan(plan_id, state.best_ref, completed.result)

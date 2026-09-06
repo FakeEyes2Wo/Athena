@@ -10,8 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from test.support import RecordingDocumentProjector
-
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
@@ -35,6 +33,7 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from test.support import RecordingDocumentProjector
 
 
 class _StreamingPlanProvider:
@@ -182,11 +181,11 @@ async def test_plan_turn_forwards_text_delta_to_runtime_publisher(
                 documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
-                plan=stub_plan_turn, supervisor=unused_supervisor_turn
+                plan=stub_plan_turn,
+                supervisor=unused_supervisor_turn,
+                publish_agent_event=publish_agent_event,
             ),
-            phases=PhaseActions(
-                publish=publish, publish_agent_event=publish_agent_event
-            ),
+            phases=PhaseActions(publish=publish),
             search=SearchServices(
                 scheduler=Scheduler(),
                 recovery=Recovery(),

@@ -2,13 +2,12 @@
 
 import asyncio
 import json
+from dataclasses import fields
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from test.support import RecordingDocumentProjector
 
 import athena.research.supervisor.search_loop as search_loop_module
 from athena.agents.task_agents import register_plan_agent
@@ -38,57 +37,38 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
+from test.support import RecordingDocumentProjector
 
 
 def test_prepare_resume_callback_type_alias_is_module_private() -> None:
     deps_module = import_module("athena.research.supervisor.deps")
 
     assert not hasattr(deps_module, "PrepareResumeIsAttested")
-    assert "PrepareResumeIsAttested" not in deps_module.__all__
+    assert not hasattr(deps_module, "__all__")
 
 
-def test_phase_actions_preserves_historical_positional_argument_order() -> None:
-    async def publish(_kind, _payload):
-        return None
-
-    async def prepare():
-        raise AssertionError("not called")
-
-    async def validation(_commit, _metric):
-        raise AssertionError("not called")
-
-    async def publish_agent_event(_agent_id, _kind, _ref, _data):
-        return None
-
-    async def on_plan_settled(_plan_id):
-        return None
-
-    actions = PhaseActions(
-        publish,
-        prepare,
-        validation,
-        publish_agent_event,
-        on_plan_settled,
-        True,
+def test_dependency_groups_are_small_slotted_records() -> None:
+    groups = (
+        SupervisorPaths,
+        SupervisorRuntime,
+        ResearchActions,
+        PhaseActions,
+        SearchServices,
+        SupervisorDeps,
     )
 
-    assert actions.publish is publish
-    assert actions.prepare is prepare
-    assert actions.validation is validation
-    assert actions.publish_agent_event is publish_agent_event
-    assert actions.on_plan_settled is on_plan_settled
-    assert actions.auto_validate is True
-    assert actions.prepare_resume_is_attested is None
-    assert actions.skip_validate is False
+    assert all(hasattr(group, "__slots__") for group in groups)
+    assert max(len(fields(group)) for group in groups) == 5
 
 
-def test_phase_actions_composes_skip_validate_after_historical_fields() -> None:
+def test_phase_actions_uses_one_validation_mode() -> None:
     async def publish(_kind, _payload):
         return None
 
-    actions = PhaseActions(publish, None, None, None, None, False, None, True)
+    actions = PhaseActions(publish, validation_mode="auto")
 
-    assert actions.skip_validate is True
+    assert actions.publish is publish
+    assert actions.validation_mode == "auto"
 
 
 class _SubmitProvider:
@@ -436,13 +416,12 @@ def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
     supervisor = _checkpoint_supervisor(tmp_path)
 
     supervisor.configure_options(
-        direction="minimize", tolerance=0.05, auto_validate=True, skip_validate=True
+        direction="minimize", tolerance=0.05, validation_mode="skip"
     )
 
     assert supervisor._deps.search.direction == "minimize"
     assert supervisor._deps.search.tolerance == 0.05
-    assert supervisor._deps.phases.auto_validate is True
-    assert supervisor._deps.phases.skip_validate is True
+    assert supervisor._deps.phases.validation_mode == "skip"
 
 
 @pytest.mark.asyncio
@@ -452,7 +431,7 @@ async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_path
     supervisor = _checkpoint_supervisor(tmp_path)
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
-    supervisor.configure_options(skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     _seed_skip_sota(supervisor, tmp_path)
 
     def fail_save() -> None:
@@ -495,7 +474,7 @@ async def test_skip_finalizer_keeps_completion_when_notifications_fail_independe
     supervisor = _checkpoint_supervisor(tmp_path, publish_callback=fail_publish)
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
-    supervisor.configure_options(skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     _seed_skip_sota(supervisor, tmp_path)
 
     await supervisor._phases._finalize_without_validation()
@@ -516,7 +495,7 @@ async def test_skip_finalizer_propagates_cancelled_notification(
     supervisor = _checkpoint_supervisor(tmp_path, publish_callback=cancel_publish)
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
-    supervisor.configure_options(skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     _seed_skip_sota(supervisor, tmp_path)
 
     with pytest.raises(asyncio.CancelledError):
@@ -531,7 +510,7 @@ async def test_skip_finalizer_rejects_active_search_plan(tmp_path: Path) -> None
     supervisor = _checkpoint_supervisor(tmp_path)
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
-    supervisor.configure_options(skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     _seed_skip_sota(supervisor, tmp_path)
     task = asyncio.create_task(asyncio.sleep(60))
     supervisor._run.add_running("hyp_active", task)
@@ -550,7 +529,7 @@ async def test_skip_policy_settles_waiting_plan_without_auto_validate(
 ) -> None:
     supervisor = _checkpoint_supervisor(tmp_path)
     supervisor.state.phase = "SEARCH"
-    supervisor.configure_options(auto_validate=False, skip_validate=True)
+    supervisor.configure_options(validation_mode="skip")
     context_ref = await supervisor._deps.runtime.store.put_text("context")
     state = PlanState(
         kind="SEARCH",

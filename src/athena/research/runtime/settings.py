@@ -6,6 +6,7 @@ from typing import Any
 
 from athena.execution.compute_config import parse_compute_config
 from athena.execution.pool import GpuPool
+from athena.research.supervisor.deps import resolve_validation_mode
 
 MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
     "provider": "LLM_PROVIDER",
@@ -220,7 +221,13 @@ async def _apply_policy_settings(runtime: Any, patch: dict[str, Any]) -> None:
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be a bool")  # noqa: TRY004
         setattr(options, name, value)
-        supervisor.configure_options(**{name: value})
+    if any(name in patch for name in POLICY_FLAGS):
+        supervisor.configure_options(
+            validation_mode=resolve_validation_mode(
+                options.auto_validate,
+                options.skip_validate,
+            )
+        )
 
 
 async def _apply_compute_settings(runtime: Any, patch: dict[str, Any]) -> None:

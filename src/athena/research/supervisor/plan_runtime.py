@@ -154,7 +154,7 @@ class PlanRuntime:
                     "context_refs": [state.context_ref],
                 },
             )
-            publish = self._deps.phases.publish_agent_event
+            publish = self._deps.research.publish_agent_event
             if publish is None:
                 summary = await self._deps.runtime.agents.wait_run(run_id)
             else:

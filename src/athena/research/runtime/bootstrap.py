@@ -63,6 +63,7 @@ from athena.research.supervisor.deps import (
     SupervisorDeps,
     SupervisorPaths,
     SupervisorRuntime,
+    resolve_validation_mode,
 )
 from athena.research.supervisor.events import EventProjector
 from athena.research.supervisor.recovery import Recovery
@@ -250,22 +251,24 @@ def wire_workflow(runtime: Any) -> None:
             supervisor=agent_turns.run_supervisor_turn,
             ideator=agent_turns.run_ideator_turn,
             general=agent_turns.run_general_turn,
+            publish_agent_event=services.infrastructure.events.project_agent_event,
         ),
         phases=PhaseActions(
             publish=services.infrastructure.events.publish_from_supervisor,
             prepare=phases.run_prepare_phase,
             prepare_resume_is_attested=phases.baseline_resume_is_attested,
             validation=phases.run_validation_phase,
-            publish_agent_event=services.infrastructure.events.project_agent_event,
-            on_plan_settled=runtime.release_lease,
-            auto_validate=config.research.policy.auto_validate,
-            skip_validate=config.research.policy.skip_validate,
+            validation_mode=resolve_validation_mode(
+                config.research.policy.auto_validate,
+                config.research.policy.skip_validate,
+            ),
         ),
         search=SearchServices(
             scheduler=Scheduler(),
             recovery=Recovery(),
             direction=config.research.policy.direction,
             tolerance=config.research.policy.tolerance,
+            on_plan_settled=runtime.release_lease,
         ),
     )
     supervisor = Supervisor(
