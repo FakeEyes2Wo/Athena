@@ -78,6 +78,13 @@ def recover_arxiv_id(payload: dict) -> str:
     return ""
 
 
+def normalize_work_locator(locator: str) -> str:
+    """Render bare DOI locators in the explicit form accepted by OpenAlex."""
+    text = locator.strip()
+    doi = normalize_doi(text)
+    return f"doi:{doi}" if doi else text
+
+
 def parse_work(payload: dict) -> OpenAlexWork:
     """把 OpenAlex work JSON 收敛成取源需要的字段。"""
     best = payload.get("best_oa_location") or {}
@@ -127,8 +134,11 @@ class OpenAlexClient:
             if self._contact_email
             else ""
         )
+        normalized_locator = normalize_work_locator(locator)
         url = (
-            OPENALEX_WORK_URL.format(locator=urllib.parse.quote(locator, safe=":/"))
+            OPENALEX_WORK_URL.format(
+                locator=urllib.parse.quote(normalized_locator, safe=":/")
+            )
             + query
         )
         response = await self._http.get(url)
