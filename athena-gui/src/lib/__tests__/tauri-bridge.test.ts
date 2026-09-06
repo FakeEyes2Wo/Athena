@@ -13,8 +13,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
 }));
 
-import humanReplyValid from "../../../../test/fixtures/clarification/human_reply_valid.json";
-import humanRequestValid from "../../../../test/fixtures/clarification/human_request_valid.json";
+import humanReplyValid from "../../../../tests/fixtures/clarification/human_reply_valid.json";
+import humanRequestValid from "../../../../tests/fixtures/clarification/human_request_valid.json";
 import {
   EMPTY_RESEARCH_TREE,
   PIPELINE_EVENT_NAMES,
