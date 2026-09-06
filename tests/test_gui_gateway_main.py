@@ -67,16 +67,48 @@ def test_controller_capabilities_are_bound_per_project_and_session(
         assert deps.environment_repair_actions == {"restart_service": restart_service}
 
 
-def test_unconfigured_gui_does_not_construct_local_authority(monkeypatch):
+def test_unconfigured_gui_constructs_local_authority(monkeypatch, tmp_path):
+    from athena.research.prepare.authority_local import LocalBaselineAuthorityStore
     from gui_gateway import __main__ as main
 
     captured = {}
     monkeypatch.setattr(
         main, "ResearchRuntime", lambda **options: captured.update(options)
     )
-    main._make_runtime()
-    assert captured["dependencies"].baseline_authority is None
-    assert captured["dependencies"].environment_repair_actions is None
+    monkeypatch.setenv("ATHENA_AUTHORITY_LOCAL_ROOT", str(tmp_path / "controller"))
+    main._make_runtime(str(tmp_path / "project"), session_id="session-1")
+
+    dependencies = captured["dependencies"]
+    assert isinstance(dependencies.baseline_authority, LocalBaselineAuthorityStore)
+    assert dependencies.baseline_authority.root == (tmp_path / "controller").resolve()
+    assert dependencies.environment_repair_actions == {}
+
+
+def test_gui_rejects_unimplemented_ssh_authority(monkeypatch):
+    from gui_gateway import __main__ as main
+
+    monkeypatch.setenv("ATHENA_AUTHORITY_MODE", "ssh")
+    with pytest.raises(RuntimeError, match="SSH baseline authority is not implemented"):
+        main._make_runtime()
+
+
+def test_host_factory_has_priority_over_ssh_mode(monkeypatch, tmp_path):
+    from gui_gateway import __main__ as main
+    from gui_gateway.controller import ControllerCapabilities
+
+    captured = {}
+    authority = object()
+    monkeypatch.setenv("ATHENA_AUTHORITY_MODE", "ssh")
+    monkeypatch.setattr(
+        main, "ResearchRuntime", lambda **options: captured.update(options)
+    )
+
+    main._make_runtime(
+        str(tmp_path),
+        controller_factory=lambda _root, _session: ControllerCapabilities(authority),
+    )
+
+    assert captured["dependencies"].baseline_authority is authority
 
 
 def test_controller_factory_is_loaded_only_from_explicit_host_import(monkeypatch):

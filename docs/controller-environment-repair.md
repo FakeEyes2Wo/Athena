@@ -10,7 +10,11 @@
 返回 `ControllerCapabilities`，用于初始化及工作区切换；不要为不同项目复用同一份审核状态。
 直接执行 `python -m gui_gateway` 时，可由控制器设置仅含导入引用的
 `ATHENA_CONTROLLER_FACTORY=deployment_controller:controller_factory`；凭据仍只在
-`deployment_controller` 进程配置中。变量缺失时不会构造本地替代服务，研究预检查会失败。
+`deployment_controller` 进程配置中。变量缺失时 GUI 使用本机权限的持久化 authority；
+它适用于单机演示，不防御同一 OS 用户的其他进程。设置
+`ATHENA_AUTHORITY_MODE=ssh` 会明确失败（SSH authority 尚未实现），不会回退为本机模式。
+可用 `ATHENA_AUTHORITY_LOCAL_ROOT` 改写本机 authority 的控制器私有根目录；该路径不会
+发送到浏览器或 Agent。
 
 ```python
 import asyncio

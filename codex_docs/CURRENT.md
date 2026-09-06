@@ -1,7 +1,7 @@
 # Current Athena Work
 
-Active local baseline-authority design:
-- `codex_docs/2026-09-06-local-authority-design.md`
+Completed local baseline-authority mode:
+- `codex_docs/2026-09-06-local-authority-completion.md`
 
 Completed controller wiring and bounded environment repair mechanism:
 - `codex_docs/2026-09-06-controller-repair-completion.md`
@@ -37,6 +37,7 @@ Queued dependent implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
 Most recent completed work:
+- `codex_docs/2026-09-06-local-authority-completion.md`
 - `codex_docs/2026-09-05-experiment-documents-simplification-completion-report.md`
 - `codex_docs/2026-09-04-experiment-document-projection-completion-report.md`
 - `codex_docs/2026-09-04-skip-validate-final-completion-report.md`

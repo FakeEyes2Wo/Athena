@@ -26,7 +26,7 @@ from athena.research.config import (
     SessionConfig,
     TaskConfig,
 )
-from gui_gateway.controller import ControllerFactory
+from gui_gateway.controller import ControllerFactory, local_controller_capabilities
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiStateStore
@@ -82,10 +82,11 @@ def _make_runtime(
     GUI 路径显式启用确认门并关闭自动确认：raw task 文本必须先经过
     ``task_clarification_start`` 与 ``start_search(draft_id, revision)``。
     """
+    root = Path(project_root or ".").resolve()
     capabilities = (
-        controller_factory(Path(project_root or ".").resolve(), session_id)
+        controller_factory(root, session_id)
         if controller_factory is not None
-        else None
+        else local_controller_capabilities(root, session_id)
     )
     return ResearchRuntime(
         project_root=project_root,
@@ -97,12 +98,8 @@ def _make_runtime(
         dependencies=RuntimeDependencies(
             provider=ProviderConfig(model=settings.model_name()),
             broker=broker,
-            baseline_authority=(
-                capabilities.baseline_authority if capabilities is not None else None
-            ),
-            environment_repair_actions=(
-                dict(capabilities.repair_actions) if capabilities is not None else None
-            ),
+            baseline_authority=capabilities.baseline_authority,
+            environment_repair_actions=dict(capabilities.repair_actions),
         ),
     )
 

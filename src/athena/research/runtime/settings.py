@@ -113,6 +113,7 @@ def snapshot(runtime: Any) -> dict[str, Any]:
     """Return the current GUI-facing settings projection."""
     state = runtime.state
     options = runtime.session.options
+    authority = runtime.baseline_authority
     return {
         "project_root": str(runtime.root),
         "model": runtime.model,
@@ -132,6 +133,14 @@ def snapshot(runtime: Any) -> dict[str, Any]:
         "data_root": state.data_root,
         "experiment_timeout_s": state.experiment_timeout_s,
         "compute": _compute_snapshot(runtime),
+        "authority_mode": getattr(
+            authority, "gui_authority_mode", "external" if authority else "unconfigured"
+        ),
+        "authority_security_level": getattr(
+            authority,
+            "gui_authority_security_level",
+            "controller-managed" if authority else "not configured",
+        ),
         "model_connection": {
             "provider": os.environ.get("LLM_PROVIDER") or "deepseek",
             "base_url": os.environ.get("BASE_URL") or "",

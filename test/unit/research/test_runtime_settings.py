@@ -61,7 +61,7 @@ def test_runtime_configuration_surface_stays_grouped() -> None:
             len(fields(group))
             for group in (SessionConfig, ResearchOptions, RuntimeDependencies)
         )
-        == 5
+        == 6
     )
     assert not hasattr(ResearchOptions(), "__dict__")
 
@@ -116,6 +116,25 @@ def test_skip_validate_defaults_off_and_projects_to_settings(tmp_path) -> None:
     assert runtime.config.research.policy.skip_validate is False
     assert runtime.session.options.skip_validate is False
     assert runtime.settings()["skip_validate"] is False
+
+
+def test_settings_expose_safe_authority_mode_only(tmp_path) -> None:
+    from athena.research.prepare.authority_local import LocalBaselineAuthorityStore
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        dependencies=RuntimeDependencies(
+            baseline_authority=LocalBaselineAuthorityStore(
+                tmp_path / "controller", tmp_path, "default"
+            ),
+        ),
+    )
+
+    snapshot = runtime.settings()
+
+    assert snapshot["authority_mode"] == "local"
+    assert snapshot["authority_security_level"] == "same-user local filesystem"
+    assert "authority_root" not in snapshot
 
 
 @pytest.mark.asyncio
