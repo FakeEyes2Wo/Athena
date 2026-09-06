@@ -8,7 +8,7 @@ Scope: user-approved repairs grounded in ATHENA_ERRORS.md and current Python imp
 - [x] Add durable per-Plan cancellation through existing Supervisor ownership and command routing.
 - [x] Correct agent-commit change detection without breaking reviewed Git commits.
 - [ ] Verify guidance recovery, deployment isolation constraints, and remaining ledger findings; implement supported fixes and explicitly report evidence gaps.
-- [ ] Run focused checks, record completion evidence, commit and push completed changes to main; remove only task-created temporary branches after integration.
+- [x] Run focused checks, record completion evidence, commit and push completed changes to main; remove only task-created temporary branches after integration. Code commit: cb10c0c; no task branch created.
 
 Existing transactional-backend and simplification plans remain separate unfinished work. Do not mark their future architecture as already implemented. Remove this plan and update CURRENT only when every item above is verified or explicitly resolved with the user.
 

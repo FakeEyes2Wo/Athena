@@ -42,4 +42,6 @@ No paid model calls, real training, or FINAL dataset inspection was used. Existi
 
 ## Integration
 
+Verified code commit: `cb10c0c`, pushed successfully to `origin/main` on 2026-09-06. Commit hooks passed, including Black and project code-style checks. The unrelated deletion of `pr15_source.diff` was restored by the pre-commit hook and remains outside the commit.
+
 User requires completed changes on main and pushed, with task-created temporary branches removed afterward. Work was performed on main; no task branch was created. Preserve the unrelated deletion of pr15_source.diff and stage only owned files. The repair plan remains linked from CURRENT because deployment isolation and missing incident evidence are unresolved; unrelated plans must not be closed.
