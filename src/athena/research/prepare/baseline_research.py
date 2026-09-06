@@ -704,14 +704,25 @@ def design_sha256(raw: bytes) -> str:
 
 
 def titles_match(reported: str, resolved: str) -> bool:
-    """Compare titles after deterministic Unicode and punctuation normalization."""
+    """Compare titles after deterministic Unicode and punctuation normalization.
+
+    A long title dropped at its subtitle still identifies the work. On
+    2026-09-06 a candidate cited the right DOI and reported the title without
+    its trailing "and Analysis of a New Flare Catalog"; the ratio fell to 0.85
+    and PREPARE failed for a paper OpenAlex had resolved correctly. A prefix
+    that long cannot pair a DOI with some other paper, which is what this check
+    exists to catch.
+    """
     normalized_reported = _normalize_title(reported)
     normalized_resolved = _normalize_title(resolved)
     if not normalized_reported or not normalized_resolved:
         return False
     if normalized_reported == normalized_resolved:
         return True
-    if min(len(normalized_reported), len(normalized_resolved)) < 20:
+    shorter, longer = sorted((normalized_reported, normalized_resolved), key=len)
+    if len(shorter) >= 40 and longer.startswith(shorter):
+        return True
+    if len(shorter) < 20:
         return False
     return (
         SequenceMatcher(None, normalized_reported, normalized_resolved).ratio() >= 0.90

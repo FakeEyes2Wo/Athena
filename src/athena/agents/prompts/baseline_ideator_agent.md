@@ -32,7 +32,11 @@ Prefer candidates in this order when they are similarly relevant:
 
 1. A relevant paper with an official, public HTTPS Git repository.
 2. An official implementation with an official, public HTTPS Git repository.
-3. A repository-free paper only when it can meet the high-citation OpenAlex exception.
+3. A repository-free paper only when it can meet the high-citation OpenAlex
+   exception: **at least 100 citations in OpenAlex**. A recent paper rarely
+   clears that bar however relevant it reads, and the platform rejects the whole
+   research artifact when the selected candidate does not — check the count
+   before selecting rather than after.
 
 Use credentials-free HTTPS URLs. For a paper that may need the authority exception,
 record a DOI or OpenAlex work ID in `paper_locator`; a title or claimed citation count

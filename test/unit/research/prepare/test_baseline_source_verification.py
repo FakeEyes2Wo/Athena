@@ -11,6 +11,7 @@ from athena.research.literature.paper_source.openalex import (
     OpenAlexWork,
 )
 from athena.research.prepare.baseline_research import (
+    AUTHORITY_CITATION_THRESHOLD,
     BaselineArtifacts,
     BaselineResearchError,
     BaselineVerification,
@@ -445,6 +446,18 @@ async def test_agent_claimed_citations_do_not_qualify(
         ),
         ("abcdefghijklmnopqrst", "abcdefghijklmnopqrxy", True),
         ("Short title", "Short title revised", False),
+        # A real citation whose subtitle the agent dropped: the DOI resolved,
+        # the ratio was 0.85, and PREPARE failed on 2026-09-06.
+        (
+            "Scalable, Advanced Machine Learning-based Approaches for Stellar "
+            "Flare Identification: Application to TESS short-cadence Data",
+            "Scalable, Advanced Machine Learning Based Approaches for Stellar "
+            "Flare Identification: Application to TESS Short-cadence Data and "
+            "Analysis of a New Flare Catalog",
+            True,
+        ),
+        # A short prefix stays a rejection: it identifies no particular work.
+        ("Deep learning", "Deep learning for stellar flare detection", False),
     ],
 )
 def test_titles_match_is_deterministic(
@@ -458,3 +471,22 @@ def test_default_verifier_uses_free_openalex_metadata_client() -> None:
 
     assert isinstance(verifier.openalex, OpenAlexClient)
     assert verifier.openalex.has_api_key is False
+
+
+def test_the_ideator_prompt_states_the_citation_bar() -> None:
+    """An agent cannot respect a threshold the prompt never names.
+
+    On 2026-09-06 the ideator selected a 10-citation 2024 paper with no
+    repository; the platform rejected the research artifact for a rule it had
+    never stated, and the run had no turn left to pick another source.
+    """
+    prompt = (
+        Path(__file__).resolve().parents[4]
+        / "src"
+        / "athena"
+        / "agents"
+        / "prompts"
+        / "baseline_ideator_agent.md"
+    ).read_text(encoding="utf-8")
+
+    assert str(AUTHORITY_CITATION_THRESHOLD) in prompt

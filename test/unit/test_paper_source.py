@@ -31,7 +31,10 @@ from athena.research.literature.paper_source.http import (
     HttpTransportError,
     rate_limit_bucket,
 )
-from athena.research.literature.paper_source.openalex import parse_work
+from athena.research.literature.paper_source.openalex import (
+    normalize_work_locator,
+    parse_work,
+)
 from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
     PaperRef,
@@ -206,6 +209,33 @@ class IdentityTest(unittest.TestCase):
 
 
 class ParsingTest(unittest.TestCase):
+    def test_a_bare_doi_becomes_an_addressable_work_locator(self) -> None:
+        """/works/10.x is a 404; the prompt asks agents for "a DOI" all the same.
+
+        A bare DOI reached OpenAlex unprefixed on 2026-09-06 and PREPARE failed
+        with "did not resolve the paper locator" for a paper OpenAlex holds.
+        """
+        self.assertEqual(
+            "doi:10.3847/1538-3881/ad7956",
+            normalize_work_locator("10.3847/1538-3881/ad7956"),
+        )
+        self.assertEqual(
+            "doi:10.3847/1538-3881/ad7956",
+            normalize_work_locator("https://doi.org/10.3847/1538-3881/AD7956"),
+        )
+
+    def test_work_ids_and_namespaced_locators_are_left_addressable(self) -> None:
+        self.assertEqual("W4404082775", normalize_work_locator("W4404082775"))
+        self.assertEqual(
+            "W4404082775",
+            normalize_work_locator("https://openalex.org/W4404082775"),
+        )
+        self.assertEqual(
+            "doi:10.1145/3654777", normalize_work_locator("doi:10.1145/3654777")
+        )
+        self.assertEqual("pmid:123", normalize_work_locator("pmid:123"))
+        self.assertEqual("", normalize_work_locator("   "))
+
     def test_openalex_work_retains_citation_count(self) -> None:
         work = parse_work(
             {

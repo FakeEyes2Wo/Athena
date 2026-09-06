@@ -58,6 +58,26 @@ def bare_openalex_id(value: str) -> str:
     return value.strip().rstrip("/").rsplit("/", 1)[-1]
 
 
+def normalize_work_locator(value: str) -> str:
+    """Return a locator the singleton works endpoint can address.
+
+    ``GET /works/10.3847/1538-3881/ad7956`` is a 404: that endpoint takes a bare
+    ``W...`` id or a namespaced external id such as ``doi:10.3847/...``. The
+    baseline-research prompt asks agents for "a DOI or OpenAlex work ID", so a
+    bare DOI arrives routinely, and on 2026-09-06 one failed PREPARE with
+    "OpenAlex did not resolve the paper locator" for a paper OpenAlex does hold.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    if text.lower().startswith(("doi:", "pmid:", "pmcid:", "mag:", "openalex:")):
+        return text
+    doi = normalize_doi(text)
+    if doi:
+        return f"doi:{doi}"
+    return bare_openalex_id(text) or text
+
+
 def recover_arxiv_id(payload: dict) -> str:
     """从 DOI 与开放获取链接里回收 arXiv id，找不到返回空串。
 
@@ -122,13 +142,18 @@ class OpenAlexClient:
         例如 ``await client.fetch_work("doi:10.1145/3654777")`` 返回的 ``pdf_url`` 只是
         候选线索，仍需下载后按魔数确认。
         """
+        addressable = normalize_work_locator(locator)
+        if not addressable:
+            return None
         query = (
             f"?{urllib.parse.urlencode({'mailto': self._contact_email})}"
             if self._contact_email
             else ""
         )
         url = (
-            OPENALEX_WORK_URL.format(locator=urllib.parse.quote(locator, safe=":/"))
+            OPENALEX_WORK_URL.format(
+                locator=urllib.parse.quote(addressable, safe=":/")
+            )
             + query
         )
         response = await self._http.get(url)
