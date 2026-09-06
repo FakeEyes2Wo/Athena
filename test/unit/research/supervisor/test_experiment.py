@@ -16,7 +16,7 @@ from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
     PlanRunner,
     PlanTurnResult,
-    _diff_implements_intervention,
+    _diff_intervention_failure,
     apply_trusted_score,
     decide_settlement,
     load_best,
@@ -42,13 +42,17 @@ def _decision(value: str) -> PlanDecision:
     )
 
 
-def test_diff_implements_intervention_rejects_non_source_changes() -> None:
-    assert _diff_implements_intervention(()) is not None
-    assert _diff_implements_intervention(("experiment.json",)) is not None
-    assert _diff_implements_intervention(("predictions/test.csv",)) is not None
-    assert _diff_implements_intervention(("README.md",)) is not None
-    assert _diff_implements_intervention(("model.py",)) is None
-    assert _diff_implements_intervention(("features.py", "experiment.json")) is None
+def _best(metric: float, commit: str) -> PlanBest:
+    return PlanBest(metric=metric, commit=commit, evidence_ref=_OTHER_REF)
+
+
+def test_diff_intervention_failure_rejects_non_source_changes() -> None:
+    assert _diff_intervention_failure(()).kind == "no_change"
+    assert _diff_intervention_failure(("experiment.json",)).kind == "diff_rejected"
+    assert _diff_intervention_failure(("predictions/test.csv",)).kind == "diff_rejected"
+    assert _diff_intervention_failure(("README.md",)).kind == "diff_rejected"
+    assert _diff_intervention_failure(("model.py",)) is None
+    assert _diff_intervention_failure(("features.py", "experiment.json")) is None
 
 
 def test_scored_turn_result_requires_next_state() -> None:
@@ -417,14 +421,10 @@ async def test_trusted_improvement_resets_patience_and_keeps_historical_best(
     store = LocalArtifactStore(tmp_path / "artifacts")
     state = await _scored_plan(store, best_metric=0.80, stale_rounds=2, patience=3)
 
-    improved = await apply_trusted_score(
-        state, metric=0.82, commit="c2", store=store, evidence_ref=_OTHER_REF
-    )
+    improved = await apply_trusted_score(state, _best(0.82, "c2"), store=store)
     assert improved.stale_rounds == 0
 
-    worse = await apply_trusted_score(
-        improved, metric=0.81, commit="c3", store=store, evidence_ref=_OTHER_REF
-    )
+    worse = await apply_trusted_score(improved, _best(0.81, "c3"), store=store)
     assert worse.stale_rounds == 1
 
     best = await load_best(worse.best_ref, store)
@@ -443,9 +443,7 @@ async def test_first_trusted_score_sets_best_and_zeroes_stale(tmp_path) -> None:
         patience=3,
     )
 
-    scored = await apply_trusted_score(
-        state, metric=0.84, commit="c1", store=store, evidence_ref=_OTHER_REF
-    )
+    scored = await apply_trusted_score(state, _best(0.84, "c1"), store=store)
 
     assert scored.stale_rounds == 0
     assert scored.best_ref is not None
@@ -461,20 +459,16 @@ async def test_minimize_direction_counts_lower_as_improvement(tmp_path) -> None:
 
     improved = await apply_trusted_score(
         state,
-        metric=0.25,
-        commit="c2",
+        _best(0.25, "c2"),
         store=store,
-        evidence_ref=_OTHER_REF,
         direction="minimize",
     )
     assert improved.stale_rounds == 0
 
     worse = await apply_trusted_score(
         improved,
-        metric=0.27,
-        commit="c3",
+        _best(0.27, "c3"),
         store=store,
-        evidence_ref=_OTHER_REF,
         direction="minimize",
     )
     assert worse.stale_rounds == 1

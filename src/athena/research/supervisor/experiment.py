@@ -8,6 +8,7 @@
 
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -64,7 +65,7 @@ _NON_IMPLEMENTATION_MARKERS = (
 )
 
 
-def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
+def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
     """Return a rejection reason when a SEARCH diff does not implement source.
 
     This is a deterministic first line of defense for attribution: it does not
@@ -73,9 +74,12 @@ def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
     the “non-empty diff” gate.
     """
     if not paths:
-        return (
-            "this candidate changed no file, so it re-ran the parent unchanged and "
-            "cannot test anything. Implement the intervention in source code."
+        return PlanFailure(
+            kind="no_change",
+            detail=(
+                "this candidate changed no file, so it re-ran the parent unchanged "
+                "and cannot test anything. Implement the intervention in source code."
+            ),
         )
     semantic = [
         path
@@ -84,10 +88,13 @@ def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
         and not any(marker in path for marker in _NON_IMPLEMENTATION_MARKERS)
     ]
     if not semantic:
-        return (
-            "this candidate changed no implementation source file; only "
-            "manifest/output/documentation changed. Implement the intervention "
-            "in a source file (e.g. model.py, features.py, train.py)."
+        return PlanFailure(
+            kind="diff_rejected",
+            detail=(
+                "this candidate changed no implementation source file; only "
+                "manifest/output/documentation changed. Implement the intervention "
+                "in a source file (e.g. model.py, features.py, train.py)."
+            ),
         )
     return None
 
@@ -114,10 +121,9 @@ async def load_agent_result(
     return model_type.model_validate_json(await store.get_text(result_ref))
 
 
-class PlanSettlement(BaseModel):
+@dataclass(frozen=True, slots=True)
+class SettlementDecision:
     """一次 turn 的终态动作：settle / wait / continue 及其依据。"""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
 
     action: Literal["settle", "wait", "continue"]
     best_ref: ArtifactRef | None = None
@@ -166,14 +172,10 @@ async def load_best(best_ref: ArtifactRef, store: ArtifactStore) -> PlanBest:
 
 async def apply_trusted_score(
     state: PlanState,
-    metric: float,
-    commit: CommitHash,
+    best: PlanBest,
     *,
     store: ArtifactStore,
-    evidence_ref: ArtifactRef,
     direction: Direction = "maximize",
-    std_error: float | None = None,
-    n: int | None = None,
 ) -> PlanState:
     """应用一次可信分数：更新不可变 best 并调整 stale_rounds。
 
@@ -182,16 +184,11 @@ async def apply_trusted_score(
     """
     current = await load_best(state.best_ref, store) if state.best_ref else None
     improved = current is None or (
-        metric > current.metric if direction == "maximize" else metric < current.metric
+        best.metric > current.metric
+        if direction == "maximize"
+        else best.metric < current.metric
     )
     if improved:
-        best = PlanBest(
-            metric=metric,
-            commit=commit,
-            evidence_ref=evidence_ref,
-            std_error=std_error,
-            n=n,
-        )
         best_ref = await store.put_text(best.model_dump_json())
         return state.model_copy(update={"best_ref": best_ref, "stale_rounds": 0})
     return state.model_copy(update={"stale_rounds": state.stale_rounds + 1})
@@ -202,44 +199,44 @@ def decide_settlement(
     decision: PlanDecision,
     *,
     report_ref: ArtifactRef | None = None,
-) -> PlanSettlement:
+) -> SettlementDecision:
     """根据 Plan 预算与 Agent 决策返回 turn 的终态动作。
 
     submit/abandon 一律 settle（无 best 时按 LOSS settle）；continue 下 patience
     用尽或 turn 用尽且有 best → settle best；turn 用尽且无 best → wait。
     """
-    has_best = state.best_ref is not None
     patience_exhausted = (
         state.patience is not None and state.stale_rounds >= state.patience
     )
     turns_exhausted = (
         state.turn_limit is not None and state.turns_used >= state.turn_limit
     )
-    settlement: PlanSettlement
     if decision.decision in ("submit", "abandon"):
-        settlement = PlanSettlement(
+        settlement = SettlementDecision(
             action="settle", best_ref=state.best_ref, reason=decision.decision
         )
     elif patience_exhausted:
-        settlement = PlanSettlement(
+        settlement = SettlementDecision(
             action="settle", best_ref=state.best_ref, reason="patience exhausted"
         )
     elif turns_exhausted:
-        if has_best:
-            settlement = PlanSettlement(
+        if state.best_ref is not None:
+            settlement = SettlementDecision(
                 action="settle",
                 best_ref=state.best_ref,
                 reason="turn budget exhausted",
             )
         else:
-            settlement = PlanSettlement(
+            settlement = SettlementDecision(
                 action="wait", reason="turn budget exhausted without a trusted best"
             )
     else:
-        settlement = PlanSettlement(action="continue")
+        settlement = SettlementDecision(action="continue")
     # 只有 PREPARE 强制要求 report；SEARCH 的 report 输出是可选的，缺失不应卡住 settle。
     if settlement.action == "settle" and state.kind == "PREPARE" and report_ref is None:
-        return PlanSettlement(action="wait", reason="report required before settlement")
+        return SettlementDecision(
+            action="wait", reason="report required before settlement"
+        )
     return settlement
 
 
@@ -371,13 +368,15 @@ class PlanRunner:
         if state.kind == "SEARCH":
             updated = await apply_trusted_score(
                 state,
-                metric,
-                commit,
+                PlanBest(
+                    metric=metric,
+                    commit=commit,
+                    evidence_ref=evidence_ref,
+                    std_error=evaluation.test_se,
+                    n=evaluation.test_n,
+                ),
                 store=self._store,
-                evidence_ref=evidence_ref,
                 direction=plan_input.direction,
-                std_error=evaluation.test_se,
-                n=evaluation.test_n,
             )
         return PlanTurnResult(
             kind="scored",
@@ -444,17 +443,7 @@ class PlanRunner:
         if state.kind != "SEARCH":
             return None
         diff = await self._workspace.diff(self._branch)
-        rejected = _diff_implements_intervention(diff.paths)
-        if rejected is None:
-            return None
-        kind = "no_change" if not diff.paths else "diff_rejected"
-        if kind == "no_change":
-            rejected = (
-                "this candidate changed no file, so it re-ran the parent unchanged and "
-                "cannot test anything. Implement the intervention described in the "
-                "hypothesis — edit the solution sources, then rerun and submit."
-            )
-        return PlanFailure(kind=kind, detail=rejected)
+        return _diff_intervention_failure(diff.paths)
 
     async def _score_candidate(
         self,

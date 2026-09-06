@@ -7,8 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from test.support import RecordingDocumentProjector
-
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, JsonCodec
@@ -26,11 +24,16 @@ from athena.research.supervisor.deps import (
     SupervisorRuntime,
 )
 from athena.research.supervisor.experiment import PlanTurnResult, apply_trusted_score
-from athena.research.supervisor.scheduling import EloPolicy
+from athena.research.supervisor.plans import PlanBest
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduling import Scheduler, count_search_attempts
+from athena.research.supervisor.scheduling import (
+    EloPolicy,
+    Scheduler,
+    count_search_attempts,
+)
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from test.support import RecordingDocumentProjector
 
 
 async def _eventually(predicate, timeout: float = 20) -> None:
@@ -182,10 +185,12 @@ class _Harness:
             )
             next_state = await apply_trusted_score(
                 state,
-                metric,
-                f"commit-{metric}",
+                PlanBest(
+                    metric=metric,
+                    commit=f"commit-{metric}",
+                    evidence_ref=evidence_ref,
+                ),
                 store=self.store,
-                evidence_ref=evidence_ref,
             )
             return PlanTurnResult(
                 kind="scored",

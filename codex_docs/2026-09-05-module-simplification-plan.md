@@ -691,6 +691,14 @@ Make the two-attribute `EventProjector` slotted, merge its private sequence forw
 
 `events.py` falls from 277 baseline lines to 236 and its top-level definitions from nine to seven. The unchanged focused baseline passed 89 tests; the final selection passed 90 with a new slots/unknown-metadata regression. The complete research, TUI, and gateway transport/handler selection passed 1,509 tests. Ruff, Black, production hard-rule checks, Python compilation, removed-symbol/signature inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 362/602. Whole-repository acceptance remains pending.
 
+## Experiment runner review
+
+Read `supervisor/experiment.py` completely and trace result loading, trusted-score updates, settlement decisions, manifest execution, output collection, evaluator loading, evidence persistence, and every non-`athena_ts` caller. Retain the module because these operations form the trusted execution boundary for one Plan turn; moving individual private helpers would add cross-module interfaces without deleting state. Retain `PlanRunner`'s execution dependencies because PREPARE constructs the same runner without a full `ResearchRuntime`, and the execution context carries candidate-specific prediction features that cannot be derived from the Git branch.
+
+Rename the in-process three-state `PlanSettlement` value to `SettlementDecision` and replace its Pydantic model with a frozen slotted data class, removing its name collision with the durable `settlement.PlanSettlement` service. Make diff attribution return the existing `PlanFailure` domain value directly and delete the second failure-kind inference plus duplicate no-change message. Replace the eight-parameter `apply_trusted_score` interface with four parameters by passing the existing immutable `PlanBest` record, so metric, commit, evidence, uncertainty, and sample count move as one value. No compatibility aliases remain.
+
+`experiment.py` falls from 555 baseline lines to 544 and `apply_trusted_score` from eight parameters to four. The focused baseline passed 46 tests; the expanded final selection passed 88. The complete research unit/integration suite passed 1,379 tests. Ruff, Black, Python compilation, removed-symbol searches, signature inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 363/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1318,7 +1326,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/deps.py` | 111 | Reviewed; slot five focused groups and collapse validation policy to one mode |
 | `src/athena/research/supervisor/evaluator_plan.py` | 425 | Reviewed; runtime-owned five-argument Plan and one real property-probe path replace dependency/test compatibility plumbing |
 | `src/athena/research/supervisor/events.py` | 277 | Reviewed; slot the two-field projector and collapse forwarding/factory compatibility layers while preserving flat wire schemas |
-| `src/athena/research/supervisor/experiment.py` | 555 | Pending |
+| `src/athena/research/supervisor/experiment.py` | 555 | Reviewed; unify score inputs in `PlanBest`, return typed diff failures directly, and distinguish the lightweight settlement decision from the durable service |
 | `src/athena/research/supervisor/manifest.py` | 108 | Pending |
 | `src/athena/research/supervisor/phases.py` | 650 | Pending |
 | `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Pending |

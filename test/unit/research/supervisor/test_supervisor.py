@@ -30,7 +30,7 @@ from athena.research.supervisor.deps import (
     SupervisorPaths,
     SupervisorRuntime,
 )
-from athena.research.supervisor.experiment import PlanSettlement, PlanTurnResult
+from athena.research.supervisor.experiment import PlanTurnResult, SettlementDecision
 from athena.research.supervisor.plan_runtime import CompletedPlanTurn
 from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
@@ -548,7 +548,7 @@ async def test_skip_policy_settles_waiting_plan_without_auto_validate(
     monkeypatch.setattr(
         search_loop_module,
         "decide_settlement",
-        lambda *_args, **_kwargs: PlanSettlement(action="wait"),
+        lambda *_args, **_kwargs: SettlementDecision(action="wait"),
     )
     await supervisor._search._apply_completed_turn(
         CompletedPlanTurn(
