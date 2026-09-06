@@ -9,7 +9,26 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from athena.research.supervisor.state import _core_digest
+
 _FORKED_DIRECTORIES = ("artifacts", "repo")
+
+CARRIED_RESUME_FIELDS = (
+    "task_text",
+    "data_contract",
+    "evaluator_ref",
+    "final_evaluator_ref",
+    "kaggle_download",
+)
+"""PREPARE 的产物里存在 ``resume.json`` 而非 ``state.json`` 的那几项。
+
+分叉曾经只复制 ``state.json``，而这些字段写在兄弟文件 ``resume.json`` 里，新臂开跑时
+它们全是 ``None``：``data_contract`` 为空时 SEARCH 候选拿不到数据契约，会自己去数据目录
+里找划分并在被打分的行上训练；``final_evaluator_ref`` 为空时 VALIDATE 退回搜索
+evaluator，拿 search 标签当留出集打分。两者都只在分数上表现出来，且都是更好看的方向。
+
+``task_research_*`` 刻意不带：与 ``corpus_ref`` 同类，属于要被比较的那个变量。
+"""
 
 
 class ForkError(RuntimeError):
@@ -62,6 +81,46 @@ def _carry_eda_workspace(
     shutil.copytree(origin, destination)
     (destination / ".git").unlink(missing_ok=True)
     return relative.as_posix()
+
+
+def _carry_resume_fields(
+    source_athena: Path, target_athena: Path, target_core: dict
+) -> None:
+    """Copy the source's PREPARE resume fields under the target's own digest.
+
+    ``resume.json`` is guarded by a digest of the core state, so it cannot be
+    copied verbatim: the fork rewrites ``state.json``, the digest stops matching,
+    and ``_merge_resume`` drops the whole file with a warning nobody reads.
+
+    ``fork_project`` also writes ``evaluator_ref`` into the core state from the
+    baseline experiment it resolved; that stays as the fallback for a source
+    that has no resume file at all.
+    """
+    source_resume = source_athena / "resume.json"
+    if not source_resume.is_file():
+        return
+    try:
+        payload = json.loads(source_resume.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    carried = {
+        key: payload[key]
+        for key in CARRIED_RESUME_FIELDS
+        if payload.get(key) is not None
+    }
+    if not carried:
+        return
+    (target_athena / "resume.json").write_text(
+        json.dumps(
+            {"state_digest": _core_digest(target_core), **carried},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def fork_project(source: str | Path, target: str | Path) -> ForkResult:
@@ -122,6 +181,7 @@ def fork_project(source: str | Path, target: str | Path) -> ForkResult:
     (target_athena / "state.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    _carry_resume_fields(source_athena, target_athena, state)
     return ForkResult(
         evaluator_ref=evaluator_ref,
         baseline_experiment_id=baseline_id,

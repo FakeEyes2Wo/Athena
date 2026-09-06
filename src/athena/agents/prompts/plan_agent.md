@@ -34,6 +34,14 @@ the turn is rejected with `no_change` and nothing is measured. Implement the
 intervention the hypothesis actually describes — edit the solution sources, then
 rerun. A good number from the inherited baseline is not your result.
 
+**Every absolute path you inherit is the parent's, not yours.** Your workspace is
+a different directory with a different name, and your commands already run with
+it as the working directory. An output path carried over from the parent writes
+into the parent's workspace; yours keeps the file you started with, and the
+parent's number is then reported as your hypothesis's result. Read and write
+your own artifacts by relative path — the same workspace-relative paths
+`experiment.json` declares — and check the paths you inherited before you rerun.
+
 Use `continue` when another trusted evaluation or optimization turn is useful,
 `submit` when the historically best trusted revision should settle the Plan,
 and `abandon` when the hypothesis should stop. Explain the reason concisely.

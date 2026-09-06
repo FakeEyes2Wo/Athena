@@ -84,6 +84,48 @@ def test_data_contract_value_object_prompts_train_only_never_raw_and_predict_env
     assert "ATHENA_PREDICT_FEATURES" in candidate_text
 
 
+def test_both_renderings_warn_that_only_the_predict_path_moves(tmp_path) -> None:
+    """Reading the env var is not enough if a fixed label file is paired with it.
+
+    The 2026-08-31 SOTA read ATHENA_PREDICT_FEATURES correctly and still died in
+    VALIDATE: it scored those predictions against a hardcoded
+    ``search_labels.csv``, so the features became the held-out split and the
+    labels did not. Both renderings must say that the two cannot be paired,
+    because candidates see one or the other, never both.
+    """
+    contract = DataContract(
+        train_csv=tmp_path / "data_split" / "train.csv",
+        predict_features_csv=tmp_path / "data_split" / "search_features.csv",
+        dataset_path=tmp_path / "model_input.csv",
+    )
+
+    for text in (contract.contract_text(), contract.candidate_task("task")):
+        assert "the only thing that moves" in text
+        assert "any fixed" in text and "label file" in text
+        assert "inconsistent numbers of samples" in text
+
+
+def test_the_evaluator_task_names_which_label_file_is_which(tmp_path) -> None:
+    """The split directory holds both label files, so the prompt must name them.
+
+    On 2026-09-06 the SEARCH evaluator agent listed that directory and copied
+    ``final_labels.csv``; PREPARE failed on the disjointness guard after both
+    evaluators had already been built.
+    """
+    split = (tmp_path / "data_split").resolve()
+    contract = DataContract(
+        train_csv=split / "train.csv",
+        predict_features_csv=split / "search_features.csv",
+        dataset_path=tmp_path / "model_input.csv",
+    )
+
+    text = contract.evaluator_task("build the evaluator")
+
+    assert str(split / "search_labels.csv") in text
+    assert str(split / "final_labels.csv") in text
+    assert "stays hidden from SEARCH" in text
+
+
 def test_the_state_carries_the_contract_across_a_save_load(tmp_path) -> None:
     """SEARCH 可能在 PREPARE 之后很久才跑，甚至跨进程续跑。"""
     path = tmp_path / "state.json"

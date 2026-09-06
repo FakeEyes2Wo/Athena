@@ -555,6 +555,35 @@ def _evaluator_draft(root: Path, labels_csv: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_bundled_prediction_file_is_rejected_before_the_probes(
+    tmp_path: Path,
+) -> None:
+    """A stale copy beside the metric code shadows the file the platform writes.
+
+    On 2026-09-06 an evaluator kept scoring its own sample predictions, so the
+    sensitivity probe saw one constant score and rejected every submit until the
+    turn budget ran out.
+    """
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps(
+            {
+                "eval_script": "evaluate.py",
+                "prediction_file": "predictions__task.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (evaluator_dir / "predictions__task.csv").write_text(
+        "__athena_row_id,prediction\n0,0\n1,1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="must not contain a prediction file"):
+        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+
+
+@pytest.mark.asyncio
 async def test_labels_without_row_id_are_rejected_by_validation(tmp_path: Path) -> None:
     """单列 labels.csv 仍必须在 README 冻结前被结构性检查拦下。"""
     evaluator_dir = tmp_path / "evaluator"

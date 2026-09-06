@@ -18,6 +18,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from athena.core.agent.chat import single_turn_structured_chat
 from athena.core.contracts import ArtifactStore
@@ -57,6 +58,8 @@ class _GateRun:
     llm_sem: asyncio.Semaphore
     progress: ProgressFn
     rejections: list[str]
+    client: Any = None
+    """调用方的 runtime client。缺省会让每次闸门调用新建一个默认 client，绕开配置的网关。"""
 
 
 _FALSIFIABILITY_PROMPT = (
@@ -119,6 +122,7 @@ async def _check_falsifiability(
         FalsifiabilityJudgment,
         model=run.model,
         artifacts=run.artifacts,
+        client=run.client,
     )
     return FalsifiabilityReport(idea_id=idea_id, **judgment.model_dump())
 
@@ -164,6 +168,7 @@ async def _screen_and_review(
                 artifacts=run.artifacts,
                 llm_sem=run.llm_sem,
                 model=run.model,
+                client=run.client,
             )
             for perspective in REVIEW_PERSPECTIVES
         ]
@@ -188,6 +193,7 @@ async def run_light_pipeline(
     *,
     model: str,
     artifacts: ArtifactStore,
+    client: Any = None,
     progress: ProgressFn = _silent,
     rejections: list[str] | None = None,
 ) -> list[Hypothesis]:
@@ -210,6 +216,7 @@ async def run_light_pipeline(
         llm_sem=asyncio.Semaphore(LLM_CONCURRENCY),
         progress=progress,
         rejections=rejections if rejections is not None else [],
+        client=client,
     )
     outcomes = await asyncio.gather(
         *[_screen_and_review(draft, run) for draft in drafts],

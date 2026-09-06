@@ -13,9 +13,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-logger = logging.getLogger(__name__)
-
 from athena.agents.ideator_agent import HandoffResult
+from athena.core.fenced_json import unfence_json
 from athena.agents.task_agents import register_validate_agent
 from athena.core.agent.chat import single_turn_chat
 from athena.execution.runtime import ExecutionContext
@@ -41,6 +40,8 @@ from athena.research.supervisor.validation_contracts import (
     ValidationInput,
     ValidationOptions,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -88,6 +89,23 @@ def _predict_features_path(
             f"required {split} prediction features are missing: {path}"
         )
     return path
+
+
+def _validation_data_csv(runtime: Any) -> Path | None:
+    """Resolve the original dataset for validation command execution.
+
+    The configured dataset is the platform-split source; a resumed run that was
+    started without one falls back to the path PREPARE persisted in the task
+    understanding.
+    """
+    configured = runtime.config.research.dataset.path
+    if configured is not None:
+        return Path(configured)
+    understanding = getattr(runtime.state, "task_understanding", None) or {}
+    persisted = understanding.get("dataset")
+    if isinstance(persisted, str) and persisted.strip():
+        return Path(persisted)
+    return None
 
 
 async def _load_trusted_prepare_score(
@@ -338,6 +356,7 @@ class PhaseRunner:
         options = ValidationOptions(
             timeout_s=rt.state.experiment_timeout_s,
             predict_features=predict_features,
+            data_csv=_validation_data_csv(rt),
         )
         return await run_validation_plan(
             input=frozen,
@@ -362,4 +381,6 @@ class PhaseRunner:
                 'JSON only: {"accepted":true|false,"reason":"..."}.'
             ),
         )
-        return ValidationDiffReview.model_validate_json(answer)
+        # 模型会把 JSON 裹进 ```json 围栏；不剥掉就是 2026-08-31 那次
+        # VALIDATE 崩溃——内容本身是 {"accepted": true, ...}。
+        return ValidationDiffReview.model_validate_json(unfence_json(answer))

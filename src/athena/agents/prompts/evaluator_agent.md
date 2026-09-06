@@ -17,7 +17,17 @@ evaluate/
   labels.csv                 # or labels/ for non-tabular data
   HANDOFF.md
   pyproject.toml
+  predictions/               # supplied per scoring run; never ship one yourself
+    predictions__{task_id}.csv
 ```
+
+`eval_metrics.py` MUST read the scored artifact from
+`predictions/<prediction_file>`, relative to `evaluate/`. Every scoring run —
+the platform's property probes included — writes exactly that path and nothing
+else. Delete any sample prediction file you wrote while testing: a copy sitting
+beside the metric code shadows the injected one for a script that reads the
+bare name, every run then scores that stale file, and the sensitivity probe
+rejects the bundle without ever reaching your metric.
 
 Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
