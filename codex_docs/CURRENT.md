@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Completed gateway restart repair:
+- `codex_docs/2026-09-06-gateway-restart-completion.md`
+
 Completed local baseline-authority mode:
 - `codex_docs/2026-09-06-local-authority-completion.md`
 
