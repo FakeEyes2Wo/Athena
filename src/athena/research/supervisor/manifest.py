@@ -2,19 +2,17 @@
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-_FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
 _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 _MAX_FIELD_NAME_CHARS = 40
 
 
 def _validate_relative_path(path: str, label: str) -> None:
     """拒绝绝对路径、驱动器相对路径、空段与 ``..`` 逃逸。"""
-    if os.path.isabs(path):
-        raise ValueError(f"{label} path must be relative to the workspace")
-    if os.path.splitdrive(path)[0]:
+    if os.path.isabs(path) or os.path.splitdrive(path)[0]:
         raise ValueError(f"{label} path must be relative to the workspace")
     parts = path.replace("\\", "/").split("/")
     if any(part in ("", ".", "..") for part in parts):
@@ -58,16 +56,9 @@ class ExperimentManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    version: int
+    version: Literal[1]
     commands: list[list[str]]
     outputs: dict[str, str]
-
-    @field_validator("version")
-    @classmethod
-    def _validate_version(cls, value: int) -> int:
-        if value != 1:
-            raise ValueError("only manifest version 1 is supported")
-        return value
 
     @field_validator("commands", mode="before")
     @classmethod
@@ -83,7 +74,7 @@ class ExperimentManifest(BaseModel):
             if not argv or any(not part.strip() for part in argv):
                 raise ValueError("each command must be a non-empty argv array")
             executable = os.path.basename(argv[0].replace("\\", "/")).lower()
-            if executable in _FORBIDDEN_EXECUTABLES:
+            if executable in ("git", "git.exe"):
                 raise ValueError("manifest cannot run git commands")
         return value
 
