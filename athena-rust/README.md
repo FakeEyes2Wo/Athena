@@ -68,5 +68,5 @@ Python stays the sole production entry point throughout the migration. The Rust
 crates only read compatible fixtures and never mutate Python data. A later,
 separate integration plan will add an explicit `python`/`rust` engine selection
 with a verified rollback path before any default is switched. See
-`../docs/superpowers/plans/2026-07-25-athena-rust.md` and
-`.superpowers/sdd/progress.md`.
+the Rust migration notes in this repository and the Python architecture
+documentation under `../docs/`.

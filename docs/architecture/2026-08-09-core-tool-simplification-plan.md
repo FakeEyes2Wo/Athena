@@ -1,7 +1,5 @@
 # Core 工具设计极简改造实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** 让 `@tool` 装饰器支持"一行把函数设定为 tool"（裸用 + 自动推导 name/完整 docstring/类型注解 schema），并把通用工具集对齐 Pi 的 4 件套（read_file/write_file/bash/pwsh），删除未使用的脚本工具。
 
 **Architecture:** `@tool` 仍返回 `BaseTool` 实例，因此 `ToolSpec`/`ToolResult`/`ToolContext`/`ToolRegistry`/runtime 消费路径零改动。`generic_tools.py` 用闭包捕获 workspace，四个工具各写成一行 `@tool` 异步函数。

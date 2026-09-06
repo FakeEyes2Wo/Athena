@@ -9,8 +9,6 @@
 > The numbered task snapshots below are retained for audit history and are not a
 > source of truth for present module paths.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** 用确定性的 `Planner -> Validator -> Executor` Supervisor 接管 Athena 的完整研究流程，通过 `ResearchRuntime` 和 `Athena-cli` 从任意数据目录完成 `PREPARE -> SEARCH -> VALIDATE -> COMPLETED`。
 
 **Architecture:** `ResearchRuntime` 只负责装配、公开命令和 execution 生命周期；Supervisor 每次只生成一个可恢复的一步式 Plan。SQLite 只保存控制状态、Plan/Operation、预算和 Artifact refs，报告、脚本、模型、图和日志全部保存在内容寻址 `ArtifactStore`。所有业务数据解释和读取由 LLM 生成的 `python-uv` Bundle 完成，确定性服务只负责隔离执行、合同校验、排名、事实提交和恢复。
@@ -830,7 +828,7 @@ rg -n "ProjectRuntime|SupervisorAgent|ReportAgent|REPORT|SEARCH_START|VALIDATE_S
 
 Expected: 只列出应删除/重写的位置；命令绝不打开禁读文件。
 
-巡检证据：第二十轮按排除规则执行扫描，未读取禁读 workflow。代码侧仅剩旧命令的负向测试和说明性文字；但 `docs/myplan`、`docs/architecture`、`docs/superpowers/plans` 仍有大量 `ProjectRuntime`、`SupervisorAgent`、旧阶段命令与 REPORT 流程说明，属于待重写/归档的文档债务。
+巡检证据：第二十轮按排除规则执行扫描，未读取禁读 workflow。代码侧仅剩旧命令的负向测试和说明性文字；当时的历史计划仍有大量 `ProjectRuntime`、`SupervisorAgent`、旧阶段命令与 REPORT 流程说明，属于待重写/归档的文档债务。
 
 - [x] **Step 2: 删除旧引用并重命名旧测试**
 
