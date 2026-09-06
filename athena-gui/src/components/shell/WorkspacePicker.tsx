@@ -1,6 +1,11 @@
 import { useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { Icon } from "../common/Icon";
 import styles from "./WorkspacePicker.module.css";
+import {
+  listWorkspaceDirectories,
+  type WorkspaceDirectoryListing,
+} from "../../lib/workspaceDialog";
 
 interface WorkspacePickerProps {
   /** Active root reported by the backend (null until settings load). */
@@ -27,12 +32,37 @@ export function WorkspacePicker({
   onContinue,
 }: WorkspacePickerProps) {
   const [draft, setDraft] = useState("");
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserLoading, setBrowserLoading] = useState(false);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  const [listing, setListing] = useState<WorkspaceDirectoryListing | null>(null);
 
   const canContinue = currentRoot != null && !switching;
   const canSelect = draft.trim() !== "";
 
   function submit() {
     if (draft.trim()) onSelect(draft);
+  }
+
+  async function openBrowser(path?: string | null) {
+    setBrowserLoading(true);
+    setBrowserError(null);
+    try {
+      setListing(await listWorkspaceDirectories(path));
+    } catch (err) {
+      setBrowserError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBrowserLoading(false);
+    }
+  }
+
+  function handleBrowse() {
+    if (isTauri()) {
+      onBrowse();
+      return;
+    }
+    setBrowserOpen(true);
+    void openBrowser(currentRoot);
   }
 
   return (
@@ -88,10 +118,10 @@ export function WorkspacePicker({
           <span className={styles.label}>打开其他目录</span>
           <button
             className="btn btn--subtle"
-            onClick={onBrowse}
-            disabled={browsing}
+            onClick={handleBrowse}
+            disabled={browsing || browserLoading}
           >
-            {browsing ? "浏览中…" : "浏览目录…"}
+            {browsing || browserLoading ? "浏览中…" : "浏览目录…"}
           </button>
           <div className={styles.row}>
             <input
@@ -113,6 +143,66 @@ export function WorkspacePicker({
             </button>
           </div>
         </div>
+
+        {browserOpen && (
+          <div className={styles.browser} role="dialog" aria-label="浏览工作区目录">
+            <div className={styles.browserHeader}>
+              <span className={styles.label}>选择工作区目录</span>
+              <button
+                className="btn btn--subtle"
+                onClick={() => setBrowserOpen(false)}
+                disabled={browserLoading}
+              >
+                取消
+              </button>
+            </div>
+            {browserError && <div className="card card--error">{browserError}</div>}
+            {listing && (
+              <>
+                <div className={styles.browserPath} title={listing.path}>
+                  <Icon name="folder" size={15} />
+                  {listing.path}
+                </div>
+                <div className={styles.browserActions}>
+                  <button
+                    className="btn btn--subtle"
+                    onClick={() => void openBrowser(listing.parent)}
+                    disabled={!listing.parent || browserLoading}
+                  >
+                    上一级
+                  </button>
+                  <button
+                    className="btn btn--primary"
+                    onClick={() => {
+                      setBrowserOpen(false);
+                      onSelect(listing.path);
+                    }}
+                    disabled={browserLoading}
+                  >
+                    选择此目录
+                  </button>
+                </div>
+                <ul className={styles.browserList}>
+                  {listing.directories.map((directory) => (
+                    <li key={directory.path}>
+                      <button
+                        className={styles.item}
+                        onClick={() => void openBrowser(directory.path)}
+                        disabled={browserLoading}
+                      >
+                        <Icon name="folder" size={15} />
+                        <span className={styles.itemPath}>{directory.name}</span>
+                      </button>
+                    </li>
+                  ))}
+                  {listing.directories.length === 0 && (
+                    <li className={styles.browserEmpty}>此目录没有子目录。</li>
+                  )}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

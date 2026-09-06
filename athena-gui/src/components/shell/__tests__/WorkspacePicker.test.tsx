@@ -1,6 +1,16 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePicker } from "../WorkspacePicker";
+
+const mocks = vi.hoisted(() => ({
+  isTauri: vi.fn(),
+  listWorkspaceDirectories: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: mocks.isTauri }));
+vi.mock("../../../lib/workspaceDialog", () => ({
+  listWorkspaceDirectories: mocks.listWorkspaceDirectories,
+}));
 
 function renderPicker(
   overrides: Partial<React.ComponentProps<typeof WorkspacePicker>> = {},
@@ -20,6 +30,12 @@ function renderPicker(
 }
 
 describe("WorkspacePicker", () => {
+  beforeEach(() => {
+    mocks.isTauri.mockReset();
+    mocks.isTauri.mockReturnValue(true);
+    mocks.listWorkspaceDirectories.mockReset();
+  });
+
   it("opens the native directory browser", () => {
     const { props } = renderPicker();
 
@@ -96,5 +112,32 @@ describe("WorkspacePicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开" }));
 
     expect(props.onSelect).toHaveBeenCalledWith("/home/athena/project");
+  });
+
+  it("browses and selects a workspace in browser mode", async () => {
+    mocks.isTauri.mockReturnValue(false);
+    mocks.listWorkspaceDirectories
+      .mockResolvedValueOnce({
+      path: "/home/user",
+      parent: "/home",
+      directories: [{ name: "project", path: "/home/user/project" }],
+      })
+      .mockResolvedValueOnce({
+        path: "/home/user/project",
+        parent: "/home/user",
+        directories: [],
+      });
+    const { props } = renderPicker();
+
+    fireEvent.click(screen.getByRole("button", { name: "浏览目录…" }));
+    await waitFor(() => expect(mocks.listWorkspaceDirectories).toHaveBeenCalledWith("C:/current"));
+    expect(screen.getByRole("dialog", { name: "浏览工作区目录" })).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "project" }));
+    });
+    await waitFor(() => expect(screen.getByTitle("/home/user/project")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "选择此目录" }));
+    expect(props.onSelect).toHaveBeenCalledWith("/home/user/project");
   });
 });

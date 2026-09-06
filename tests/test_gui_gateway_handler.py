@@ -998,3 +998,21 @@ async def test_set_project_root_auto_creates_directory(tmp_path) -> None:
     assert result["project_root"] == str(target)
     assert len(created) == 1
     assert created[0].tree_path.parent.parent == target
+
+
+@pytest.mark.asyncio
+async def test_workspace_directories_lists_children_and_parent(tmp_path) -> None:
+    root = tmp_path / "projects"
+    child = root / "alpha"
+    root.mkdir()
+    child.mkdir()
+    (root / "notes.txt").write_text("not a directory", encoding="utf-8")
+    handler = _handler_at(tmp_path)
+
+    result = await handler.dispatch("workspace_directories", {"path": str(root)})
+
+    assert result == {
+        "path": str(root.resolve()),
+        "parent": str(root.resolve().parent),
+        "directories": [{"name": "alpha", "path": str(child.resolve())}],
+    }

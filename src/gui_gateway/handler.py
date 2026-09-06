@@ -76,6 +76,7 @@ SUPPORTED_METHODS: frozenset[str] = frozenset(
         "tree_load",
         "sessions_list",
         "sessions_list_for",
+        "workspace_directories",
         "session_switch",
         "session_delete",
         "eda_report",
@@ -170,6 +171,16 @@ def _session_activity(state_root: Path) -> tuple[bool, float]:
     if stamps:
         return True, max(stamps)
     return False, state_root.stat().st_mtime if state_root.is_dir() else 0.0
+
+
+def _directory_status(path: Path) -> bool:
+    """Return whether a path is a directory, preserving permission failures."""
+    try:
+        return stat.S_ISDIR(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise ValueError(f"directory is not accessible: {path}") from exc
 
 
 def _rmtree_force(path: Path) -> None:
@@ -413,6 +424,38 @@ class GuiRequestHandler:
         """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。"""
         return {"sessions": self._session_ids(Path(path))}
 
+    def workspace_directories(self, path: str | None = None) -> dict[str, object]:
+        """List directories for the browser workspace picker.
+
+        The browser cannot obtain a host filesystem path from its directory
+        picker APIs.  This deliberately small RPC lets the already-connected
+        local gateway navigate the host filesystem and return paths that
+        ``set_project_root`` can consume.
+        """
+        root = Path(path).expanduser() if path else Path.cwd()
+        root = root.resolve(strict=False)
+        while not _directory_status(root) and root != root.parent:
+            root = root.parent
+        if not _directory_status(root):
+            raise ValueError(f"directory is not accessible: {path or root}")
+        try:
+            directories = sorted(
+                (
+                    {"name": entry.name, "path": str(entry.resolve(strict=False))}
+                    for entry in root.iterdir()
+                    if _directory_status(entry)
+                ),
+                key=lambda item: str(item["name"]).casefold(),
+            )
+        except OSError as exc:
+            raise ValueError(f"directory is not readable: {root}") from exc
+        parent = root.parent if root != root.parent else None
+        return {
+            "path": str(root),
+            "parent": str(parent) if parent is not None else None,
+            "directories": directories,
+        }
+
     async def session_delete(self, session_id: str) -> dict[str, object]:
         """删除会话；删当前会话时先切回 default 释放句柄，再删目录。"""
         if session_id == "default":
@@ -491,6 +534,11 @@ class GuiRequestHandler:
             return self.sessions_list()
         if method == "sessions_list_for":
             return self.sessions_list_for(_require_str(params, "path", "path"))
+        if method == "workspace_directories":
+            path = params.get("path")
+            if path is not None and (not isinstance(path, str) or not path.strip()):
+                raise ValueError("path must be a non-empty string or null")
+            return self.workspace_directories(path)
         if method == "session_switch":
             return await self.session_switch(
                 _require_str(params, "session_id", "session_id")

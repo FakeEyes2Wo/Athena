@@ -45,6 +45,7 @@ CANONICAL_METHODS: frozenset[str] = frozenset(
         "tree_load",
         "sessions_list",
         "sessions_list_for",
+        "workspace_directories",
         "session_switch",
         "session_delete",
         "eda_report",
@@ -121,9 +122,9 @@ NATIVE_ONLY_COMMANDS: frozenset[str] = frozenset({"workspace_dialog_start_direct
 
 
 def _rust_command_names() -> set[str]:
-    """Extract ``commands::<mod>::<fn>`` names from ``generate_handler![...]``."""
+    """Extract command names from either supported Rust path spelling."""
     text = LIB_RS.read_text(encoding="utf-8")
-    return set(re.findall(r"commands::\w+::(\w+)", text))
+    return set(re.findall(r"commands::(?:\w+::)?(\w+)", text))
 
 
 def _dispatch_route_literals() -> set[str]:
@@ -167,6 +168,6 @@ def test_rust_commands_map_to_supported_methods() -> None:
     assert (
         mapped_methods <= SUPPORTED_METHODS
     ), f"以下 Rust 命令映射的方法未被网关支持: {sorted(mapped_methods - SUPPORTED_METHODS)}"
-    # 仅 ping/start/start_task 为 WebSocket 专用（无 Tauri 命令），其余方法均应被命令覆盖。
-    ws_only = {"ping", "start", "start_task"}
+    # ping/start/start_task/workspace_directories 为 WebSocket 专用（无 Tauri 命令）。
+    ws_only = {"ping", "start", "start_task", "workspace_directories"}
     assert SUPPORTED_METHODS - mapped_methods == ws_only
