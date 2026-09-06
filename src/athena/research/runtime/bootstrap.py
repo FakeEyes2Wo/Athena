@@ -66,7 +66,7 @@ from athena.research.supervisor.deps import (
     resolve_validation_mode,
 )
 from athena.research.supervisor.events import EventProjector
-from athena.research.supervisor.recovery import Recovery
+from athena.research.supervisor.recovery import reconcile as reconcile_plans
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
@@ -265,7 +265,7 @@ def wire_workflow(runtime: Any) -> None:
         ),
         search=SearchServices(
             scheduler=Scheduler(),
-            recovery=Recovery(),
+            recovery=reconcile_plans,
             direction=config.research.policy.direction,
             tolerance=config.research.policy.tolerance,
             on_plan_settled=runtime.release_lease,

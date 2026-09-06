@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from athena.research.supervisor.experiment import PlanTurnResult
     from athena.research.supervisor.plans import PlanState
     from athena.research.supervisor.prepare import PrepareResult
-    from athena.research.supervisor.recovery import Recovery
+    from athena.core.research_tree import ResearchTree
     from athena.research.supervisor.scheduling import Scheduler
 
 PlanTurn = Callable[[str, "PlanState"], Awaitable["PlanTurnResult"]]
@@ -81,12 +81,18 @@ class PhaseActions:
     validation_mode: ValidationMode = "manual"
 
 
+_PlanRecovery = Callable[
+    ["ResearchState", "ResearchTree", Callable[[str], bool], Callable[[str], bool]],
+    "ResearchState",
+]
+
+
 @dataclass(slots=True)
 class SearchServices:
     """Own SEARCH scheduling and comparison policy services."""
 
     scheduler: "Scheduler"
-    recovery: "Recovery"
+    recovery: _PlanRecovery
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     on_plan_settled: Callable[[str], Awaitable[None]] | None = None

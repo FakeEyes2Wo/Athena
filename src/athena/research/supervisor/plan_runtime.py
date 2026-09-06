@@ -398,7 +398,7 @@ class PlanRuntime:
                     tree_changed = True
         if tree_changed:
             self._tree.save(self._deps.paths.tree_path)
-        recovered = self._deps.search.recovery.reconcile(
+        recovered = self._deps.search.recovery(
             candidate,
             self._tree,
             workspace_exists=lambda plan_id: workspace_presence.get(plan_id, False),

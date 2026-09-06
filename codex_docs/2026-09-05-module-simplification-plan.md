@@ -1364,7 +1364,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/plans.py` | 180 | Reviewed; remove three unread input fields and decision suggestions, share trusted-ref validation, and project frozen Human guidance into Plan prompts |
 | `src/athena/research/supervisor/prepare.py` | 296 | Reviewed; add slim dependency/request holders, inline prepare turn loop, and extract shared decision/outcome checks |
 | `src/athena/research/supervisor/prompt_context.py` | 74 | Reviewed; remove one-purpose PromptBlock class, keep helper block renderer |
-| `src/athena/research/supervisor/recovery.py` | 60 | Pending |
+| `src/athena/research/supervisor/recovery.py` | 60 | Reviewed; replace class-like recovery façade with pure function callpoint and compatibility shim |
 | `src/athena/research/supervisor/run_state.py` | 145 | Pending |
 | `src/athena/research/supervisor/scheduling.py` | 389 | Pending |
 | `src/athena/research/supervisor/search_loop.py` | 429 | Pending |
