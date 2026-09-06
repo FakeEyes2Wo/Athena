@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Completed GUI demonstration work:
+- `codex_docs/2026-09-06-gui-tess-demo-completion.md`
+
 Active error-ledger repair work:
 - `codex_docs/2026-09-06-error-ledger-repair-plan.md`
 
