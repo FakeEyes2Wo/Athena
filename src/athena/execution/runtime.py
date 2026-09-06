@@ -492,6 +492,29 @@ async def _wait_for_process_exit(proc, timeout_s: int) -> int:
     return proc.returncode
 
 
+async def _reap_process(proc) -> None:
+    """等待被终止的进程退出，但不让清理流程无限等待。"""
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=POST_EXIT_DRAIN_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning("terminated process did not exit before cleanup deadline")
+
+
+async def _drain_readers(readers: list[asyncio.Task]) -> None:
+    """有限地排空输出 reader，并取消仍被脱离子进程阻塞的 reader。"""
+    done, pending = await asyncio.wait(readers, timeout=POST_EXIT_DRAIN_TIMEOUT_S)
+    for reader in pending:
+        reader.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    await asyncio.gather(*done, return_exceptions=True)
+
+
+async def _cleanup_terminated_process(proc, readers: list[asyncio.Task]) -> None:
+    """并行回收进程和输出 reader，共享一个有界清理窗口。"""
+    await asyncio.gather(_reap_process(proc), _drain_readers(readers))
+
+
 def _stream_fallback_encoding() -> str:
     """子进程输出非合法 UTF-8 时的回退解码编码。"""
     if os.name != "nt":
@@ -586,15 +609,20 @@ class CommandExecutor:
             )
         return command
 
-    def _terminate(self, proc) -> None:
+    def _terminate(self, proc, process_group: int | None = None) -> None:
         """终止完整子进程树（Windows ``taskkill /T``；POSIX ``killpg``）。"""
         if os.name == "nt":
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True
             )
         else:
+            if process_group is None:
+                try:
+                    process_group = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    return
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(process_group, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
@@ -650,6 +678,8 @@ class CommandExecutor:
                 ok=False, stdout="", stderr="", exit_code=127, error=error
             )
 
+        process_group = proc.pid if os.name != "nt" else None
+
         keep_full = self._persist is not None
         out = BoundedOutput(keep_full=keep_full)
         err = BoundedOutput(keep_full=keep_full)
@@ -680,15 +710,9 @@ class CommandExecutor:
         try:
             returncode = await _wait_for_process_exit(proc, timeout_s)
         except asyncio.TimeoutError:
-            self._terminate(proc)
+            self._terminate(proc, process_group)
+            await _cleanup_terminated_process(proc, readers)
             # drain 也要有界：孙进程可能脱离进程组仍霸占管道。
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*readers, return_exceptions=True),
-                    timeout=POST_EXIT_DRAIN_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                pass
             return CommandResult(
                 ok=False,
                 stdout=out.text(),
@@ -697,8 +721,8 @@ class CommandExecutor:
                 error="timeout",
             )
         except asyncio.CancelledError:
-            self._terminate(proc)
-            await asyncio.gather(*readers, return_exceptions=True)
+            self._terminate(proc, process_group)
+            await _cleanup_terminated_process(proc, readers)
             raise
         # Windows 偶尔不向异步 pipe reader 交付 EOF；进程退出后只做有界 drain。
         done, pending = await asyncio.wait(readers, timeout=POST_EXIT_DRAIN_TIMEOUT_S)

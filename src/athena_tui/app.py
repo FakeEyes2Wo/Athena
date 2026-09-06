@@ -43,6 +43,13 @@ from athena_tui.state import (
     set_history_follow,
 )
 
+try:
+    from pyperclip import PyperclipException
+except ImportError:
+    _CLIPBOARD_ERRORS: tuple[type[Exception], ...] = ()
+else:
+    _CLIPBOARD_ERRORS = (PyperclipException,)
+
 _DEFAULT_SIZE = (24, 80)
 _FIXED_ROWS = 5
 _SCROLL_STEP = 3
@@ -89,7 +96,31 @@ def _create_system_clipboard() -> Clipboard:
         )  # 延迟导入避免循环依赖
     except ImportError:
         return InMemoryClipboard()
-    return PyperclipClipboard()
+    return _ResilientClipboard(PyperclipClipboard())
+
+
+class _ResilientClipboard(Clipboard):
+    """Keep TUI clipboard operations usable when the system backend is absent."""
+
+    def __init__(self, system: Clipboard) -> None:
+        self._system = system
+        self._fallback = InMemoryClipboard()
+
+    def set_data(self, data) -> None:
+        """Keep a local copy before attempting the system clipboard."""
+        self._fallback.set_data(data)
+        try:
+            self._system.set_data(data)
+        except _CLIPBOARD_ERRORS:
+            self._system = self._fallback
+
+    def get_data(self):
+        """Return system text, falling back to the last local copy on failure."""
+        try:
+            return self._system.get_data()
+        except _CLIPBOARD_ERRORS:
+            self._system = self._fallback
+            return self._fallback.get_data()
 
 
 class _HistoryControl(FormattedTextControl):

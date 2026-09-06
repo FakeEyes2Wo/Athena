@@ -21,7 +21,7 @@ You are the single EDA orchestrator. You run in two turns.
 - [ ] 02 Columns -> EDA_REPORT_02_COLUMNS.md
 - [ ] 03 Target -> EDA_REPORT_03_TARGET.md
 
-## Stage 3: Relationships (parallel: true)
+## Stage 3: Relationships (parallel: false)
 - [ ] 04 Relationships -> EDA_REPORT_04_RELATIONSHIPS.md
 - [ ] 05 Leaks & Drift -> EDA_REPORT_05_LEAKS_DRIFT.md
 
@@ -36,6 +36,8 @@ Do not include an "Index & Handoff" checkbox in `EDA_TODO.md`.
 Rules:
 - `parallel: false` stages run one task at a time.
 - `parallel: true` stages may run up to 3 workers concurrently.
+- Put consumers of another report in a later stage, or after their producer in
+  a `parallel: false` stage. Concurrent tasks must not depend on sibling reports.
 - Add modality-specific tasks (images/text/timeseries) when needed.
 - Do not write the actual EDA reports in this turn.
 

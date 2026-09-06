@@ -76,6 +76,26 @@ def test_run_status_and_kaggle_settings_come_from_research_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_guidance_survives_restart_and_next_is_consumed_once(tmp_path) -> None:
+    state_path = tmp_path / "state.json"
+    state = ResearchState(
+        status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
+    )
+    run = SupervisorRunState(lambda: state)
+    await run.record_guidance("always avoid leakage", "persistent")
+    await run.record_guidance("try ViT next", "next")
+    state.save(state_path)
+
+    restarted_state = ResearchState.load(state_path)
+    restarted = SupervisorRunState(lambda: restarted_state)
+    assert restarted.take_guidance() == ["always avoid leakage", "try ViT next"]
+    assert restarted.take_guidance() == ["always avoid leakage"]
+    restarted_state.save(state_path)
+
+    assert ResearchState.load(state_path).next_guidance is None
+
+
+@pytest.mark.asyncio
 async def test_search_loop_dispatches_through_public_plan_turn_callback() -> None:
     state = ResearchState(
         status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1

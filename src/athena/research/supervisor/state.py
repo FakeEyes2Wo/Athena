@@ -34,6 +34,8 @@ RESUME_FIELDS = (
     "evaluator_ref",
     "final_evaluator_ref",
     "validation_skipped",
+    "persistent_guidance",
+    "next_guidance",
 )
 
 
@@ -112,6 +114,10 @@ class ResearchState(BaseModel):
     # 走的是 context_refs 死信道），它们能看到的只有假设、评估器 HANDOFF 与工作区。
     # 不给的话候选会自己去数据目录里找划分，在被打分的那些行上训练。
     data_contract: str | None = None
+    # Human guidance waiting to be frozen into future Plan inputs. These are
+    # resume fields because guidance must survive a Supervisor restart.
+    persistent_guidance: list[str] = Field(default_factory=list)
+    next_guidance: str | None = None
     # 断点续传：configure_kaggle 的持久化决定（None=未决定，False=已决定关闭）。
     kaggle_download: bool | None = None
     # 断点续传：任务理解阶段 general 调研的产物引用、worker 稳定 id 与任务原文；
@@ -179,9 +185,9 @@ class ResearchState(BaseModel):
         except (OSError, json.JSONDecodeError):
             pass
         resume_payload = {
-            key: getattr(self, key)
+            key: value
             for key in RESUME_FIELDS
-            if getattr(self, key) is not None
+            if (value := getattr(self, key)) is not None and value != []
         }
         resume_path = _resume_path(target)
         if resume_payload:

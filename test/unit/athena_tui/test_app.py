@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import athena_tui.app as app_module
+from pyperclip import PyperclipException
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.clipboard import InMemoryClipboard
 from prompt_toolkit.data_structures import Point
@@ -638,6 +639,21 @@ async def test_ctrl_c_falls_back_when_system_clipboard_is_unavailable(
 
     assert prompt_app.clipboard.get_data().text == "copy me"
     assert app.state.mode == COMPOSER
+
+
+def test_system_clipboard_preserves_text_after_runtime_backend_failure() -> None:
+    class UnavailableClipboard(InMemoryClipboard):
+        def set_data(self, _data) -> None:
+            raise PyperclipException("clipboard unavailable")
+
+        def get_data(self):
+            raise PyperclipException("clipboard unavailable")
+
+    clipboard = app_module._ResilientClipboard(UnavailableClipboard())
+
+    clipboard.set_text("draft")
+
+    assert clipboard.get_data().text == "draft"
 
 
 def test_composer_is_multiline_bounded() -> None:

@@ -169,6 +169,7 @@ async def test_run_returns_when_exited_process_pipe_never_reaches_eof(
             raise StopAsyncIteration
 
     class ExitedProcess:
+        pid = 1234
         returncode = 0
         stdout = HangingStream()
         stderr = ClosedStream()
@@ -211,6 +212,7 @@ async def test_run_uses_returncode_when_process_wait_never_returns(
             raise StopAsyncIteration
 
     class ExitedProcess:
+        pid = 1234
         returncode = 0
         stdout = ClosedStream()
         stderr = ClosedStream()
@@ -223,7 +225,9 @@ async def test_run_uses_returncode_when_process_wait_never_returns(
         return ExitedProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(CommandExecutor, "_terminate", lambda _self, _proc: None)
+    monkeypatch.setattr(
+        CommandExecutor, "_terminate", lambda _self, _proc, _group: None
+    )
 
     result = await asyncio.wait_for(
         CommandExecutor(env={}).run(
@@ -286,6 +290,50 @@ async def test_run_cancel_terminates_process_tree(tmp_path: Path) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_run_cancel_does_not_wait_for_a_stuck_output_reader(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class HangingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    class RunningProcess:
+        pid = 1234
+        returncode = None
+        stdout = HangingStream()
+        stderr = HangingStream()
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return -1
+
+    async def create_process(*_args, **_kwargs):
+        return RunningProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(
+        CommandExecutor, "_terminate", lambda _self, _proc, _group: None
+    )
+    monkeypatch.setattr(
+        "athena.execution.runtime.POST_EXIT_DRAIN_TIMEOUT_S", 0.01, raising=False
+    )
+
+    task = asyncio.create_task(
+        CommandExecutor(env={}).run(
+            command=["running-command"], workdir=tmp_path, timeout_s=30
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
 
 
 @pytest.mark.asyncio

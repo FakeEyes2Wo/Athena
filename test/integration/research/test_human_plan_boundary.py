@@ -230,6 +230,64 @@ async def test_persistent_guidance_is_frozen_into_every_later_plan(runtime):
 
 
 @pytest.mark.asyncio
+async def test_cancel_plan_is_durable_and_discards_late_completion(
+    runtime, monkeypatch
+):
+    from athena.core.research_tree import ResearchTree
+    from athena.research.supervisor.state import ResearchState
+    from athena.research.supervisor.recovery import reconcile
+    from athena.research.supervisor.plan_runtime import CompletedPlanTurn
+
+    await runtime.supervisor.start_plan("h_existing")
+    await runtime.supervisor.start_plan("h_other")
+    entered = asyncio.Event()
+
+    async def worker():
+        entered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(worker())
+    runtime.supervisor._run.add_running("h_existing", task)
+    await entered.wait()
+    old_state = runtime.state.model_copy(deep=True)
+
+    async def no_new_work():
+        return False
+
+    monkeypatch.setattr(runtime.supervisor._search, "_fill_slots", no_new_work)
+    scheduler = asyncio.create_task(runtime.supervisor._search.run_search())
+    await asyncio.sleep(0)
+    result = await runtime.message("/cancel h_existing evaluator boundary violation")
+    await asyncio.wait_for(scheduler, timeout=1)
+    assert result == "cancelled h_existing"
+    assert task.cancelled()
+    assert runtime.state.status == "RUNNING"
+    assert "h_other" in runtime.state.plans
+    assert runtime.tree.best_experiment_id() == "exp_baseline"
+    experiment = runtime.tree.get_experiment("exp_h_existing")
+    assert experiment.status is ExperimentStatus.CANCELLED
+    assert (
+        await runtime.store.get_text(experiment.artifacts["cancellation_reason"])
+        == "evaluator boundary violation"
+    )
+    loaded = ResearchState.load(runtime.state_path)
+    tree = ResearchTree.load(runtime.supervisor._deps.paths.tree_path)
+    recovered = reconcile(loaded, tree, lambda _: True, lambda _: True)
+    assert "h_existing" not in recovered.plans
+    assert (
+        "h_existing"
+        not in reconcile(old_state, tree, lambda _: True, lambda _: True).plans
+    )
+    await runtime.supervisor._search._apply_completed_turn(
+        CompletedPlanTurn("h_existing", None, None)
+    )
+    assert runtime.tree.best_experiment_id() == "exp_baseline"
+    with pytest.raises(ValueError, match="settled"):
+        await runtime.supervisor.select_next_hypothesis("h_existing")
+    assert await runtime.message("/cancel h_existing retry") == result
+
+
+@pytest.mark.asyncio
 async def test_next_guidance_is_frozen_once(runtime):
     await runtime.message("try ViT next")
     await runtime.supervisor.start_plan("h_existing")

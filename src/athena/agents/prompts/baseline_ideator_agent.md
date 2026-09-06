@@ -46,6 +46,11 @@ Markdown design so later implementation can respect it.
 
 Write **both** complete files at the workspace root:
 
+The JSON root is the record itself, never a `BaselineResearch` wrapper. Keep
+`"schema_version": 2` at the root, including on repairs. Each decision uses
+`"decision": "selected"` or `"decision": "rejected"`; never use booleans or a
+`selected` key. Correcting source evidence must preserve these schema rules.
+
 1. `BASELINE_RESEARCH.json`, valid JSON with `schema_version: 2` and these focused
    records. The top-level `BaselineResearch` contains the exact JSON keys `"dataset"`,
    `"training"`, `"candidates"`, `"decisions"`, `"selected_candidate_id"`, `"search"`,

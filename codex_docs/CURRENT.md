@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Active error-ledger repair work:
+- `codex_docs/2026-09-06-error-ledger-repair-plan.md`
+
 Active implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-transactional-search-resume-backend.md`
 

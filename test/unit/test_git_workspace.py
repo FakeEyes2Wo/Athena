@@ -143,6 +143,85 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.manager.remove(workspace, delete_branch=True)
 
+    async def test_diff_recovers_an_agent_commit_before_review(self) -> None:
+        workspace = await self._create("experiment/agent-commit")
+        path = Path(workspace.path)
+        model = path / "model.py"
+        model.write_text("agent committed change\n", encoding="utf-8")
+        self._git("add", "model.py", cwd=path)
+        self._git("commit", "--no-gpg-sign", "-m", "agent-owned commit", cwd=path)
+        agent_commit = self._git("rev-parse", "HEAD", cwd=path).stdout.strip()
+
+        reviewed = await self.manager.diff(workspace)
+
+        self.assertEqual(
+            agent_commit,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+        self.assertIn("model.py", reviewed.paths)
+        self.assertIn(b"agent committed change", self.artifacts[reviewed.ref])
+        committed = await self.manager.commit(workspace, reviewed, "approved change")
+        self.assertEqual(
+            committed,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+        self.assertEqual(
+            agent_commit,
+            self._git("rev-parse", f"{committed}^", cwd=path).stdout.strip(),
+        )
+
+        async def write_recovered_diff(content: bytes) -> str:
+            digest = hashlib.sha256(content).hexdigest()
+            ref = f"artifact://git-diff/{digest}"
+            self.artifacts[ref] = content
+            return ref
+
+        recovered_manager = LocalGitWorkspace(
+            self.repo, self.worktree_root, write_recovered_diff
+        )
+        recovered = await recovered_manager.create(
+            self.base_commit, "experiment/agent-commit"
+        )
+        self.assertEqual(committed, recovered.base_commit)
+        self.assertEqual(
+            committed,
+            await recovered_manager.commit(recovered, reviewed, "recovered change"),
+        )
+
+        second = path / "second.py"
+        second.write_text("second agent committed change\n", encoding="utf-8")
+        self._git("add", "second.py", cwd=path)
+        self._git("commit", "--no-gpg-sign", "-m", "second agent commit", cwd=path)
+        second_agent_commit = self._git("rev-parse", "HEAD", cwd=path).stdout.strip()
+
+        resumed_manager = LocalGitWorkspace(
+            self.repo, self.worktree_root, write_recovered_diff
+        )
+        resumed = await resumed_manager.create(
+            self.base_commit, "experiment/agent-commit"
+        )
+        resumed_review = await resumed_manager.diff(resumed)
+        self.assertEqual(
+            second_agent_commit,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+        self.assertEqual(("second.py",), resumed_review.paths)
+
+        second_review = await self.manager.diff(workspace)
+
+        self.assertEqual(
+            second_agent_commit,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+        self.assertEqual(("second.py",), second_review.paths)
+        second_committed = await self.manager.commit(
+            workspace, second_review, "approved second change"
+        )
+        self.assertEqual(
+            second_agent_commit,
+            self._git("rev-parse", f"{second_committed}^", cwd=path).stdout.strip(),
+        )
+
     async def test_workspace_supports_multiple_reviewed_commits(self) -> None:
         workspace = await self._create("athena/plan/h1")
         path = Path(workspace.path)

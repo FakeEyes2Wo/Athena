@@ -94,11 +94,17 @@ class Supervisor:
 
     async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
         """Record Human guidance for one or all later Plan inputs."""
-        return await self._run.record_guidance(text, scope)
+        result = await self._run.record_guidance(text, scope)
+        self._plans.save_state()
+        return result
 
     async def start_plan(self, hypothesis_id: str) -> str:
         """Create the stable Plan identity for one Hypothesis."""
         return await self._plans.start_plan(hypothesis_id)
+
+    async def cancel_plan(self, plan_id: str, reason: str) -> dict[str, object]:
+        """Cancel one SEARCH Plan without promoting its previous results."""
+        return await self._search.cancel_plan(plan_id, reason)
 
     async def plan_input(self, plan_id: str) -> PlanInput:
         """Load the immutable input frozen for an active Plan."""

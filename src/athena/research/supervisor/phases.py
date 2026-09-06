@@ -13,6 +13,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.research.experiment_documents import ProjectionContext
 from athena.research.prepare.authority import BaselineAuthorityError
+from athena.research.prepare.baseline_research import BaselineResearchError
 from athena.research.report import VALIDATION_SKIPPED_NOTICE, build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_runtime import PlanRuntime
@@ -113,6 +114,9 @@ class PhaseMachine:
             if canonical_saved:
                 await self._record_phase_failure(failed_phase, exc)
             logger.exception("research phase failed")
+            if isinstance(exc, BaselineResearchError) and exc.published:
+                await self._plans.publish_state()
+                raise
             if isinstance(exc, BaselineAuthorityError):
                 published_error = "research failed: baseline authority unavailable"
             else:

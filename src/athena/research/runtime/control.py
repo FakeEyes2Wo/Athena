@@ -105,6 +105,14 @@ async def message(runtime: Any, text: str) -> str:
 
 
 async def _control_command(runtime: Any, command: str) -> str | None:
+    if command == "/cancel" or command.startswith("/cancel "):
+        parts = command.split(maxsplit=2)
+        if len(parts) != 3:
+            return "usage: /cancel <plan_id> <reason>"
+        # Do not start or resume SEARCH merely to cancel a durable Plan.
+        async with runtime.session.lifecycle.resume_lock:
+            await runtime.supervisor.cancel_plan(parts[1], parts[2])
+        return f"cancelled {parts[1]}"
     if command == "/stop":
         async with runtime.session.lifecycle.resume_lock:
             status = await runtime.supervisor.request_stop()

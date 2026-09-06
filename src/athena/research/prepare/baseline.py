@@ -39,12 +39,14 @@ from athena.research.prepare.source_verification import (
     build_default_source_verifier,
 )
 from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
+from athena.research.supervisor.events import redact, sanitize_terminal_text
 
 logger = logging.getLogger(__name__)
 
 HandoffFn = Callable[..., Awaitable[str]]
 _IDEATOR_REAP_TIMEOUT_SECONDS = 5.0
 _DIAGNOSTIC_LIMIT = 4000
+_MAX_DIAGNOSTICS = 8
 _PENDING_IDEATOR_REAPS: set[asyncio.Task[None]] = set()
 
 
@@ -104,18 +106,48 @@ def _initial_research_request(task: str) -> str:
 
 
 def _repair_request(error: BaselineResearchError) -> str:
-    diagnostics = error.diagnostics or (str(error),)
-    rendered = "\n".join(f"- {item}" for item in diagnostics)
+    rendered = "\n".join(f"- {item}" for item in _diagnostics(error))
     return (
         "The deterministic baseline evidence gate rejected the artifacts.\n"
+        f"Failure code: {_error_code(error)}\n"
         f"{rendered}\n"
         "Correct the source or locator and rewrite both complete artifacts. "
         "Do not write BASELINE_RESEARCH_VERIFICATION.json."
     )
 
 
-def _bounded_diagnostic(error: Exception) -> str:
-    return " ".join(str(error).split())[:_DIAGNOSTIC_LIMIT] or type(error).__name__
+def _bounded_diagnostic(error: object) -> str:
+    text = sanitize_terminal_text(redact(str(error)))
+    return " ".join(text.split())[:_DIAGNOSTIC_LIMIT] or type(error).__name__
+
+
+def _diagnostics(error: BaselineResearchError) -> tuple[str, ...]:
+    """Return unique, bounded, safe diagnostics for repair and terminal output."""
+    values = error.diagnostics or (str(error),)
+    result: list[str] = []
+    remaining = _DIAGNOSTIC_LIMIT
+    for value in values:
+        if len(result) >= _MAX_DIAGNOSTICS:
+            break
+        diagnostic = _bounded_diagnostic(value)
+        if not diagnostic or diagnostic in result:
+            continue
+        if remaining <= 0:
+            break
+        diagnostic = diagnostic[:remaining]
+        result.append(diagnostic)
+        remaining -= len(diagnostic) + 1
+    return tuple(result)
+
+
+def _error_code(error: BaselineResearchError) -> str:
+    """Classify terminal failures without exposing parser internals as an API."""
+    message = str(error)
+    if message.startswith(f"invalid {RESEARCH_FILENAME}"):
+        return "BASELINE_SCHEMA_INVALID"
+    if "qualifying source" in message or "verification" in message:
+        return "BASELINE_EVIDENCE_INVALID"
+    return "BASELINE_RESEARCH_INVALID"
 
 
 def _remove_verification(root: Path) -> None:
@@ -451,11 +483,21 @@ async def _reap_ideator(runtime: Any) -> None:
 async def _publish_terminal_research_error(
     runtime: Any, error: BaselineResearchError
 ) -> None:
+    summary = _bounded_diagnostic(error)
+    diagnostics = tuple(
+        diagnostic for diagnostic in _diagnostics(error) if diagnostic != summary
+    )
+    text = f"PREPARE: baseline research failed [{_error_code(error)}]: {summary}"
+    if diagnostics:
+        text += "\nDiagnostics:\n" + "\n".join(
+            f"- {diagnostic}" for diagnostic in diagnostics
+        )
     await runtime.publish_output(
         source="supervisor",
         channel="error",
-        text=f"PREPARE: baseline research failed ({error}).",
+        text=text,
     )
+    error.published = True
 
 
 async def prepare_baseline_design(

@@ -10,6 +10,9 @@ Read the workspace and any already-written EDA reports you need, then write exac
 - Include distributions, missing values, cardinality, correlations, information gain, leakage risks, or whatever is relevant to the report topic.
 - Label each important finding as `eda:<report>:<id>` so later agents can cite it.
 - You may read other workers' reports; do not modify them.
+- Only consume reports from completed earlier tasks. A running sibling's file
+  may be absent or incomplete; report that dependency as unavailable rather than
+  assuming it is ready or duplicating the sibling's assignment.
 
 ## Constraints
 

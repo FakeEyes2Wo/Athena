@@ -49,7 +49,10 @@ async def wait_run_with_heartbeat(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             try:
-                await agents.interrupt(agent_id, f"{plan or agent_id}_turn_timeout")
+                await asyncio.wait_for(
+                    agents.interrupt(agent_id, f"{plan or agent_id}_turn_timeout"),
+                    timeout=10,
+                )
             except Exception:
                 pass
             raise RuntimeError(f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s")

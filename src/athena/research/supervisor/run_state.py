@@ -18,8 +18,6 @@ class SupervisorRunState:
     def __init__(self, current_state: Callable[[], ResearchState]) -> None:
         self._current_state = current_state
         self._branches: dict[str, GitWorkBranch] = {}
-        self._next_guidance: str | None = None
-        self._persistent_guidance: list[str] = []
         self._running: dict[str, asyncio.Task] = {}
         self._next_hypothesis_id: str | None = None
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
@@ -77,32 +75,24 @@ class SupervisorRunState:
         """Return the process-local Git worktree bound to a Plan."""
         return self._branches[plan_id]
 
-    def record_next_guidance(self, text: str) -> None:
-        """Keep guidance for the next Plan input only."""
-        self._next_guidance = text
-
-    def record_persistent_guidance(self, text: str) -> None:
-        """Keep guidance for every later Plan input in this process."""
-        self._persistent_guidance.append(text)
-
     async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
         """Record guidance that will be frozen only into later Plan inputs."""
         if not text.strip():
             raise ValueError("guidance text must be nonblank")
         if scope == "next":
-            self.record_next_guidance(text)
+            self._state.next_guidance = text
         elif scope == "persistent":
-            self.record_persistent_guidance(text)
+            self._state.persistent_guidance.append(text)
         else:
             raise ValueError(f"unsupported guidance scope: {scope}")
         return {"text": text, "scope": scope}
 
     def take_guidance(self) -> list[str]:
         """Freeze persistent and one-shot guidance into a new Plan input."""
-        guidance = [*self._persistent_guidance]
-        if self._next_guidance is not None:
-            guidance.append(self._next_guidance)
-            self._next_guidance = None
+        guidance = [*self._state.persistent_guidance]
+        if self._state.next_guidance is not None:
+            guidance.append(self._state.next_guidance)
+            self._state.next_guidance = None
         return guidance
 
     def add_running(self, plan_id: str, task: asyncio.Task) -> None:

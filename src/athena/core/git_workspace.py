@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import inspect
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +25,12 @@ class _Review:
     sha256: str
     tree: str
     head: CommitHash
+    baseline: CommitHash
     empty: bool
     pending_commit: CommitHash | None = None
+
+
+_BASELINE_TRAILER_RE = re.compile(r"(?m)^Athena-Baseline:\s*([0-9a-f]{7,64})\s*$")
 
 
 @dataclass(slots=True)
@@ -106,7 +111,7 @@ class LocalGitWorkspace(GitWorkspace):
             )
             if existing.strip():
                 # 幂等恢复：分支已存在 → 返回匹配的现有 worktree（design §idempotent）
-                workspace = await self._find_worktree(branch)
+                workspace = await self._find_worktree(branch, commit)
                 if workspace is not None:
                     if Path(workspace.path).is_relative_to(self._root):
                         return workspace
@@ -140,7 +145,7 @@ class LocalGitWorkspace(GitWorkspace):
                 # 跨进程互斥）→ 幂等恢复现有 worktree，而不是裸抛 reference already exists。
                 if "already exists" not in str(exc):
                     raise
-                workspace = await self._find_worktree(branch)
+                workspace = await self._find_worktree(branch, commit)
                 if workspace is not None and Path(workspace.path).is_relative_to(
                     self._root
                 ):
@@ -157,7 +162,9 @@ class LocalGitWorkspace(GitWorkspace):
             self._states[path] = _WorkspaceState(workspace)
             return workspace
 
-    async def _find_worktree(self, branch: str) -> GitWorkBranch | None:
+    async def _find_worktree(
+        self, branch: str, checkpoint: CommitHash | None = None
+    ) -> GitWorkBranch | None:
         """按分支返回已存在的 worktree（幂等恢复）。"""
         listing = await self._git("worktree", "list", "--porcelain", cwd=self._repo)
         for block in listing.decode("utf-8").split("\n\n"):
@@ -178,14 +185,14 @@ class LocalGitWorkspace(GitWorkspace):
                 workspace = GitWorkBranch(
                     path=str(worktree_path),
                     branch=branch,
-                    base_commit=await self._resolve_commit(branch),
+                    base_commit=await self._worktree_checkpoint(branch, checkpoint),
                 )
                 self._states[worktree_path] = _WorkspaceState(workspace)
                 return workspace
         return None
 
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
-        """计算 worktree 相对当前 HEAD 的内容寻址 diff。"""
+        """计算 worktree 相对接受 checkpoint 的内容寻址 diff。"""
         async with self._lock:
             state = self._get_state(workspace)
             path = Path(workspace.path)
@@ -193,10 +200,10 @@ class LocalGitWorkspace(GitWorkspace):
                 (await self._git("rev-parse", "HEAD", cwd=path)).decode().strip()
             )
 
+            baseline = state.review.baseline if state.review else workspace.base_commit
+
             await self._git("add", "-A", cwd=path)
-            staged = await self._git(
-                "diff", "--cached", "--binary", current_head, cwd=path
-            )
+            staged = await self._git("diff", "--cached", "--binary", baseline, cwd=path)
             if await self._git("diff", cwd=path) or await self._git(
                 "ls-files", "--others", "--exclude-standard", cwd=path
             ):
@@ -207,13 +214,13 @@ class LocalGitWorkspace(GitWorkspace):
                 "--cached",
                 "--name-only",
                 "-z",
-                current_head,
+                baseline,
                 cwd=path,
             )
             changed = {name for name in names.decode("utf-8").split("\0") if name}
             # 相对 base 的净 diff 会吞掉「先暂存、后删除且从未提交」的文件；
             # 用上一轮暂存树再 diff 一次，还原这类删除路径，保证 paths 不漏掉删除。
-            previous_tree = state.review.tree if state.review else current_head
+            previous_tree = state.review.tree if state.review else baseline
             previous_names = await self._git(
                 "diff", "--cached", "--name-only", "-z", previous_tree, cwd=path
             )
@@ -229,6 +236,7 @@ class LocalGitWorkspace(GitWorkspace):
                 sha256=hashlib.sha256(staged).hexdigest(),
                 tree=(await self._git("write-tree", cwd=path)).decode().strip(),
                 head=current_head,
+                baseline=baseline,
                 empty=not staged,
             )
             return GitDiff(ref=artifact, paths=paths)
@@ -270,7 +278,7 @@ class LocalGitWorkspace(GitWorkspace):
                 return pending_commit
             current_tree = (await self._git("write-tree", cwd=path)).decode().strip()
             staged = await self._git(
-                "diff", "--cached", "--binary", review.head, cwd=path
+                "diff", "--cached", "--binary", review.baseline, cwd=path
             )
             unstaged = await self._git("diff", cwd=path)
             untracked = await self._git(
@@ -299,7 +307,7 @@ class LocalGitWorkspace(GitWorkspace):
                             "-p",
                             current_head,
                             "-m",
-                            message,
+                            f"{message}\n\nAthena-Baseline: {review.baseline}",
                             cwd=path,
                         )
                     )
@@ -399,15 +407,30 @@ class LocalGitWorkspace(GitWorkspace):
         if current_head != marker:
             return None
 
-        parent = await self._git(
-            "rev-parse", "--verify", f"{marker}^{{commit}}^", cwd=path, check=False
+        message = await self._git("show", "-s", "--format=%B", marker, cwd=path)
+        trailers = _BASELINE_TRAILER_RE.findall(
+            message.decode("utf-8", errors="replace")
         )
-        if not parent.strip():
+        baseline = trailers[-1] if trailers else None
+        if baseline is None:
+            parent = await self._git(
+                "rev-parse",
+                "--verify",
+                f"{marker}^{{commit}}^",
+                cwd=path,
+                check=False,
+            )
+            if not parent.strip():
+                return None
+            baseline = parent.decode("ascii").strip()
+        try:
+            baseline = await self._resolve_commit(baseline)
+        except GitWorkspaceError:
             return None
         reviewed_diff = await self._git(
             "diff",
             "--binary",
-            parent.decode("ascii").strip(),
+            baseline,
             marker,
             cwd=path,
         )
@@ -416,6 +439,25 @@ class LocalGitWorkspace(GitWorkspace):
         if artifact != approved_diff.ref:
             return None
         return marker
+
+    async def _worktree_checkpoint(
+        self, branch: str, checkpoint: CommitHash | None
+    ) -> CommitHash:
+        """Keep an accepted marker or its descendant as the next checkpoint."""
+        current = await self._resolve_commit(branch)
+        marker = await self._resolve_review_marker(branch)
+        if marker is not None:
+            if marker == current:
+                return current
+            try:
+                ancestor = await self._git(
+                    "merge-base", marker, current, cwd=self._repo
+                )
+            except GitWorkspaceError:
+                ancestor = b""
+            if ancestor.decode("ascii", errors="ignore").strip() == marker:
+                return marker
+        return current if checkpoint is None else checkpoint
 
     async def _resolve_review_marker(self, branch: str) -> CommitHash | None:
         output = await self._git(

@@ -194,6 +194,8 @@ class PlanRuntime:
             return CompletedPlanTurn(plan_id, None, None, failure)
         if decision.decision == "abandon" and state.best_ref is None:
             return CompletedPlanTurn(plan_id, decision, None)
+        if plan_id not in self._state.plans:
+            return CompletedPlanTurn(plan_id, None, None)
         result = await self._deps.research.plan(plan_id, state)
         await self._record_turn_failure(plan_id, result)
         return CompletedPlanTurn(plan_id, decision, result)
@@ -237,6 +239,7 @@ class PlanRuntime:
         if existing is not None and self._tree.get_experiment(existing).status in {
             ExperimentStatus.SUCCEEDED,
             ExperimentStatus.FAILED,
+            ExperimentStatus.CANCELLED,
         }:
             raise ValueError(f"hypothesis already settled: {hypothesis_id}")
         reference_id = hypothesis.parent_id or self._tree.best_experiment_id()

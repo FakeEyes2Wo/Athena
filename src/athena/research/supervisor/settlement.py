@@ -81,6 +81,8 @@ class PlanSettlement:
     ) -> None:
         """Persist one final Experiment before removing its active Plan."""
         plan_input = await self._plan_input(plan_id)
+        if plan_id not in self._state.plans:
+            return
         hypothesis = self._tree.get_hypothesis(plan_id)
         experiment_id = f"exp_{plan_id}"
         primary: float | None = None
@@ -172,6 +174,8 @@ class PlanSettlement:
             ):
                 artifacts["report"] = result.report_ref
             primary = best.metric
+            if plan_id not in self._state.plans:
+                return
             self._tree.complete_experiment(
                 experiment_id,
                 eval=EvalResult(

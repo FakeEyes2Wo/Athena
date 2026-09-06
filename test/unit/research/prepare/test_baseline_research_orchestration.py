@@ -425,6 +425,35 @@ async def test_two_invalid_responses_publish_terminal_error_and_leave_no_verific
 
 
 @pytest.mark.asyncio
+async def test_terminal_research_diagnostics_are_distinct_bounded_and_redacted() -> (
+    None
+):
+    runtime = FakeRuntime()
+
+    await baseline._publish_terminal_research_error(
+        runtime,
+        BaselineResearchError(
+            "invalid BASELINE_RESEARCH.json",
+            ("decisions.0.decision must be 'selected' or 'rejected'", "api_key=secret"),
+        ),
+    )
+    await baseline._publish_terminal_research_error(
+        runtime,
+        BaselineResearchError(
+            "selected candidate has no qualifying source",
+            ("OpenAlex title does not match selected source",),
+        ),
+    )
+
+    first, second = (output["text"] for output in runtime.outputs)
+    assert "BASELINE_SCHEMA_INVALID" in first
+    assert "decisions.0.decision" in first
+    assert "secret" not in first
+    assert "BASELINE_EVIDENCE_INVALID" in second
+    assert "OpenAlex title does not match selected source" in second
+
+
+@pytest.mark.asyncio
 async def test_eda_unavailable_is_a_hard_failure(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     handoff = ScriptedHandoff(tmp_path, [])

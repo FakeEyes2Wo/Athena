@@ -315,6 +315,12 @@ class Scheduler:
         for plan_id, plan in state.plans.items():
             if free_slots == 0:
                 break
+            experiment_id = tree.experiment_for_hypothesis(plan_id)
+            if (
+                experiment_id is not None
+                and tree.get_experiment(experiment_id).status == "CANCELLED"
+            ):
+                continue
             if (
                 plan.kind == "SEARCH"
                 and plan_id not in running

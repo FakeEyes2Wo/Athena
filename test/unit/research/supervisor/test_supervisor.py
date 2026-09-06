@@ -426,6 +426,32 @@ def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_published_baseline_failure_is_not_published_twice(tmp_path: Path):
+    from athena.research.prepare.baseline_research import BaselineResearchError
+
+    error = BaselineResearchError(
+        "invalid BASELINE_RESEARCH.json", ("decision: expected string",)
+    )
+    error.published = True
+    outputs = []
+
+    async def prepare():
+        raise error
+
+    async def publish(kind, payload):
+        if kind == "output":
+            outputs.append(payload)
+
+    supervisor = _checkpoint_supervisor(
+        tmp_path, run_prepare_phase=prepare, publish_callback=publish
+    )
+    with pytest.raises(BaselineResearchError):
+        await supervisor.start()
+    assert supervisor.state.status == "FAILED"
+    assert not outputs
+
+
+@pytest.mark.asyncio
 async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

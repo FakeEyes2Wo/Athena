@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import decide_settlement
@@ -141,10 +142,16 @@ class SearchLoop:
             # 真机（2026-08-29）：SEARCH 每次有候选跑完就崩在这里，两次实验分别拿到
             # 0.8523 和 0.8621 却一次都没能结算。日志里只有那句解包错误。
             plan_id = next(
-                item_id
-                for item_id, item_task in self._run.running_items
-                if item_task is task
+                (
+                    item_id
+                    for item_id, item_task in self._run.running_items
+                    if item_task is task
+                ),
+                None,
             )
+            if plan_id is None:
+                # A Human cancellation removed this task while wait was pending.
+                continue
             self._run.pop_running(plan_id)
             try:
                 completed = task.result()
@@ -184,6 +191,60 @@ class SearchLoop:
         await asyncio.gather(task, return_exceptions=True)
         if self._task is task:
             self._task = None
+
+    async def cancel_plan(self, plan_id: str, reason: str) -> dict[str, object]:
+        """Persist a terminal cancellation before interrupting its live worker."""
+        if not reason.strip():
+            raise ValueError("cancellation reason must be nonblank")
+        experiment_id = self._tree.experiment_for_hypothesis(plan_id)
+        if experiment_id is None:
+            raise ValueError(f"unknown SEARCH Plan: {plan_id}")
+        experiment = self._tree.get_experiment(experiment_id)
+        if experiment.status not in {
+            ExperimentStatus.RUNNING,
+            ExperimentStatus.CANCELLED,
+        }:
+            raise ValueError(f"Plan is already settled: {plan_id}")
+        if experiment.status is ExperimentStatus.RUNNING:
+            plan = self._state.plans.get(plan_id)
+            if plan is None or plan.kind != "SEARCH":
+                raise ValueError(f"unknown SEARCH Plan: {plan_id}")
+            reason_ref = await self._deps.runtime.store.put_text(reason.strip())
+            # Recheck after artifact I/O: normal settlement may have won the race.
+            if (
+                self._tree.get_experiment(experiment_id).status
+                is not ExperimentStatus.RUNNING
+            ):
+                raise ValueError(f"Plan is already settled: {plan_id}")
+            self._tree.transition_experiment(experiment_id, ExperimentStatus.CANCELLED)
+            self._tree.attach_artifact(experiment_id, "cancellation_reason", reason_ref)
+            self._tree.update_hypothesis_status(plan_id, "INCONCLUSIVE")
+        # Tree-first persistence matches normal settlement. Recovery drops a
+        # terminal experiment even if the following state save was interrupted.
+        self._tree.save(self._deps.paths.tree_path)
+        self._state.plans.pop(plan_id, None)
+        self._plans.save_state()
+        if self._run.next_hypothesis_id == plan_id:
+            self._run.set_next_hypothesis_id(None)
+        task = self._run.pop_running(plan_id)
+        if task is not None:
+            task.cancel()
+        try:
+            try:
+                await asyncio.wait_for(
+                    self._deps.runtime.agents.interrupt(plan_id, "plan_cancelled"),
+                    timeout=10,
+                )
+            except AgentCommandError as exc:
+                if exc.code is not ErrorCode.NOT_FOUND:
+                    raise
+        finally:
+            if task is not None:
+                await asyncio.wait_for(
+                    asyncio.gather(task, return_exceptions=True), timeout=10
+                )
+        await self._plans.publish_state()
+        return {"plan_id": plan_id, "status": "CANCELLED"}
 
     async def _wait_for_manual_selection(self) -> bool:
         """Block the SEARCH loop until a Human selects a hypothesis in manual mode.
@@ -274,6 +335,13 @@ class SearchLoop:
             plan_id = action.plan_id or action.hypothesis_id
             if plan_id is None:
                 continue
+            experiment_id = self._tree.experiment_for_hypothesis(plan_id)
+            if (
+                experiment_id is not None
+                and self._tree.get_experiment(experiment_id).status
+                is ExperimentStatus.CANCELLED
+            ):
+                continue
             if action.kind in {
                 ScheduleKind.START_NEW,
                 ScheduleKind.START_NEXT_HYPOTHESIS,
@@ -283,6 +351,8 @@ class SearchLoop:
                     return generated
             if action.kind is ScheduleKind.START_NEXT_HYPOTHESIS:
                 self._run.set_next_hypothesis_id(None)
+            if plan_id not in self._state.plans:
+                continue
             self._launch_turn(plan_id)
         return generated
 
@@ -292,6 +362,8 @@ class SearchLoop:
 
     async def _apply_completed_turn(self, completed) -> None:
         plan_id = completed.plan_id
+        if plan_id not in self._state.plans:
+            return
         state = self._state.plans[plan_id]
         if completed.result is not None and completed.result.next_state is not None:
             state = completed.result.next_state
@@ -338,6 +410,7 @@ class SearchLoop:
         if existing is not None and self._tree.get_experiment(existing).status in {
             ExperimentStatus.SUCCEEDED,
             ExperimentStatus.FAILED,
+            ExperimentStatus.CANCELLED,
         }:
             raise ValueError(f"hypothesis already settled: {hypothesis_id}")
         self._run.set_next_hypothesis_id(hypothesis_id)

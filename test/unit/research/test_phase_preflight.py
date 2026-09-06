@@ -6,7 +6,7 @@ import pytest
 
 from athena.research.clarification import context as task_context
 from athena.research.prepare import orchestrator as prepare_phase
-from athena.research.runtime.phase_runner import PhaseRunner
+from athena.research.runtime.phase_runner import PhaseRunner, _predict_features_path
 from athena.research.turns.runner import AgentTurnRunner
 
 
@@ -17,6 +17,32 @@ class _RejectingProvider:
 
 def test_task_prompt_prepends_context() -> None:
     assert task_context.task_prompt("task", "contract") == "contract\n\ntask"
+
+
+def test_prediction_features_follow_the_frozen_data_contract(tmp_path) -> None:
+    split = tmp_path / "external" / "split"
+    split.mkdir(parents=True)
+    search = split / "search_features.csv"
+    final = split / "final_features.csv"
+    search.write_text("id\nsearch\n", encoding="utf-8")
+    final.write_text("id\nfinal\n", encoding="utf-8")
+    runtime = SimpleNamespace(
+        state=SimpleNamespace(
+            data_contract=(
+                "Predict exactly the rows named by the environment variable "
+                f"ATHENA_PREDICT_FEATURES; during SEARCH that is {search}. "
+                "Read it from os.environ."
+            )
+        ),
+        workspaces_root=tmp_path / "wrong-local-root",
+    )
+
+    assert _predict_features_path(runtime, "search") == search
+    assert _predict_features_path(runtime, "final") == final
+
+    final.unlink()
+    with pytest.raises(FileNotFoundError, match="required final prediction features"):
+        _predict_features_path(runtime, "final")
 
 
 @pytest.mark.asyncio

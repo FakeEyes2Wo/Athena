@@ -11,7 +11,7 @@ import logging
 import math
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,50 @@ from athena.research.supervisor.validation_contracts import (
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+
+def _predict_features_path(
+    runtime: "ResearchRuntime", split: Literal["search", "final"]
+) -> Path | None:
+    """Resolve a CSV prediction split from the durable data contract.
+
+    Directory-data tasks have no platform CSV contract and intentionally return
+    ``None`` so their evaluator keeps its existing split semantics. CSV tasks
+    persist the SEARCH feature path in ``state.data_contract``; VALIDATE uses
+    the sibling FINAL file from that same frozen split directory.
+    """
+    contract = getattr(runtime.state, "data_contract", None)
+    if not contract:
+        local_path = (
+            runtime.workspaces_root
+            / "data_split"
+            / ("search_features.csv" if split == "search" else "final_features.csv")
+        )
+        return local_path if local_path.is_file() else None
+
+    marker = "ATHENA_PREDICT_FEATURES; during SEARCH that is "
+    _, separator, remainder = contract.partition(marker)
+    if separator:
+        search_text = remainder.partition(". Read it from")[0].strip()
+        search_path = Path(search_text) if search_text else None
+    else:
+        # Older checkpoints may contain only the training rule. Keep their
+        # local split layout usable while still failing explicitly if required
+        # CSV features are absent.
+        search_path = runtime.workspaces_root / "data_split" / "search_features.csv"
+
+    if search_path is None:
+        raise RuntimeError("data contract does not declare ATHENA_PREDICT_FEATURES")
+    path = (
+        search_path
+        if split == "search"
+        else search_path.with_name("final_features.csv")
+    )
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"required {split} prediction features are missing: {path}"
+        )
+    return path
 
 
 async def _load_trusted_prepare_score(
@@ -86,8 +130,8 @@ class PhaseRunner:
             return await rt.plan_turn(plan_id, state)
         plan_input = await rt.supervisor.plan_input(plan_id)
         workspace_path = rt.supervisor.workspace_path(plan_id)
+        predict_features = _predict_features_path(rt, "search")
         execution = await rt.execution_for(plan_id, workspace_path)
-        search_features = rt.workspaces_root / "data_split" / "search_features.csv"
         runner = PlanRunner(
             execution=execution,
             store=rt.store,
@@ -99,7 +143,7 @@ class PhaseRunner:
                 workspace_root=workspace_path,
                 environment_root=rt.root,
                 experiment_id=plan_id,
-                predict_features=search_features if search_features.is_file() else None,
+                predict_features=predict_features,
             ),
             timeout_s=rt.state.experiment_timeout_s,
             placement=lambda: rt.placement_for(plan_id),
@@ -236,6 +280,7 @@ class PhaseRunner:
                 "as final. Re-run PREPARE with final-evaluator support for a "
                 "true unseen final test."
             )
+        predict_features = _predict_features_path(rt, "final")
         workspace = await rt.git.create(sota_commit, "athena/validate")
         if not rt.registry.contains("validate"):
             register_validate_agent(
@@ -277,7 +322,6 @@ class PhaseRunner:
         # VALIDATE 的全部意义就是在**没被搜索过的那一份**上重打一次分。
         # 候选的 argv 是冻结的，所以换靶只能靠环境变量；不换的话重跑产出的还是
         # search 行的预测，final evaluator 报 {"primary": 0.0}。
-        final_features = rt.workspaces_root / "data_split" / "final_features.csv"
         deps = ValidationDeps(
             agents=rt.agents,
             git=rt.git,
@@ -293,7 +337,7 @@ class PhaseRunner:
         )
         options = ValidationOptions(
             timeout_s=rt.state.experiment_timeout_s,
-            predict_features=final_features if final_features.is_file() else None,
+            predict_features=predict_features,
         )
         return await run_validation_plan(
             input=frozen,
