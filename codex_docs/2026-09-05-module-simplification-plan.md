@@ -721,6 +721,14 @@ Move Lifecycle's persistence, settlement, hypothesis, checkpoint, and General-di
 
 The two modules fall from 642 combined baseline lines (192 + 450) to one 556-line owner, a net reduction of 86 lines and one source file. The focused architecture, Plan prompt/streaming, data-contract, SEARCH persistence, and Supervisor selection passed 55 tests. The complete research suite passed 1,379 tests both before and after consolidation. Ruff, Black, Supervisor-package compilation, retired-layer searches, AST/interface inspection, and `git diff --check` passed. Closing both rows advances reviewed coverage to 367/602. Whole-repository acceptance remains pending.
 
+## Python Plan-contract review
+
+Read `supervisor/plans.py` completely and trace Plan state, input, best-score, failure, and decision construction/serialization through Plan runtime, PREPARE, experiment scoring, settlement, recovery, scheduling, Agent schemas/prompts, CLI/config defaults, and every non-`athena_ts` test. Retain the module as the cohesive strict durable-contract boundary; merging these schemas into their consumers would duplicate validation and couple Agent output, persisted state, execution, and settlement. Retain the mutable core `Hypothesis` plus private frozen Plan snapshot because ResearchTree mutates live hypotheses while content-addressed Plan inputs must remain deeply immutable.
+
+Define trusted artifact validation once with an annotated reference type and remove three repeated class validators. Remove `active_ancestor_hypotheses`, `initial_turn_limit`, and `initial_patience` from `PlanInput`: all three had writers and self-referential tests but no production reader, while the live PlanState/Hypothesis already owns the limits. Stop computing/writing those values. A before-validator discards exactly those three keys when loading old content-addressed input artifacts; every other unknown key remains forbidden. PlanInput falls from 17 fields to 14. Keep `human_context` because scoped Human guidance is a durable contract, and fix its dead projection by adding it to every Plan Agent prompt.
+
+Remove the unconsumed `suggestions` field from `PlanDecision` and update all three Agent prompts and test providers to emit only `decision` plus `reason`; the strict schema now rejects suggestions. Make the two-field `PlanFailure` slotted. `plans.py` falls from 180 baseline lines to 177 despite carrying the narrow three-key read migration. The unchanged focused baseline and final selection both passed 138 tests, and the complete research suite passed 1,379 tests before and after the change. Ruff, Black, compilation, production removed-field searches, model-shape inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 368/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1353,7 +1361,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/phases.py` | 650 | Reviewed; flatten PREPARE baseline creation, remove redundant phase/export forwarding, and retain the explicit five-owner lifecycle boundary |
 | `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Reviewed; merge the forwarding composition facade into the single Plan runtime owner and delete the file |
 | `src/athena/research/supervisor/plan_runtime.py` | 450 | Reviewed; directly own persistence, settlement, hypotheses, checkpoints, dispatch, execution, and recovery with a four-argument constructor |
-| `src/athena/research/supervisor/plans.py` | 180 | Pending |
+| `src/athena/research/supervisor/plans.py` | 180 | Reviewed; remove three unread input fields and decision suggestions, share trusted-ref validation, and project frozen Human guidance into Plan prompts |
 | `src/athena/research/supervisor/prepare.py` | 296 | Pending |
 | `src/athena/research/supervisor/prompt_context.py` | 74 | Pending |
 | `src/athena/research/supervisor/recovery.py` | 60 | Pending |

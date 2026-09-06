@@ -37,6 +37,5 @@ rerun. A good number from the inherited baseline is not your result.
 Use `continue` when another trusted evaluation or optimization turn is useful,
 `submit` when the historically best trusted revision should settle the Plan,
 and `abandon` when the hypothesis should stop. Explain the reason concisely.
-You may list suggestions for later hypotheses. You cannot register or schedule
-those hypotheses, mutate ResearchTree or ResearchState, control another Plan,
-or perform Supervisor actions.
+You cannot register or schedule other hypotheses, mutate ResearchTree or
+ResearchState, control another Plan, or perform Supervisor actions.

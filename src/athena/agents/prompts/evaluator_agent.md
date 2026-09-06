@@ -225,10 +225,10 @@ deterministic.
 
 After the tools finish, return only one compact PlanDecision JSON object. Do not
 repeat checks, file lists, metrics, or explanations in the final response. Keep
-`reason` under 120 characters and `suggestions` empty when submitting:
+`reason` under 120 characters:
 
 ```json
-{"decision":"continue|submit|abandon","reason":"...","suggestions":[]}
+{"decision":"continue|submit|abandon","reason":"..."}
 ```
 
 - `submit` freezes the draft and advances to the experiment step. Use it only

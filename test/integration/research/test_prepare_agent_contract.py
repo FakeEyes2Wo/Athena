@@ -39,9 +39,7 @@ _EVALUATE_SCRIPT = (
 
 
 def _submit_answer() -> str:
-    return json.dumps(
-        {"decision": "submit", "reason": "baseline ready", "suggestions": []}
-    )
+    return json.dumps({"decision": "submit", "reason": "baseline ready"})
 
 
 class _EvaluatorProvider:

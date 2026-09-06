@@ -211,6 +211,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
     async def plan_input(plan_id: str):
         return SimpleNamespace(
             task_context="",
+            human_context="",
             hypothesis=tree.get_hypothesis(plan_id),
             eval_handoff=await _handoff(plan_id),
         )

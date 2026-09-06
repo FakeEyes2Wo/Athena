@@ -120,7 +120,7 @@ Keep it concise and concrete; SEARCH reads this file, not the whole workspace.
 Return exactly one structured PlanDecision after the tools finish:
 
 ```json
-{"decision":"continue|submit|abandon","reason":"...","suggestions":[]}
+{"decision":"continue|submit|abandon","reason":"..."}
 ```
 
 - `submit` ends PREPARE and advances the research to SEARCH. Use `submit`

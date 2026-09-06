@@ -131,6 +131,11 @@ class PlanRuntime:
             f"turn limit: {state.turn_limit}; patience: {state.patience}; "
             f"stale rounds: {state.stale_rounds}."
             + (f"\n\n{plan_input.task_context}" if plan_input.task_context else "")
+            + (
+                f"\n\nHuman guidance:\n{plan_input.human_context}"
+                if plan_input.human_context
+                else ""
+            )
             + hypothesis_context
             + handoff_block(plan_input.eval_handoff)
             + self._corpus_block(plan_input)
@@ -241,7 +246,6 @@ class PlanRuntime:
         if reference.eval is None:
             raise ValueError("reference experiment requires a trusted metric")
         reference_hypothesis = self._tree.get_hypothesis(reference.hypothesis_id)
-        active = self._tree.active_hypotheses(reference_id, hypothesis)[:-1]
         tree_ref = await self._deps.runtime.store.put_text(
             json.dumps(self._tree.to_dict(), ensure_ascii=False, sort_keys=True)
         )
@@ -249,7 +253,6 @@ class PlanRuntime:
         task_context = await self._confirmed_task_context()
         plan_input = PlanInput(
             hypothesis=hypothesis,
-            active_ancestor_hypotheses=active,
             reference_experiment_id=reference_id,
             reference_metric=reference.eval.primary,
             reference_priority=reference_hypothesis.priority,
@@ -264,8 +267,6 @@ class PlanRuntime:
             ),
             human_context="\n".join(guidance),
             task_context=task_context,
-            initial_turn_limit=hypothesis.turn_limit,
-            initial_patience=hypothesis.patience,
         )
         context_ref = await self._deps.runtime.store.put_text(
             plan_input.model_dump_json()

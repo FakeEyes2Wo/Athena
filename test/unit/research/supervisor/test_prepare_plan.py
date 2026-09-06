@@ -64,7 +64,7 @@ class _AgentRuntime:
 
     async def _response(self, run_id: str) -> None:
         decision_ref = await self.store.put_text(
-            json.dumps({"decision": "submit", "reason": "ready", "suggestions": []})
+            json.dumps({"decision": "submit", "reason": "ready"})
         )
         self._responses[run_id] = json.dumps({"result_ref": decision_ref})
 

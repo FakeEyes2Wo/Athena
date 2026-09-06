@@ -93,6 +93,7 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
         content = sent["content"]
         self.assertIn("exclude noise_00 through noise_09", content)
         self.assertIn("dropping noise columns reduces overfitting", content)
+        self.assertIn("prefer robust scaling", content)
         # 契约那一段是同一条教训的第一处落点，不能在修第二处时把它弄丢
         self.assertIn("row_id", content)
 
@@ -238,6 +239,7 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
             hypothesis = None
         return SimpleNamespace(
             task_context="",
+            human_context="prefer robust scaling",
             hypothesis=hypothesis,
             eval_handoff=await _handoff(plan_id),
         )

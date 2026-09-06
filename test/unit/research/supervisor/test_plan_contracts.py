@@ -1,12 +1,11 @@
 """Durable autonomous Plan contract tests."""
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
 from athena.core.research_models import Hypothesis
-from athena.research.supervisor.settlement import (
-    status_for_outcome as _status_for_outcome,
-)
 from athena.research.supervisor.plans import (
     PlanBest,
     PlanDecision,
@@ -14,6 +13,9 @@ from athena.research.supervisor.plans import (
     PlanState,
 )
 from athena.research.supervisor.scheduling import Outcome
+from athena.research.supervisor.settlement import (
+    status_for_outcome as _status_for_outcome,
+)
 
 _TRUSTED_REF = "sha256:" + "a" * 64
 _OTHER_TRUSTED_REF = "sha256:" + "c" * 64
@@ -36,7 +38,16 @@ def test_plan_decision_accepts_each_supported_action(decision: str) -> None:
     parsed = PlanDecision.model_validate({"decision": decision, "reason": "done"})
 
     assert parsed.decision == decision
-    assert parsed.suggestions == []
+    assert parsed.model_dump() == {"decision": decision, "reason": "done"}
+
+
+def test_plan_decision_rejects_removed_suggestions() -> None:
+    with pytest.raises(ValidationError):
+        PlanDecision(
+            decision="submit",
+            reason="done",
+            suggestions=[],
+        )
 
 
 def test_plan_input_is_immutable_after_creation() -> None:
@@ -48,16 +59,6 @@ def test_plan_input_is_immutable_after_creation() -> None:
 
     with pytest.raises(ValidationError):
         plan_input.human_context = "Use the latest message"
-
-
-def test_plan_input_rejects_negative_initial_limits() -> None:
-    with pytest.raises(ValidationError):
-        PlanInput(
-            evaluator_ref=_TRUSTED_REF,
-            tree_ref=_OTHER_TRUSTED_REF,
-            human_context="",
-            initial_turn_limit=-1,
-        )
 
 
 def test_plan_input_json_round_trip_freezes_metric_comparison() -> None:
@@ -180,13 +181,29 @@ def test_plan_state_rejects_coerced_numeric_counters(field: str, value: str) -> 
         PlanState.model_validate(payload)
 
 
-@pytest.mark.parametrize("field", ["initial_turn_limit", "initial_patience"])
-def test_plan_input_rejects_coerced_numeric_limits(field: str) -> None:
+@pytest.mark.parametrize(
+    "field", ["active_ancestor_hypotheses", "initial_turn_limit", "initial_patience"]
+)
+def test_plan_input_discards_known_legacy_fields(field: str) -> None:
+    plan_input = PlanInput.model_validate_json(
+        json.dumps(
+            {
+                "evaluator_ref": _TRUSTED_REF,
+                "tree_ref": _OTHER_TRUSTED_REF,
+                field: [],
+            }
+        )
+    )
+
+    assert field not in plan_input.model_dump()
+
+
+def test_plan_input_still_rejects_unknown_top_level_fields() -> None:
     with pytest.raises(ValidationError):
         PlanInput(
             evaluator_ref=_TRUSTED_REF,
             tree_ref=_OTHER_TRUSTED_REF,
-            **{field: "4"},
+            unknown="ignored",
         )
 
 
@@ -273,7 +290,6 @@ def test_plan_input_owns_deeply_immutable_hypothesis_snapshots() -> None:
     )
     plan_input = PlanInput(
         hypothesis=source,
-        active_ancestor_hypotheses=[source],
         evaluator_ref=_TRUSTED_REF,
         tree_ref=_OTHER_TRUSTED_REF,
     )
@@ -282,36 +298,12 @@ def test_plan_input_owns_deeply_immutable_hypothesis_snapshots() -> None:
 
     assert plan_input.hypothesis is not None
     assert plan_input.hypothesis.statement == "Try robust scaling"
-    assert plan_input.active_ancestor_hypotheses[0].statement == "Try robust scaling"
-    with pytest.raises((AttributeError, ValidationError)):
-        plan_input.active_ancestor_hypotheses.append(source)
     with pytest.raises(ValidationError):
-        plan_input.active_ancestor_hypotheses[0].statement = "Mutated snapshot"
+        plan_input.hypothesis.statement = "Mutated snapshot"
     with pytest.raises(AttributeError):
-        plan_input.active_ancestor_hypotheses[0].sources.append("new-source")
+        plan_input.hypothesis.sources.append("new-source")
     with pytest.raises(AttributeError):
-        plan_input.active_ancestor_hypotheses[0].evidence_refs.append(_TRUSTED_REF)
-
-
-def test_plan_input_json_round_trip_preserves_immutable_ancestors() -> None:
-    plan_input = PlanInput(
-        active_ancestor_hypotheses=[
-            Hypothesis(
-                statement="Try robust scaling",
-                intervention="Replace standard scaling",
-                expected_effect="Improve validation score",
-            )
-        ],
-        evaluator_ref=_TRUSTED_REF,
-        tree_ref=_OTHER_TRUSTED_REF,
-        initial_turn_limit=12,
-        initial_patience=4,
-    )
-
-    loaded = PlanInput.model_validate_json(plan_input.model_dump_json())
-
-    assert loaded == plan_input
-    assert isinstance(loaded.active_ancestor_hypotheses, tuple)
+        plan_input.hypothesis.evidence_refs.append(_TRUSTED_REF)
 
 
 def test_plan_input_rejects_coerced_nested_hypothesis_counter() -> None:
@@ -359,24 +351,6 @@ def test_primary_hypothesis_supersedes_is_immutable() -> None:
         plan_input.hypothesis.supersedes.append("hyp_new")
 
 
-def test_ancestor_hypothesis_supersedes_is_immutable() -> None:
-    plan_input = PlanInput(
-        active_ancestor_hypotheses=[
-            Hypothesis(
-                statement="Try robust scaling",
-                intervention="Replace standard scaling",
-                expected_effect="Improve validation score",
-                supersedes=["hyp_old"],
-            )
-        ],
-        evaluator_ref=_TRUSTED_REF,
-        tree_ref=_OTHER_TRUSTED_REF,
-    )
-
-    with pytest.raises(AttributeError):
-        plan_input.active_ancestor_hypotheses[0].supersedes.append("hyp_new")
-
-
 def test_source_hypothesis_supersedes_mutation_does_not_change_snapshot() -> None:
     source = Hypothesis(
         statement="Try robust scaling",
@@ -386,7 +360,6 @@ def test_source_hypothesis_supersedes_mutation_does_not_change_snapshot() -> Non
     )
     plan_input = PlanInput(
         hypothesis=source,
-        active_ancestor_hypotheses=[source],
         evaluator_ref=_TRUSTED_REF,
         tree_ref=_OTHER_TRUSTED_REF,
     )
@@ -395,4 +368,3 @@ def test_source_hypothesis_supersedes_mutation_does_not_change_snapshot() -> Non
 
     assert plan_input.hypothesis is not None
     assert plan_input.hypothesis.supersedes == ("hyp_old",)
-    assert plan_input.active_ancestor_hypotheses[0].supersedes == ("hyp_old",)

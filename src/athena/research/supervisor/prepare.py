@@ -214,7 +214,6 @@ async def run_prepare_plan(
                         PlanInput(
                             evaluator_ref=evaluator_ref,
                             tree_ref=tree_ref,
-                            initial_turn_limit=max_turns,
                         ),
                         emit=publish,
                     )
