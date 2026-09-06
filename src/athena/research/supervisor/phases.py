@@ -22,8 +22,6 @@ from athena.research.supervisor.search_loop import SearchLoop
 
 logger = logging.getLogger(__name__)
 
-SKIPPED_VALIDATION_OUTPUT = "SEARCH 已完成；" + VALIDATION_SKIPPED_NOTICE
-
 
 def _phase_failure_run_id(stage: str, error: Exception) -> str:
     """Return a stable, content-addressed identity for one phase failure."""
@@ -198,7 +196,7 @@ class PhaseMachine:
                 {
                     "source": "supervisor",
                     "channel": "text",
-                    "text": SKIPPED_VALIDATION_OUTPUT,
+                    "text": "SEARCH 已完成；" + VALIDATION_SKIPPED_NOTICE,
                 },
             )
         except Exception:
@@ -253,46 +251,45 @@ class PhaseMachine:
             return
         hypothesis_id = "baseline"
         experiment_id = "exp_baseline"
-        if self._tree.best_experiment_id() is None:
-            self._tree.add_hypothesis(
-                Hypothesis(
-                    id=hypothesis_id,
-                    statement="trusted PREPARE baseline",
-                    intervention="establish the baseline implementation",
-                    expected_effect="provide the SEARCH reference metric",
-                )
+        self._tree.add_hypothesis(
+            Hypothesis(
+                id=hypothesis_id,
+                statement="trusted PREPARE baseline",
+                intervention="establish the baseline implementation",
+                expected_effect="provide the SEARCH reference metric",
             )
-            self._tree.add_experiment(
-                experiment_id,
-                Experiment(
-                    hypothesis_id=hypothesis_id,
-                    commit=result.commit,
-                    plan=ExperimentPlan(
-                        kind="baseline",
-                        change="prepare trusted baseline",
-                        run_config_ref=result.evaluator_ref,
-                        budget={},
-                        acceptance_rule="trusted evaluator score",
-                    ),
-                    gitwork=GitWorkBranch(
-                        path=str(self._deps.paths.project_root),
-                        branch="main",
-                        base_commit=result.commit,
-                    ),
-                    status=ExperimentStatus.SUCCEEDED,
-                    eval=EvalResult(
-                        experiment_id=experiment_id,
-                        primary=result.metric,
-                        per_sample=result.evidence_ref,
-                    ),
-                    artifacts={
-                        "predictions": result.predictions_ref,
-                        "evidence": result.evidence_ref,
-                        "report": result.report_ref,
-                    },
+        )
+        self._tree.add_experiment(
+            experiment_id,
+            Experiment(
+                hypothesis_id=hypothesis_id,
+                commit=result.commit,
+                plan=ExperimentPlan(
+                    kind="baseline",
+                    change="prepare trusted baseline",
+                    run_config_ref=result.evaluator_ref,
+                    budget={},
+                    acceptance_rule="trusted evaluator score",
                 ),
-            )
-            self._tree.set_sota(experiment_id)
+                gitwork=GitWorkBranch(
+                    path=str(self._deps.paths.project_root),
+                    branch="main",
+                    base_commit=result.commit,
+                ),
+                status=ExperimentStatus.SUCCEEDED,
+                eval=EvalResult(
+                    experiment_id=experiment_id,
+                    primary=result.metric,
+                    per_sample=result.evidence_ref,
+                ),
+                artifacts={
+                    "predictions": result.predictions_ref,
+                    "evidence": result.evidence_ref,
+                    "report": result.report_ref,
+                },
+            ),
+        )
+        self._tree.set_sota(experiment_id)
         self._state.evaluator_ref = result.evaluator_ref
         self._tree.save(self._deps.paths.tree_path)
         self._plans.save_state()
@@ -470,9 +467,7 @@ class PhaseMachine:
 
     async def _transition_phase(self, phase: str) -> None:
         self._state.phase = phase
-        if self._state.status == "STOPPED":
-            self._state.status = "STOPPED"
-        elif self._state.status != "WAITING":
+        if self._state.status not in {"STOPPED", "WAITING"}:
             self._state.status = "RUNNING"
         await self._plans.persist_state()
 
@@ -501,7 +496,7 @@ class PhaseMachine:
         await self._transition_phase(decision)
         if decision == "SEARCH":
             self._search._spawn_search()
-        elif decision == "VALIDATE":
+        else:
             # 交互路径下 ``start()`` 的生命周期已结束（SEARCH 后停在 WAITING），
             # 单写者在此直接把 VALIDATE 阶段跑完，否则只改 phase 标志永远到不了 COMPLETED。
             await self._run_validation()
@@ -579,15 +574,11 @@ class PhaseMachine:
                     "failed to reap Plan agent %s during stop", plan_id, exc_info=True
                 )
 
-    async def message(self, text: str) -> str:
-        """Delegate ordinary Human text to the long-lived SupervisorAgent."""
-        return await self._deps.research.supervisor(text)
-
     async def set_kaggle_enabled(
         self, enabled: bool, download: bool = True
     ) -> dict[str, object]:
         """Persist the Kaggle integration and download policy for this run."""
-        self._run.set_kaggle_download(bool(download) if enabled else None)
+        self._run.set_kaggle_download(download if enabled else None)
         await self._plans.persist_state()
         return {
             "kaggle_enabled": self._run.kaggle_enabled,
@@ -596,7 +587,7 @@ class PhaseMachine:
 
     async def record_task_understanding(self, **payload: object) -> dict[str, object]:
         """Persist the Supervisor's structured task understanding and surface it."""
-        self._state.task_understanding = dict(payload)
+        self._state.task_understanding = payload
         await self._plans.persist_state()
         return {
             "recorded": True,
@@ -644,6 +635,3 @@ class PhaseMachine:
             for plan_id, plan in self._state.plans.items()
         ]
         return {"plans": plans, "running": list(self._run.running_ids())}
-
-
-__all__ = ["SKIPPED_VALIDATION_OUTPUT", "PhaseMachine", "_final_report_text"]

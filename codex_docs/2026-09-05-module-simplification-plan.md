@@ -705,6 +705,14 @@ Read `supervisor/manifest.py` completely and trace its schema, validation summar
 
 Replace the version field plus validator with `Literal[1]`, combine the two equivalent relative-path rejection branches, and inline the one-use two-value forbidden-executable set. No compatibility path or new abstraction is introduced. `manifest.py` falls from 108 baseline lines to 99 and its top-level definitions from seven to five. The unchanged focused baseline passed 42 tests; the expanded manifest, validation, and experiment selection passed 79. Ruff, Black, Python compilation, schema inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 364/602. Whole-repository acceptance remains pending.
 
+## Supervisor phase-machine review
+
+Read `supervisor/phases.py` completely and trace PREPARE, SEARCH, VALIDATE, skip-validation finalization, failure projection, pause/resume/stop, Agent-facing controls, and its sole construction through the Supervisor facade. Retain the module because phase transitions and terminal control form one cohesive state-machine boundary. Retain its five explicit collaborators rather than hiding them behind private owner traversal or a new aggregate object; each owns distinct runtime, Plan, SEARCH, dependency, or canonical-state behavior. Retain transactional rollback and best-effort publication/reaping paths because they protect durable state from derived-output and shutdown failures.
+
+Delete the unreachable second SOTA check after PREPARE's existing-SOTA branch has returned, flattening baseline creation into one linear path. Remove the redundant STOPPED self-assignment, the PhaseMachine-to-Supervisor-Agent forwarding method, one-use skipped-output symbol, both unconsumed export lists, and six dependency-type/private-formatter reexports from the sole constructor module. Supervisor now constructs its already-owned collaborators directly, while its public message facade calls the configured Supervisor Agent without the extra phase hop. Simplify validated phase branching and avoid copying fresh keyword payloads or coercing an already-typed boolean. No compatibility aliases remain.
+
+`phases.py` falls from 650 baseline lines to 637; the supporting `supervisor.py` cleanup falls from 288 to 273 but its ledger row remains pending until its other facade methods receive their own caller audit. The unchanged focused baseline and final selection both passed 88 tests. The complete research unit/integration suite passed 1,379 tests. Ruff, Black, Python compilation, removed-export searches, AST/interface inspection, and `git diff --check` passed. Closing the phase-machine row advances reviewed coverage to 365/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1334,7 +1342,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/events.py` | 277 | Reviewed; slot the two-field projector and collapse forwarding/factory compatibility layers while preserving flat wire schemas |
 | `src/athena/research/supervisor/experiment.py` | 555 | Reviewed; unify score inputs in `PlanBest`, return typed diff failures directly, and distinguish the lightweight settlement decision from the durable service |
 | `src/athena/research/supervisor/manifest.py` | 108 | Reviewed; express version 1 as a literal and remove one-use validation plumbing while retaining the strict untrusted-manifest boundary |
-| `src/athena/research/supervisor/phases.py` | 650 | Pending |
+| `src/athena/research/supervisor/phases.py` | 650 | Reviewed; flatten PREPARE baseline creation, remove redundant phase/export forwarding, and retain the explicit five-owner lifecycle boundary |
 | `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Pending |
 | `src/athena/research/supervisor/plan_runtime.py` | 450 | Pending |
 | `src/athena/research/supervisor/plans.py` | 180 | Pending |

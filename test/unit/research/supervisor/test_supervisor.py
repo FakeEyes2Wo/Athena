@@ -31,12 +31,13 @@ from athena.research.supervisor.deps import (
     SupervisorRuntime,
 )
 from athena.research.supervisor.experiment import PlanTurnResult, SettlementDecision
+from athena.research.supervisor.phases import _final_report_text
 from athena.research.supervisor.plan_runtime import CompletedPlanTurn
 from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
-from athena.research.supervisor.supervisor import Supervisor, _final_report_text
+from athena.research.supervisor.supervisor import Supervisor
 from test.support import RecordingDocumentProjector
 
 

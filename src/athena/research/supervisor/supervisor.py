@@ -10,15 +10,10 @@ from athena.core.research_tree import ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.research.experiment_documents import ProjectionContext
 from athena.research.supervisor.deps import (
-    GeneralTurn,
-    IdeatorTurn,
-    PlanTurn,
-    Publish,
     SupervisorDeps,
-    SupervisorTurn,
     ValidationMode,
 )
-from athena.research.supervisor.phases import PhaseMachine, _final_report_text
+from athena.research.supervisor.phases import PhaseMachine
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
 from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
@@ -45,15 +40,13 @@ class Supervisor:
     ) -> None:
         self.state = state
         self.tree = tree
-        run = SupervisorRunState(lambda: self.state)
-        plans = PlanLifecycle(self, deps, run)
-        search = SearchLoop(self, deps, run, plans, run_turn=plans.run_turn)
-        phases = PhaseMachine(self, deps, run, plans, search)
         self._deps = deps
-        self._run = run
-        self._plans = plans
-        self._search = search
-        self._phases = phases
+        self._run = SupervisorRunState(lambda: self.state)
+        self._plans = PlanLifecycle(self, deps, self._run)
+        self._search = SearchLoop(
+            self, deps, self._run, self._plans, run_turn=self._plans.run_turn
+        )
+        self._phases = PhaseMachine(self, deps, self._run, self._plans, self._search)
 
     @property
     def evaluator_ref(self) -> ArtifactRef | None:
@@ -255,7 +248,7 @@ class Supervisor:
 
     async def message(self, text: str) -> str:
         """Delegate ordinary Human text to the Supervisor Agent."""
-        return await self._phases.message(text)
+        return await self._deps.research.supervisor(text)
 
     async def set_kaggle_enabled(
         self, enabled: bool, download: bool = True
@@ -278,14 +271,3 @@ class Supervisor:
     async def read_plans(self) -> dict[str, object]:
         """Return active Plan budgets and locally running IDs."""
         return await self._phases.read_plans()
-
-
-__all__ = [
-    "GeneralTurn",
-    "IdeatorTurn",
-    "PlanTurn",
-    "Publish",
-    "Supervisor",
-    "SupervisorTurn",
-    "_final_report_text",
-]
