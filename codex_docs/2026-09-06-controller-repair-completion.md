@@ -41,5 +41,6 @@ repair callbacks. `docs/controller-environment-repair.md` defines the boundary.
 Without it, GUI research safely fails at preflight. The existing live TESS session
 was not restarted with a fake authority and no completed SEARCH run is claimed.
 
-No branch, commit or push was performed in this scoped implementation. Unrelated
-worktree changes, including the active GUI closeout work, remain preserved.
+Committed and pushed on main as `be9e311fdbbf241f81f074d39e7bd651e5894072`
+(`feat(gui): wire authority preflight and bounded repair`). Unrelated worktree
+changes, including the active GUI closeout work, remain preserved.
