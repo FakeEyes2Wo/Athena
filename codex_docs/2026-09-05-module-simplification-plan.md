@@ -713,6 +713,14 @@ Delete the unreachable second SOTA check after PREPARE's existing-SOTA branch ha
 
 `phases.py` falls from 650 baseline lines to 637; the supporting `supervisor.py` cleanup falls from 288 to 273 but its ledger row remains pending until its other facade methods receive their own caller audit. The unchanged focused baseline and final selection both passed 88 tests. The complete research unit/integration suite passed 1,379 tests. Ruff, Black, Python compilation, removed-export searches, AST/interface inspection, and `git diff --check` passed. Closing the phase-machine row advances reviewed coverage to 365/602. Whole-repository acceptance remains pending.
 
+## Durable Plan-owner consolidation
+
+Read `supervisor/plan_lifecycle.py` and `supervisor/plan_runtime.py` completely and trace Plan creation, frozen input loading, Agent turns, failure feedback, worktree recovery/repair, trusted settlement, hypothesis registration, evaluator checkpoints, General-Agent caching, and every non-`athena_ts` construction or internal test hook. The former was a composition facade over the latter and `PlanSettlement`: nine methods only forwarded back into `PlanRuntime`, while Runtime received three callbacks bound to its owning facade. Keeping both classes made one Plan owner appear as two mutually dependent layers.
+
+Move Lifecycle's persistence, settlement, hypothesis, checkpoint, and General-dispatch responsibilities into `PlanRuntime`; delete all forwarding methods and delete `plan_lifecycle.py`. `PlanRuntime` now constructs `PlanSettlement` directly and its constructor falls from seven parameters to four, removing three callback attributes. Supervisor and PhaseMachine depend on the single owner, and tests patch that public owner instead of traversing `_plans._runtime`. Make the four-field `CompletedPlanTurn` value slotted, remove the redundant runtime export list, and update the architecture boundary to reject restoration of the retired module. No compatibility facade or alias remains.
+
+The two modules fall from 642 combined baseline lines (192 + 450) to one 556-line owner, a net reduction of 86 lines and one source file. The focused architecture, Plan prompt/streaming, data-contract, SEARCH persistence, and Supervisor selection passed 55 tests. The complete research suite passed 1,379 tests both before and after consolidation. Ruff, Black, Supervisor-package compilation, retired-layer searches, AST/interface inspection, and `git diff --check` passed. Closing both rows advances reviewed coverage to 367/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1343,8 +1351,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/experiment.py` | 555 | Reviewed; unify score inputs in `PlanBest`, return typed diff failures directly, and distinguish the lightweight settlement decision from the durable service |
 | `src/athena/research/supervisor/manifest.py` | 108 | Reviewed; express version 1 as a literal and remove one-use validation plumbing while retaining the strict untrusted-manifest boundary |
 | `src/athena/research/supervisor/phases.py` | 650 | Reviewed; flatten PREPARE baseline creation, remove redundant phase/export forwarding, and retain the explicit five-owner lifecycle boundary |
-| `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Pending |
-| `src/athena/research/supervisor/plan_runtime.py` | 450 | Pending |
+| `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Reviewed; merge the forwarding composition facade into the single Plan runtime owner and delete the file |
+| `src/athena/research/supervisor/plan_runtime.py` | 450 | Reviewed; directly own persistence, settlement, hypotheses, checkpoints, dispatch, execution, and recovery with a four-argument constructor |
 | `src/athena/research/supervisor/plans.py` | 180 | Pending |
 | `src/athena/research/supervisor/prepare.py` | 296 | Pending |
 | `src/athena/research/supervisor/prompt_context.py` | 74 | Pending |

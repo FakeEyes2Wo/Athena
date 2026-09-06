@@ -1,6 +1,6 @@
 """SEARCH Plan turn 事件转发：text_delta 在 React 循环中实时露出。
 
-回归：`PlanLifecycle.run_turn` 必须把 plan agent 的 journal 事件（至少
+回归：`PlanRuntime.run_turn` 必须把 plan agent 的 journal 事件（至少
 ``agent/text_delta``）在 turn 进行中转发给 runtime 发布者，而不是等整段
 turn 结束后一次性输出。
 """

@@ -15,7 +15,7 @@ from athena.research.experiment_documents import ProjectionContext
 from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.report import VALIDATION_SKIPPED_NOTICE, build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
-from athena.research.supervisor.plan_lifecycle import PlanLifecycle
+from athena.research.supervisor.plan_runtime import PlanRuntime
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.scheduling import count_search_attempts
 from athena.research.supervisor.search_loop import SearchLoop
@@ -61,7 +61,7 @@ class PhaseMachine:
         owner: object,
         deps: SupervisorDeps,
         run: SupervisorRunState,
-        plans: PlanLifecycle,
+        plans: PlanRuntime,
         search: SearchLoop,
     ) -> None:
         self._owner = owner

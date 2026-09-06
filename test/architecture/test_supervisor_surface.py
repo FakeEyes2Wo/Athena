@@ -18,7 +18,6 @@ def test_supervisor_has_only_coarse_plan_modules() -> None:
         "experiment",
         "manifest",
         "phases",
-        "plan_lifecycle",
         "plan_runtime",
         "plans",
         "prepare",
@@ -34,7 +33,7 @@ def test_supervisor_has_only_coarse_plan_modules() -> None:
         "validation",
         "validation_contracts",
     }
-    for retired in ("policy", "ranker", "scheduler"):
+    for retired in ("plan_lifecycle", "policy", "ranker", "scheduler"):
         assert not (SUPERVISOR_ROOT / f"{retired}.py").exists()
     assert not (SUPERVISOR_ROOT / "planning").exists()
     assert not (SUPERVISOR_ROOT / "storage").exists()

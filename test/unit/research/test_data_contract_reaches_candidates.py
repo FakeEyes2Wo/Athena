@@ -18,8 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from test.support import RecordingDocumentProjector
-
 from athena.research.prepare.data import DataContract
 from athena.research.supervisor.deps import (
     PhaseActions,
@@ -34,6 +32,7 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from test.support import RecordingDocumentProjector
 
 
 def test_the_block_names_the_training_file_and_the_reason() -> None:
@@ -207,7 +206,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
             search=SearchServices(Scheduler(), Recovery()),
         ),
     )
-    supervisor._plans._runtime._persist_state = _noop
+    supervisor._plans.persist_state = _noop
 
     async def plan_input(plan_id: str):
         return SimpleNamespace(
@@ -216,7 +215,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
             eval_handoff=await _handoff(plan_id),
         )
 
-    supervisor._plans._runtime.plan_input = plan_input
+    supervisor._plans.plan_input = plan_input
     return supervisor
 
 

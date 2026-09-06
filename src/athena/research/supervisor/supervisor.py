@@ -14,7 +14,7 @@ from athena.research.supervisor.deps import (
     ValidationMode,
 )
 from athena.research.supervisor.phases import PhaseMachine
-from athena.research.supervisor.plan_lifecycle import PlanLifecycle
+from athena.research.supervisor.plan_runtime import PlanRuntime
 from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.search_loop import SearchLoop
@@ -42,7 +42,7 @@ class Supervisor:
         self.tree = tree
         self._deps = deps
         self._run = SupervisorRunState(lambda: self.state)
-        self._plans = PlanLifecycle(self, deps, self._run)
+        self._plans = PlanRuntime(self, deps, self._run)
         self._search = SearchLoop(
             self, deps, self._run, self._plans, run_turn=self._plans.run_turn
         )
