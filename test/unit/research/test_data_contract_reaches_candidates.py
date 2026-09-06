@@ -105,6 +105,27 @@ def test_both_renderings_warn_that_only_the_predict_path_moves(tmp_path) -> None
         assert "inconsistent numbers of samples" in text
 
 
+def test_the_evaluator_task_names_which_label_file_is_which(tmp_path) -> None:
+    """The split directory holds both label files, so the prompt must name them.
+
+    On 2026-09-06 the SEARCH evaluator agent listed that directory and copied
+    ``final_labels.csv``; PREPARE failed on the disjointness guard after both
+    evaluators had already been built.
+    """
+    split = (tmp_path / "data_split").resolve()
+    contract = DataContract(
+        train_csv=split / "train.csv",
+        predict_features_csv=split / "search_features.csv",
+        dataset_path=tmp_path / "model_input.csv",
+    )
+
+    text = contract.evaluator_task("build the evaluator")
+
+    assert str(split / "search_labels.csv") in text
+    assert str(split / "final_labels.csv") in text
+    assert "stays hidden from SEARCH" in text
+
+
 def test_the_state_carries_the_contract_across_a_save_load(tmp_path) -> None:
     """SEARCH 可能在 PREPARE 之后很久才跑，甚至跨进程续跑。"""
     path = tmp_path / "state.json"

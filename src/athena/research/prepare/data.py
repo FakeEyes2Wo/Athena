@@ -66,11 +66,23 @@ class DataContract:
         )
 
     def evaluator_task(self, task: str) -> str:
-        """Add the platform split rules to an evaluator task."""
+        """Add the platform split rules to an evaluator task.
+
+        The two label files are named because the split directory holds both.
+        On 2026-09-06 an evaluator agent listed that directory and took
+        ``final_labels.csv`` for the SEARCH evaluator; both evaluators were
+        built before ``assert_evaluator_splits_are_disjoint`` refused them and
+        PREPARE failed, because the held-out split was no longer held out.
+        Naming the files costs one clause and removes the guess.
+        """
+        split_dir = self.train_csv.parent.resolve()
         return (
             f"{task}\n\nThe platform has already split the dataset under "
-            f"{self.train_csv.parent.resolve()}. {self.grouping}\n"
-            "Do NOT create another split. Build the complete evaluator under "
+            f"{split_dir}. {self.grouping}\n"
+            "Do NOT create another split. The SEARCH evaluator's trusted labels "
+            f"are {split_dir / 'search_labels.csv'}; "
+            f"{split_dir / 'final_labels.csv'} belongs to the FINAL evaluator and "
+            "stays hidden from SEARCH. Build the complete evaluator under "
             "evaluate/ with metric.json, eval_metrics.py, labels.csv (or labels/), "
             "HANDOFF.md, and pyproject.toml. Declare contract_version=2, task_id, "
             "task_type, primary_metric, the complete class_labels for classification, "
@@ -79,8 +91,7 @@ class DataContract:
             "metrics_file=metrics_public_test.csv, and eval_script in metric.json. "
             "Use the actual dataset identity/target columns rather than assuming "
             "a fixed framework class list. SEARCH and FINAL must use the same complete "
-            "class_labels; macro-F1 must not drop classes absent from one split. Keep "
-            "final labels hidden from SEARCH."
+            "class_labels; macro-F1 must not drop classes absent from one split."
         )
 
     def contract_text(self) -> str:
