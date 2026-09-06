@@ -42,6 +42,13 @@ function normalizeSettings(raw: Partial<GuiSettings> | GuiSettings): GuiSettings
   };
 }
 
+function editableSettings(settings: GuiSettings): GuiSettings {
+  return {
+    ...settings,
+    model_connection: { ...settings.model_connection, llm_api_key: "" },
+  };
+}
+
 /** 运行设置：圆角纯白小窗，覆盖在主工作区之上。 */
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [settings, setSettings] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
@@ -56,7 +63,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     try {
       const next = normalizeSettings(await settingsGet());
       setSettings(next);
-      setForm(next);
+      setForm(editableSettings(next));
       setProjectRootInput(next.project_root || "");
       setError(null);
     } catch (err) {
@@ -96,6 +103,10 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     setSaving(true);
     setError(null);
     setSaved(false);
+    const { llm_api_key, ...modelConnection } = form.model_connection;
+    const modelConnectionPatch = llm_api_key.trim()
+      ? { ...modelConnection, llm_api_key: llm_api_key.trim() }
+      : modelConnection;
     const patch: Partial<GuiSettings> = {
       concurrency: form.concurrency,
       search_limit: form.search_limit,
@@ -108,12 +119,12 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       experiment_timeout_s: form.experiment_timeout_s,
       data_root: form.data_root,
       compute: form.compute,
-      model_connection: form.model_connection,
+      model_connection: modelConnectionPatch as GuiSettings["model_connection"],
     };
     try {
       const next = normalizeSettings(await settingsSet(patch));
       setSettings(next);
-      setForm(next);
+      setForm(editableSettings(next));
       setSaved(true);
     } catch (err) {
       setError(errorMessage(err));
@@ -129,7 +140,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     try {
       const next = normalizeSettings(await setProjectRoot(projectRoot));
       setSettings(next);
-      setForm(next);
+      setForm(editableSettings(next));
       setProjectRootInput(next.project_root || "");
       setSaved(true);
     } catch (err) {

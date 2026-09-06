@@ -13,12 +13,6 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
-[manifest]
-members = [
-    "athena-ai4s",
-    "athena-environment",
-]
-
 [[package]]
 name = "aiofile"
 version = "3.12.3"
@@ -172,24 +166,6 @@ dev = [
     { name = "pre-commit", specifier = ">=4.6.0,<5" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
-]
-
-[[package]]
-name = "athena-environment"
-version = "0.1.0"
-source = { virtual = "examples/123" }
-dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pandas" },
-    { name = "scikit-learn" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", specifier = ">=2.4.6" },
-    { name = "pandas", specifier = ">=3.0.5" },
-    { name = "scikit-learn", specifier = ">=1.9.0" },
 ]
 
 [[package]]

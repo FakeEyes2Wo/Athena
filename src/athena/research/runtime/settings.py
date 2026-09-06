@@ -279,6 +279,10 @@ def _apply_model_connection(patch: dict[str, Any]) -> None:
         if not isinstance(value, str):
             raise ValueError(f"{field} must be a string")  # noqa: TRY004
         value = value.strip()
+        if field == "llm_api_key" and "*" in value:
+            # The settings projection deliberately returns a masked value.
+            # Never persist that placeholder over an existing provider key.
+            continue
         if field == "provider" and value and value not in ALLOWED_MODEL_PROVIDERS:
             raise ValueError(
                 f"provider must be one of {', '.join(ALLOWED_MODEL_PROVIDERS)}"

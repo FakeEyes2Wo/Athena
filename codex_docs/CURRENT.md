@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Active GUI-first repository closeout:
+- `codex_docs/2026-09-06-gui-first-closeout-plan.md`
+
 Completed TESS engineering release closeout:
 - `codex_docs/2026-09-06-tess-release-completion.md`
 

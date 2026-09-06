@@ -1,5 +1,6 @@
 """Focused tests for GUI settings control over the Ideator mechanism."""
 
+import os
 from dataclasses import fields
 from inspect import signature
 
@@ -27,6 +28,7 @@ from athena.research.runtime.services import (
     RuntimeOptions,
     SurveySession,
 )
+from athena.research.runtime.settings import _apply_model_connection
 
 SERVICE_RECORDS = (
     ResearchInfrastructure,
@@ -175,6 +177,29 @@ async def test_apply_settings_rejects_unknown_ideation_values(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         await runtime.apply_settings({"ideation": "gated"})
+
+
+def test_masked_model_key_is_not_written_but_new_key_can_be_updated(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-real-key")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    _apply_model_connection(
+        {"model_connection": {"provider": "deepseek", "llm_api_key": "sec********alue"}}
+    )
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "LLM_PROVIDER=deepseek\n"
+    assert os.environ.get("DEEPSEEK_API_KEY") == "deepseek-real-key"
+    assert "LLM_API_KEY" not in os.environ
+
+    _apply_model_connection(
+        {"model_connection": {"provider": "deepseek", "llm_api_key": "new-secret"}}
+    )
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
+        "LLM_PROVIDER=deepseek\nLLM_API_KEY=new-secret\n"
+    )
+    assert os.environ["LLM_API_KEY"] == "new-secret"
 
 
 @pytest.mark.asyncio

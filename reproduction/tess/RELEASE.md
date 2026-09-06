@@ -1,33 +1,23 @@
-# TESS release identity and remaining sign-off
+# GitHub 交付说明
 
-The local source-and-model archive is produced with:
+项目以原始 GitHub 仓库交付，不要求源码 ZIP。
+
+提交时提供仓库链接和实际验收版本的完整 commit hash：
 
 ```bash
-python scripts/package_tess_release.py --output /path/to/tess_reproduction_bundle.zip
+git rev-parse HEAD
 ```
 
-It contains the exact committed Git source tree, the new fitted model and
-metadata/checksums, the real SEARCH prediction CSV, and `RELEASE_SOURCE.json`.
-That JSON records the immutable **source commit** and asset SHA256 values;
-the archive's sibling `.sha256` file identifies the complete distribution.
-Do not use a moving `main` branch name as the submission's source identity.
+主入口和 GUI 上手步骤以仓库根目录 README 为准。本目录是可选的
+离线模型推理工具，不替代通过 GUI 运行 Athena 的流程。
 
-The handoff for this run is written to the sibling `submit_material` directory
-as `tess_reproduction_bundle.zip`. Git contains source and documentation only;
-model/predictions are deliberately local bundle assets, not silently omitted.
-The archive does not add untracked data, raw logs, nested repositories or `.env`.
-The credential scan covers known patterns in text, not a complete security audit.
-The packaging tool includes only four explicitly selected runtime assets.
+`weights/`、`predictions/` 是本地生成物，不包含在 Git clone 中。
+需要离线模型推理时，按本目录 README 的导出命令生成模型；若单独分发
+已训练模型，须同时提供 metadata、checksums 和明确的来源说明。
 
-Owner sign-off still needed:
+此前生成的本地归档是历史辅助材料，不再是当前交付方式；无需为使用
+GUI 下载该归档，也不应把它写成仓库安装的前置条件。
 
-- Team name, contact/email and response window.
-- Dataset version/acquisition instructions and redistribution authorization.
-- Review third-party notices for any separately bundled Athena runtime or GUI.
-- Fresh authorized metric recomputation if required by the recipient; current
-  evidence is full ID/label parity with the historical SEARCH prediction vector.
-- Choose the final archive/source identity when submitting; do not claim a
-  fresh FINAL evaluation or pristine blind-test history.
-
-Source integration policy: commit scoped changes on main, push, and remove
-only task-created temporary branches. This task creates no temporary branch.
+正式提交前补齐队伍联系人、数据来源/获取说明和响应窗口。历史 TESS
+分数、新的 GUI 运行结果与离线预测一致性验证须分开描述；不宣称新做过
+FINAL 评估或从未接触过 FINAL 的盲测历史。

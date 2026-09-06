@@ -8,8 +8,9 @@ directory is the separate, non-interactive inference path for its TESS result.
 train-only XGBoost bundle has been exported locally. CPU inference on all
 169,725 SEARCH feature rows exactly matches the historical SOTA hard predictions
 by ID (zero differences). No evaluator labels or FINAL evaluation were used.
-Weights/predictions are included in the local handoff archive, not Git; see
-RELEASE.md for the source commit and archive location. Team/contact, dataset
+GitHub is the primary delivery channel; weights/predictions are local generated
+assets, not included in a clone. Export them using the command below when needed.
+See RELEASE.md for source identity. Team/contact, dataset
 licensing and authorized distribution still require owner confirmation.
 
 ## Environment and commands
@@ -115,8 +116,8 @@ streaming inference. Full feature-table memory is required.
 - [ ] Dataset acquisition/version/license and permitted redistribution confirmed.
 - [x] Full-data hardware and wall-clock measurement; peak memory not profiled.
 - [ ] Team/contact and response window supplied by owner.
-- [x] Immutable source commit is recorded by the packager in RELEASE_SOURCE.json;
-  see RELEASE.md for the distribution procedure.
+- [x] Use the repository URL and `git rev-parse HEAD` to identify the submitted
+  source version; see RELEASE.md. A source ZIP is not required.
 
 Historical and fresh-run evidence are separated in `logs/public_run_summary.md`.
 Root `uv.lock` fixes the

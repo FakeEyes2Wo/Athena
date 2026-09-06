@@ -79,4 +79,44 @@ describe("SettingsPanel validation controls", () => {
     expect(automatic).toBeChecked();
     expect(screen.getByText(/SEARCH.*Final/)).toBeVisible();
   });
+
+  it("does not submit a loaded masked API key", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings({
+      model_connection: {
+        ...DEFAULT_GUI_SETTINGS.model_connection,
+        llm_api_key: "sec********alue",
+      },
+    }));
+    bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
+
+    render(<SettingsPanel onClose={vi.fn()} />);
+    await screen.findByDisplayValue("C:/project");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
+
+    const calls = bridgeMocks.settingsSet.mock.calls;
+    const patch = calls[calls.length - 1]?.[0];
+    expect(patch.model_connection).not.toHaveProperty("llm_api_key");
+  });
+
+  it("submits an API key only after the user enters a new value", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings({
+      model_connection: {
+        ...DEFAULT_GUI_SETTINGS.model_connection,
+        llm_api_key: "sec********alue",
+      },
+    }));
+    bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
+
+    const { container } = render(<SettingsPanel onClose={vi.fn()} />);
+    await screen.findByDisplayValue("C:/project");
+    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "new-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
+
+    const calls = bridgeMocks.settingsSet.mock.calls;
+    const patch = calls[calls.length - 1]?.[0];
+    expect(patch.model_connection).toMatchObject({ llm_api_key: "new-secret" });
+  });
 });
