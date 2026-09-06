@@ -1,0 +1,6 @@
+# Offline inference: no API URL, token, temperature or agent loop is used here.
+# Model paths are resolved relative to this file, not the working directory.
+task_id: TESS_flare_win120min
+input_file: search_features.csv
+model_dir: weights
+device: cpu

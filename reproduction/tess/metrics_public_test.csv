@@ -1,0 +1,2 @@
+task_id,partition,metric,value,evidence_kind,prediction_verification,fresh_label_evaluation
+TESS_flare_win120min,SEARCH,macro_f1,0.9034041233494992,historical_native_evaluation,new_export_predictions_identical_by_id,false

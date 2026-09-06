@@ -4,6 +4,16 @@
 `ResearchRuntime`（`src/athena/research/`）是唯一组合根，TUI / CLI / headless 共享。
 模块结构与目标架构见 [`docs/README.md`](docs/README.md)。
 
+## TESS 开源与复现交付
+
+TESS 的无标签离线推理、任务声明和交付缺口见
+[`reproduction/tess/README.md`](reproduction/tess/README.md)。它与 Athena
+研究运行入口分离，不依赖 GUI 或 API，不套用 JW-FD 的任务和输出格式。
+已验证新导出模型的全部 SEARCH 预测与历史 SOTA 按 ID 一致；未重跑 FINAL。
+本地交付包与不可变源码标识见复现目录的 `RELEASE.md`。
+许可证见根目录 `LICENSE`；依赖许可范围见
+[`third_party_licenses.md`](third_party_licenses.md)。
+
 ## 环境
 
 前置：Python ≥3.11 + [uv](https://docs.astral.sh/uv/)。

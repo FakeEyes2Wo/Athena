@@ -1,0 +1,4 @@
+weights/
+predictions/
+.pytest-tmp*/
+__pycache__/

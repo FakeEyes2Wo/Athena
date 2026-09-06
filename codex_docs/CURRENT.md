@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Active TESS release closeout:
+- `codex_docs/2026-09-06-tess-release-plan.md`
+
 Completed GUI demonstration work:
 - `codex_docs/2026-09-06-gui-tess-demo-completion.md`
 
