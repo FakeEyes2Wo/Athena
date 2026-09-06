@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import tempfile
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -174,7 +175,11 @@ class ArtifactRootTest(unittest.TestCase):
             "os.environ", {ARTIFACT_ROOT_ENV: "should-not-be-used"}, clear=False
         ):
             built = build_artifact_store(root)
-        self.assertTrue(str(built.path_for("sha256:" + "0" * 64)).startswith(root))
+        # 按路径比较而非字符串前缀：mkdtemp() 跟随 TEMP 环境变量的大小写
+        # （Windows 上常是 C:\WINDOWS\TEMP），而 build_artifact_store 内部
+        # resolve() 会归一成文件系统的真实大小写，前缀比较于是假失败。
+        built_path = Path(built.path_for("sha256:" + "0" * 64)).resolve()
+        self.assertTrue(built_path.is_relative_to(Path(root).resolve()))
 
     def test_default_root_is_outside_the_repository(self) -> None:
         self.assertNotIn("Athena/Athena", DEFAULT_ARTIFACT_ROOT.as_posix())
