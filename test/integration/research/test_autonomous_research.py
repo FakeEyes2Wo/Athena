@@ -575,9 +575,9 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     evaluator_calls = []
     frozen_ref = {}
 
-    async def run_evaluator_plan(**kwargs):
-        evaluator_calls.append(kwargs)
-        frozen_ref["evaluator"] = await kwargs["store"].put_text(
+    async def run_evaluator_plan(runtime, evaluator_dir, task, plan_id, max_turns):
+        evaluator_calls.append((runtime, evaluator_dir, task, plan_id, max_turns))
+        frozen_ref["evaluator"] = await runtime.store.put_text(
             DataScriptBundle(
                 bundle_id="prepare-evaluator", entrypoint="evaluate.py"
             ).model_dump_json()
@@ -619,18 +619,13 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     result = await runtime.services.workflow.phases.run_prepare_phase()
 
     evaluator_captured = next(
-        call
-        for call in evaluator_calls
-        if Path(call["evaluator_dir"]).parent.name == "evaluator"
+        call for call in evaluator_calls if Path(call[1]).parent.name == "evaluator"
     )
     assert result.metric == pytest.approx(0.71)
-    assert evaluator_captured["agents"] is runtime.agents
-    assert evaluator_captured["scripts"] is runtime.scripts
-    assert evaluator_captured["store"] is runtime.store
-    assert evaluator_captured["execution"] is runtime.execution
-    assert evaluator_captured["task"].startswith("predict survival")
-    assert "SEARCH partition" in evaluator_captured["task"]
-    assert evaluator_captured["evaluator_dir"] == (
+    assert evaluator_captured[0] is runtime
+    assert evaluator_captured[2].startswith("predict survival")
+    assert "SEARCH partition" in evaluator_captured[2]
+    assert evaluator_captured[1] == (
         runtime.root / "workspaces" / "evaluator" / "evaluate"
     )
     assert captured["agents"] is runtime.agents
@@ -654,8 +649,8 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
 ) -> None:
     captured = {}
 
-    async def run_evaluator_plan(**kwargs):
-        del kwargs
+    async def run_evaluator_plan(runtime, evaluator_dir, task, plan_id, max_turns):
+        del runtime, evaluator_dir, task, plan_id, max_turns
         raise AssertionError("evaluator must be skipped when a checkpoint exists")
 
     async def run_prepare_plan(**kwargs):

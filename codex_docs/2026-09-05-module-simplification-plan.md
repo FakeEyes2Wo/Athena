@@ -675,6 +675,14 @@ Make every dependency record slotted and cap every group at five fields. Move Ag
 
 The package marker falls from five lines to one and `deps.py` from 111 baseline lines to 79. The unchanged focused baseline and final selection both passed 414 tests; the complete research unit/integration suite passed 1,380. Python compilation, old-field/call/import searches, dependency-shape inspection, and `git diff --check` passed. Closing these two rows advances reviewed coverage to 360/602. Whole-repository acceptance remains pending.
 
+## Evaluator Plan review
+
+Read `supervisor/evaluator_plan.py` completely and trace evaluator construction, freeze validation, handoff consumption, event forwarding, recovery, and direct tests through PREPARE, Ideator, Plan runtime, breakpoint resume, autonomous research, and the Supervisor architecture boundary. Retain the module because its bundle-layout, label-identity, behavioral-probe, freeze-marker, and bounded repair loop form one cohesive trust boundary; merging it into the already-large evaluator preparation owner would make that module harder to review without removing behavior.
+
+Replace the eleven-parameter Plan entry with `run_evaluator_plan(runtime, evaluator_dir, task, plan_id, max_turns)`. The existing Runtime is now the sole owner of agents, scripts, storage, execution, and event publication; Agent and Plan use one identity. Move the duplicated `read_eval_handoff` implementations into `evaluation/spec.py`, delete four duplicate identity constants, both redundant `__all__` declarations, and the evaluator-only timeout/reap wrapper. Cleanup now uses the canonical Agent runtime directly. Remove the custom-format confirmation branch and its two tests because `ResearchRuntime` never exposed the optional `ask_user` attribute it depended on; production already accepted the Agent's format-aware probes after logging that CSV probes were unavailable.
+
+Remove the private validator's unread store argument and its `AttributeError` escape for test runners without `run_dir`. The test runner now scores the same synthetic row-order and value-permutation probes as production instead of skipping them. `evaluator_plan.py` falls from 425 baseline lines to 335; its six top-level functions take at most five parameters. The unchanged focused baseline passed 116 tests and the final selection passed 114 after deleting exactly two unreachable tests. The complete research plus Supervisor-architecture selection passed 1,380 tests. Ruff, Black, production hard-rule checks, Python compilation, old-interface searches, and `git diff --check` passed. Closing this row advances reviewed coverage to 361/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1300,7 +1308,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/splitter.py` | 308 | Pending |
 | `src/athena/research/supervisor/__init__.py` | 5 | Reviewed; remove unused Supervisor reexport and retain package marker |
 | `src/athena/research/supervisor/deps.py` | 111 | Reviewed; slot five focused groups and collapse validation policy to one mode |
-| `src/athena/research/supervisor/evaluator_plan.py` | 425 | Pending |
+| `src/athena/research/supervisor/evaluator_plan.py` | 425 | Reviewed; runtime-owned five-argument Plan and one real property-probe path replace dependency/test compatibility plumbing |
 | `src/athena/research/supervisor/events.py` | 277 | Pending |
 | `src/athena/research/supervisor/experiment.py` | 555 | Pending |
 | `src/athena/research/supervisor/manifest.py` | 108 | Pending |

@@ -129,8 +129,9 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         reg._types.add("evaluator")
         bound.append(Path(workspace))
 
-    async def fake_plan(**kwargs):
-        frozen.append(Path(kwargs["evaluator_dir"]))
+    async def fake_plan(runtime, evaluator_dir, task, plan_id, max_turns):
+        del runtime, task, plan_id, max_turns
+        frozen.append(Path(evaluator_dir))
         return "sha256:" + "a" * 64
 
     monkeypatch.setattr(evaluator_module, "register_evaluator_agent", fake_register)

@@ -661,8 +661,8 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         ideator_tools=lambda: None,
     )
 
-    async def run_evaluator_plan(**kwargs):
-        del kwargs
+    async def run_evaluator_plan(runtime, evaluator_dir, task, plan_id, max_turns):
+        del runtime, evaluator_dir, task, plan_id, max_turns
         raise AssertionError("evaluator must be skipped when a checkpoint exists")
 
     async def run_prepare_plan(**kwargs):

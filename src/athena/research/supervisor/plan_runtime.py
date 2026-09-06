@@ -13,8 +13,8 @@ from athena.research.clarification.context import (
     ConfirmedTaskContextError,
     ConfirmedTaskContextProvider,
 )
+from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.supervisor.deps import SupervisorDeps
-from athena.research.supervisor.evaluator_plan import read_eval_handoff
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import PlanTurnResult, load_agent_result
 from athena.research.supervisor.plans import (

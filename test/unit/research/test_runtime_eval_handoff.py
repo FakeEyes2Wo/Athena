@@ -8,11 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.turns.runner import AgentTurnRunner
 from athena.research.contracts import EvaluatorDescriptor
+from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.runtime import ResearchRuntime
-from athena.research.supervisor.evaluator_plan import read_eval_handoff
 from athena.research.supervisor.prompt_context import handoff_block
+from athena.research.turns.runner import AgentTurnRunner
 
 _HANDOFF = "# Eval contract\n\npredictions/predictions.csv: header,id,target\n"
 

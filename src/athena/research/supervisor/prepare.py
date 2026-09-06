@@ -18,8 +18,8 @@ from athena.core.workspace import (
     GitWorkspaceError,
 )
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
-from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
@@ -103,21 +103,6 @@ def _consume_reap_result(task: "asyncio.Task[None]") -> None:
         task.exception()
 
 
-async def _read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the frozen evaluator handoff used by the PREPARE agent."""
-    if evaluator_ref is None:
-        return ""
-    try:
-        descriptor = EvaluatorDescriptor.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-        return (Path(descriptor.dir_path) / "HANDOFF.md").read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return ""
-
-
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
     decision = await load_agent_result(summary, store, PlanDecision)
     if decision is None:
@@ -170,7 +155,7 @@ async def run_prepare_plan(
     # 列名和行集合——真机上就交出了 ``sample_id,probability,label_true`` 覆盖全部 6000
     # 行，而评估器要 ``__athena_row_id`` 与 1200 行留出集，直接判 0.0。
     # 契约拼进 content：context_refs 到不了 model（见 ``handoff_block``）。
-    content = task + handoff_block(await _read_eval_handoff(store, evaluator_ref))
+    content = task + handoff_block(await read_eval_handoff(store, evaluator_ref))
     agent_id, run_id = await agents.create_root(
         "prepare",
         {"content": content, "context_refs": [context_ref]},

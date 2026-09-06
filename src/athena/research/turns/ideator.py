@@ -25,6 +25,7 @@ from athena.core.agent.chat import single_turn_structured_chat
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.research.clarification.context import confirmed_task_context_block
+from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.exploration_files import (
     prepare_ideator_lane,
     write_ideator_result,
@@ -34,7 +35,6 @@ from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
 )
-from athena.research.supervisor.evaluator_plan import read_eval_handoff
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.prompt_context import handoff_block
 from athena.research.turns.common import (

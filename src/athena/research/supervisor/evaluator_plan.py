@@ -1,6 +1,5 @@
 """Freeze and validate one evaluator Agent bundle."""
 
-import asyncio
 import csv
 import json
 import logging
@@ -8,11 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, ArtifactStore
-from athena.core.tool_types import EmitEvent
+from athena.core.contracts import ArtifactRef
 from athena.core.workspace import resolve_workspace_path
-from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation.spec import (
     DEFAULT_PREDICTION_ID_COLUMN,
@@ -30,56 +26,7 @@ from athena.research.supervisor.plans import PlanDecision
 
 logger = logging.getLogger(__name__)
 
-EVALUATOR_AGENT_ID = "evaluator"
-EVALUATOR_PLAN_ID = "evaluator"
-FINAL_EVALUATOR_AGENT_ID = "final_evaluator"
-FINAL_EVALUATOR_PLAN_ID = "final_evaluator"
 ROW_ID_COLUMN = "__athena_row_id"
-_REAP_TIMEOUT_SECONDS = 5.0
-
-
-def _consume_reap_result(task: "asyncio.Task[None]") -> None:
-    if not task.cancelled():
-        task.exception()
-
-
-async def _reap_agent(agents: AgentRuntime, agent_id: str) -> None:
-    """Bound one-shot evaluator/PREPARE Agent cleanup."""
-    task = asyncio.create_task(agents.reap(agent_id))
-    done, _ = await asyncio.wait({task}, timeout=_REAP_TIMEOUT_SECONDS)
-    if task not in done:
-        task.add_done_callback(_consume_reap_result)
-        task.cancel()
-        logger.warning("timed out reaping Agent %s", agent_id)
-        return
-    if task.cancelled():
-        logger.warning("Agent reap was cancelled for %s", agent_id)
-        return
-    error = task.exception()
-    if error is not None:
-        logger.warning(
-            "failed to reap Agent %s",
-            agent_id,
-            exc_info=(type(error), error, error.__traceback__),
-        )
-
-
-async def read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the frozen evaluator's model-visible prediction contract."""
-    if evaluator_ref is None:
-        return ""
-    try:
-        descriptor = EvaluatorDescriptor.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-    except (ValueError, OSError):
-        return ""
-    try:
-        return (Path(descriptor.dir_path) / "HANDOFF.md").read_text(encoding="utf-8")
-    except OSError:
-        return ""
 
 
 def _require_joinable_labels(
@@ -198,7 +145,6 @@ async def _validate_frozen_evaluator(
     *,
     root: Path,
     scripts: DataScriptRunner,
-    store: ArtifactStore,
 ) -> None:
     """Run format-aware property tests on a frozen evaluator directory."""
     evaluator_root, entrypoint, prediction_format = _evaluator_layout(root)
@@ -278,49 +224,37 @@ async def _validate_frozen_evaluator(
         )
         return float(result.outputs["primary"])
 
-    try:
-        outcome = await validate_evaluator_properties(
-            labels_csv,
-            score,
-            prediction_column=prediction_column,
-            prediction_id_column=id_column,
-            probability_columns=spec.probability_columns if spec is not None else (),
-        )
-    except AttributeError:
-        # Legacy script runners lack run_dir(), so automated probes are unavailable.
-        logger.warning("evaluator property tests skipped: runner has no run_dir()")
-        return
+    outcome = await validate_evaluator_properties(
+        labels_csv,
+        score,
+        prediction_column=prediction_column,
+        prediction_id_column=id_column,
+        probability_columns=spec.probability_columns if spec is not None else (),
+    )
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
 
 
 async def run_evaluator_plan(
-    *,
-    agents: AgentRuntime,
-    scripts: DataScriptRunner,
-    store: ArtifactStore,
+    runtime: Any,
     evaluator_dir: Path,
-    execution: ExecutionRuntime,
     task: str,
+    plan_id: str,
     max_turns: int,
-    publish: EmitEvent | None = None,
-    ask_user: Any | None = None,
-    agent_id: str = EVALUATOR_AGENT_ID,
-    plan_id: str = EVALUATOR_PLAN_ID,
 ) -> ArtifactRef:
     """Run and repair one evaluator Agent until its bundle is accepted."""
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
     root = Path(evaluator_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    execution.ensure_environment()
-    context_ref = await store.put_text(
+    runtime.execution.ensure_environment()
+    context_ref = await runtime.store.put_text(
         json.dumps({"plan_id": plan_id, "task": task}, ensure_ascii=False)
     )
-    agent_id, run_id = await agents.create_root(
+    agent_id, run_id = await runtime.agents.create_root(
         "evaluator",
         {"content": task, "context_refs": [context_ref]},
-        agent_id=agent_id,
+        agent_id=plan_id,
         name=plan_id,
     )
 
@@ -329,13 +263,19 @@ async def run_evaluator_plan(
     try:
         for turn in range(max_turns):
             if turn:
-                run_id = await agents.followup(
+                run_id = await runtime.agents.followup(
                     agent_id,
                     {"content": feedback, "context_refs": []},
                 )
-            summary = await wait_run_events(agents, run_id, publish)
+            summary = await wait_run_events(
+                runtime.agents,
+                run_id,
+                lambda kind, ref, data: runtime.events.project_agent_event(
+                    plan_id, kind, ref, data
+                ),
+            )
             try:
-                decision = await load_agent_result(summary, store, PlanDecision)
+                decision = await load_agent_result(summary, runtime.store, PlanDecision)
                 if decision is None:
                     raise RuntimeError(summary.error or "evaluator Agent run failed")
             except (OSError, RuntimeError, ValueError) as exc:
@@ -359,36 +299,16 @@ async def run_evaluator_plan(
                 _, entrypoint, prediction_format = _evaluator_layout(root)
                 await _validate_frozen_evaluator(
                     root=root,
-                    scripts=scripts,
-                    store=store,
+                    scripts=runtime.scripts,
                 )
-                if prediction_format != "tabular_csv" and ask_user is not None:
-                    answer = await ask_user(
-                        "This evaluator uses a custom prediction format, so the "
-                        "platform cannot run its CSV-only automated probes. "
-                        "Confirm the HANDOFF.md format declaration and the agent's "
-                        "format-aware probes are acceptable?",
-                        choices=[
-                            {"label": "接受", "value": "accept"},
-                            {"label": "拒绝", "value": "reject"},
-                        ],
-                        allow_custom=True,
-                        allow_skip=True,
-                    )
-                    if answer is not None:
-                        lowered = str(answer).lower()
-                        if "reject" in lowered or "拒绝" in answer:
-                            raise ValueError(
-                                "human rejected custom evaluator acceptance"
-                            )
                 readme_text = _evaluator_readme(
                     root,
                     entrypoint=entrypoint,
                     prediction_format=prediction_format,
                 )
                 (root / "README.md").write_text(readme_text, encoding="utf-8")
-                readme_ref = await store.put_text(readme_text)
-                evaluator_ref = await store.put_text(
+                readme_ref = await runtime.store.put_text(readme_text)
+                evaluator_ref = await runtime.store.put_text(
                     EvaluatorDescriptor(
                         dir_path=str(root.resolve()),
                         readme_ref=readme_ref,
@@ -412,14 +332,4 @@ async def run_evaluator_plan(
             f"({plan_id}); last rejection: {feedback or 'none recorded'}"
         )
     finally:
-        await _reap_agent(agents, agent_id)
-
-
-__all__ = [
-    "EVALUATOR_AGENT_ID",
-    "EVALUATOR_PLAN_ID",
-    "FINAL_EVALUATOR_AGENT_ID",
-    "FINAL_EVALUATOR_PLAN_ID",
-    "read_eval_handoff",
-    "run_evaluator_plan",
-]
+        await runtime.agents.reap(agent_id)

@@ -13,6 +13,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.research.contracts import EvaluatorDescriptor
+
 DEFAULT_PREDICTION_ID_COLUMN = "__athena_row_id"
 _SAFE_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -146,9 +149,16 @@ def load_evaluator_spec(root: Path, *, legacy_ok: bool = True) -> EvaluatorSpec 
         raise ValueError(f"invalid evaluator metric.json: {exc}") from exc
 
 
-__all__ = [
-    "DEFAULT_PREDICTION_ID_COLUMN",
-    "EvaluatorSpec",
-    "load_evaluator_spec",
-    "load_metric_json",
-]
+async def read_eval_handoff(
+    store: ArtifactStore, evaluator_ref: ArtifactRef | None
+) -> str:
+    """Read the model-visible contract from a frozen evaluator."""
+    if evaluator_ref is None:
+        return ""
+    try:
+        descriptor = EvaluatorDescriptor.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+        return (Path(descriptor.dir_path) / "HANDOFF.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""

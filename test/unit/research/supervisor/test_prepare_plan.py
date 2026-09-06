@@ -1,6 +1,7 @@
 """Deterministic PREPARE phase boundary tests."""
 
 import asyncio
+import csv
 import json
 import shutil
 from pathlib import Path
@@ -95,6 +96,14 @@ class _AgentRuntime:
             },
         )()
 
+    async def run_events(self, _run_id, after_sequence=0):
+        yield SimpleNamespace(
+            kind="response_completed",
+            event_ref="event-ref",
+            data={},
+            sequence=after_sequence + 1,
+        )
+
     async def reap(self, agent_id: str) -> None:
         del agent_id
 
@@ -109,7 +118,25 @@ class _InvalidFirstDecisionRuntime(_AgentRuntime):
 
 
 class _Scripts:
-    """Script runner stub: no freeze or run_dir, so property tests are skipped."""
+    """Score synthetic CSV probes without starting a subprocess."""
+
+    async def run_dir(self, root, *, request, extra_files, output_schema):
+        del request, output_schema
+        labels_path = root / "labels.csv"
+        if not labels_path.is_file():
+            labels_path = next((root / "labels").rglob("*.csv"))
+        with labels_path.open(encoding="utf-8-sig", newline="") as handle:
+            labels = list(csv.DictReader(handle))
+        predictions = list(
+            csv.DictReader(next(iter(extra_files.values())).decode().splitlines())
+        )
+        id_column, prediction_column = predictions[0].keys()
+        target_column = next(name for name in labels[0] if name != id_column)
+        truth = {row[id_column]: row[target_column] for row in labels}
+        score = sum(
+            truth[row[id_column]] == row[prediction_column] for row in predictions
+        ) / len(predictions)
+        return SimpleNamespace(outputs={"primary": score})
 
 
 class _Execution:
@@ -142,6 +169,19 @@ class _Execution:
 
     async def collect_outputs(self, _subdirs: tuple[str, ...]) -> None:
         return None
+
+
+def _evaluator_runtime(tmp_path, store, agents, scripts=None):
+    async def publish_agent_event(_plan_id, _kind, _ref, _data):
+        return None
+
+    return SimpleNamespace(
+        agents=agents,
+        scripts=scripts or _Scripts(),
+        store=store,
+        execution=_Execution(tmp_path),
+        events=SimpleNamespace(project_agent_event=publish_agent_event),
+    )
 
 
 class _Evaluator:
@@ -519,12 +559,8 @@ async def test_labels_without_row_id_are_rejected_by_validation(tmp_path: Path) 
     """单列 labels.csv 仍必须在 README 冻结前被结构性检查拦下。"""
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "label\n0\n1\n")
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(
-            root=evaluator_dir, scripts=_Scripts(), store=store
-        )
+        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -533,12 +569,8 @@ async def test_labels_with_wrong_row_id_are_rejected_by_validation(
 ) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "id,label\n0,0\n1,1\n")
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(
-            root=evaluator_dir, scripts=_Scripts(), store=store
-        )
+        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -548,25 +580,15 @@ async def test_duplicate_row_ids_are_rejected_by_validation(tmp_path: Path) -> N
         evaluator_dir,
         "__athena_row_id,label\n0,0\n0,1\n",
     )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
     with pytest.raises(ValueError, match="duplicate '__athena_row_id'"):
-        await _validate_frozen_evaluator(
-            root=evaluator_dir, scripts=_Scripts(), store=store
-        )
+        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
 async def test_valid_tabular_labels_pass_validation(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
-    # _Scripts has no run_dir(), so behavioral probes are skipped; label layout
-    # must still be accepted before the probe-skip path.
-    await _validate_frozen_evaluator(
-        root=evaluator_dir, scripts=_Scripts(), store=store
-    )
+    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -587,11 +609,7 @@ async def test_labels_directory_and_handoff_are_accepted(tmp_path: Path) -> None
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
-    await _validate_frozen_evaluator(
-        root=evaluator_dir, scripts=_Scripts(), store=store
-    )
+    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -608,12 +626,8 @@ async def test_labels_directory_without_row_id_is_rejected(tmp_path: Path) -> No
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(
-            root=evaluator_dir, scripts=_Scripts(), store=store
-        )
+        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -637,11 +651,7 @@ async def test_eval_script_directory_labels_are_located_correctly(
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluator"}), encoding="utf-8"
     )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
-    await _validate_frozen_evaluator(
-        root=evaluator_dir, scripts=_Scripts(), store=store
-    )
+    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -656,13 +666,9 @@ async def test_custom_format_skips_csv_probes(tmp_path: Path) -> None:
         json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
         encoding="utf-8",
     )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-
     # No CSV labels required: custom formats are validated by the agent's own
     # format-aware probes instead of the platform CSV property tests.
-    await _validate_frozen_evaluator(
-        root=evaluator_dir, scripts=_Scripts(), store=store
-    )
+    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
 
 
 @pytest.mark.asyncio
@@ -688,13 +694,11 @@ async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
     agents = _AgentRuntime(store, agent_id="evaluator")
 
     evaluator_ref = await run_evaluator_plan(
-        agents=agents,
-        scripts=_Scripts(),
-        store=store,
-        evaluator_dir=evaluator_dir,
-        execution=_Execution(tmp_path),
-        task="write the evaluator",
-        max_turns=2,
+        _evaluator_runtime(tmp_path, store, agents),
+        evaluator_dir,
+        "write the evaluator",
+        "evaluator",
+        2,
     )
 
     assert evaluator_ref
@@ -731,86 +735,14 @@ async def test_invalid_evaluator_decision_requests_compact_json(tmp_path: Path) 
     agents = _InvalidFirstDecisionRuntime(store, agent_id="evaluator")
 
     assert await run_evaluator_plan(
-        agents=agents,
-        scripts=_Scripts(),
-        store=store,
-        evaluator_dir=evaluator_dir,
-        execution=_Execution(tmp_path),
-        task="write the evaluator",
-        max_turns=2,
+        _evaluator_runtime(tmp_path, store, agents),
+        evaluator_dir,
+        "write the evaluator",
+        "evaluator",
+        2,
     )
     assert "Do not run tools again" in agents.feedback[0]
     assert "reason under 120 characters" in agents.feedback[0]
-
-
-@pytest.mark.asyncio
-async def test_custom_evaluator_asks_human_in_non_auto_mode(tmp_path: Path) -> None:
-    evaluator_dir = tmp_path / "evaluator"
-    evaluator_dir.mkdir(parents=True)
-    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "pyproject.toml").write_text(
-        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
-    )
-    (evaluator_dir / "metric.json").write_text(
-        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
-        encoding="utf-8",
-    )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-    agents = _AgentRuntime(store, agent_id="evaluator")
-    asked: list[str] = []
-
-    async def ask_user(prompt, **_kwargs):
-        asked.append(prompt)
-        return "accept"
-
-    evaluator_ref = await run_evaluator_plan(
-        agents=agents,
-        scripts=_Scripts(),
-        store=store,
-        evaluator_dir=evaluator_dir,
-        execution=_Execution(tmp_path),
-        task="write the evaluator",
-        max_turns=2,
-        ask_user=ask_user,
-    )
-
-    assert evaluator_ref
-    assert asked
-    assert "custom prediction format" in asked[0]
-
-
-@pytest.mark.asyncio
-async def test_custom_evaluator_rejected_human_does_not_advance(
-    tmp_path: Path,
-) -> None:
-    evaluator_dir = tmp_path / "evaluator"
-    evaluator_dir.mkdir(parents=True)
-    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "pyproject.toml").write_text(
-        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
-    )
-    (evaluator_dir / "metric.json").write_text(
-        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
-        encoding="utf-8",
-    )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-    agents = _AgentRuntime(store, agent_id="evaluator")
-
-    async def ask_user(prompt, **_kwargs):
-        del prompt
-        return "reject"
-
-    with pytest.raises(RuntimeError, match="turn budget exhausted"):
-        await run_evaluator_plan(
-            agents=agents,
-            scripts=_Scripts(),
-            store=store,
-            evaluator_dir=evaluator_dir,
-            execution=_Execution(tmp_path),
-            task="write the evaluator",
-            max_turns=1,
-            ask_user=ask_user,
-        )
 
 
 @pytest.mark.asyncio
@@ -821,13 +753,11 @@ async def test_evaluator_plan_missing_metric_retries(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="turn budget exhausted"):
         await run_evaluator_plan(
-            agents=agents,
-            scripts=_Scripts(),
-            store=store,
-            evaluator_dir=evaluator_dir,
-            execution=_Execution(tmp_path),
-            task="write the evaluator",
-            max_turns=2,
+            _evaluator_runtime(tmp_path, store, agents),
+            evaluator_dir,
+            "write the evaluator",
+            "evaluator",
+            2,
         )
 
     assert agents.created == ["evaluator"]

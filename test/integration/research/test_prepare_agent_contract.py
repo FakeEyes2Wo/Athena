@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -360,15 +361,24 @@ class _Harness:
         )
         agents = self._agent_runtime(registry)
         agents.start()
+
+        async def publish_agent_event(_plan_id, _kind, _ref, _data):
+            return None
+
+        runtime = SimpleNamespace(
+            agents=agents,
+            scripts=self.scripts,
+            store=self.store,
+            execution=self.execution,
+            events=SimpleNamespace(project_agent_event=publish_agent_event),
+        )
         try:
             return await run_evaluator_plan(
-                agents=agents,
-                scripts=self.scripts,
-                store=self.store,
-                evaluator_dir=evaluator_dir,
-                execution=self.execution,
-                task="write the evaluator",
-                max_turns=max_turns,
+                runtime,
+                evaluator_dir,
+                "write the evaluator",
+                "evaluator",
+                max_turns,
             )
         finally:
             await agents.aclose()

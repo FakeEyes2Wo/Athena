@@ -15,11 +15,10 @@ from athena.core.artifact_store import (
 )
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation.spec import load_evaluator_spec
-from athena.research.supervisor.evaluator_plan import (
-    EVALUATOR_PLAN_ID,
-    FINAL_EVALUATOR_PLAN_ID,
-    run_evaluator_plan,
-)
+from athena.research.supervisor.evaluator_plan import run_evaluator_plan
+
+EVALUATOR_PLAN_ID = "evaluator"
+FINAL_EVALUATOR_PLAN_ID = "final_evaluator"
 
 
 @dataclass(frozen=True)
@@ -203,21 +202,7 @@ async def run_evaluator_agent(
     )
 
     # The supervisor plan validates and freezes the evaluator bundle.
-    return await run_evaluator_plan(
-        agents=runtime.agents,
-        scripts=runtime.scripts,
-        store=runtime.store,
-        evaluator_dir=evaluator_dir,
-        execution=runtime.execution,
-        task=task,
-        max_turns=MAX_PLAN_TURNS,
-        publish=lambda kind, ref, data: runtime.events.project_agent_event(
-            name, kind, ref, data
-        ),
-        ask_user=getattr(runtime, "ask_user", None),
-        agent_id=name,
-        plan_id=name,
-    )
+    return await run_evaluator_plan(runtime, evaluator_dir, task, name, MAX_PLAN_TURNS)
 
 
 async def _search_evaluator(runtime: Any, task: str) -> Any:
