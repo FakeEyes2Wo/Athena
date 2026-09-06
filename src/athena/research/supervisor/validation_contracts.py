@@ -63,6 +63,7 @@ class ValidationOptions:
 
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
     predict_features: Path | None = None
+    data_csv: Path | None = None
 
 
 @dataclass(frozen=True)

@@ -46,6 +46,14 @@ def test_build_env_places_venv_first(tmp_path: Path) -> None:
     assert env["ATHENA_ENV_ROOT"] == str(tmp_path)
 
 
+def test_build_env_injects_the_command_dataset_path(tmp_path: Path) -> None:
+    dataset = tmp_path / "model_input.csv"
+
+    env = EnvironmentManager(environment_root=tmp_path).build_env(data_csv=dataset)
+
+    assert env["ATHENA_DATA_CSV"] == str(dataset)
+
+
 def test_ensure_environment_creates_minimal_pyproject_when_missing(
     tmp_path: Path,
 ) -> None:

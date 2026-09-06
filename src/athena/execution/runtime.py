@@ -185,6 +185,7 @@ class CommandRequest:
     # Kept here so SSH can reject it via the request object instead of a
     # global mutable protocol method.
     predict_features: Path | None = None
+    data_csv: Path | None = None
     evaluation_split: str | None = None
 
 
@@ -197,6 +198,7 @@ class ExecutionContext:
     environment_root: Path
     experiment_id: str | None = None
     predict_features: Path | None = None
+    data_csv: Path | None = None
 
 
 @dataclass(slots=True)
@@ -321,6 +323,7 @@ class EnvironmentManager:
         workspace_root: Path | None = None,
         *,
         predict_features: str | Path | None = None,
+        data_csv: str | Path | None = None,
         evaluation_split: str | None = None,
     ) -> dict[str, str]:
         """构造子进程环境：白名单宿主变量 + 环境根/workspace venv 前置 PATH + UTF-8。
@@ -351,6 +354,8 @@ class EnvironmentManager:
             env["ATHENA_DATA_ROOT"] = str(self._data_root)
         if predict_features is not None:
             env["ATHENA_PREDICT_FEATURES"] = str(Path(predict_features))
+        if data_csv is not None:
+            env["ATHENA_DATA_CSV"] = str(Path(data_csv))
         if evaluation_split is not None:
             env["ATHENA_EVALUATION_SPLIT"] = evaluation_split
         return env
@@ -843,6 +848,9 @@ class ExecutionRuntime:
                 context.predict_features
                 if context.predict_features is not None
                 else request.predict_features
+            ),
+            data_csv=(
+                context.data_csv if context.data_csv is not None else request.data_csv
             ),
         )
         return await self._backend.run(

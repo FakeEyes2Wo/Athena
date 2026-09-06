@@ -145,6 +145,32 @@ async def test_first_round_success_does_not_retry(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_finish_ideator_batch_passes_runtime_client_to_gate(
+    tmp_path, monkeypatch
+):
+    """The gate's own LLM calls have to run on the runtime's client.
+
+    Without it every falsifiability and review call built a fresh default
+    client, which ignores the configured gateway entirely.
+    """
+    agents = _Agents()
+    runner = _runner(agents, tmp_path)
+    injected_client = object()
+    runner._runtime.client = injected_client
+    received = {}
+
+    async def _gate(drafts, **kwargs):
+        received.update(kwargs)
+        return []
+
+    monkeypatch.setattr(atr, "run_light_pipeline", _gate)
+
+    await runner._finish_ideator_batch(HypothesisBatch(hypotheses=[]), rejections=[])
+
+    assert received["client"] is injected_client
+
+
+@pytest.mark.asyncio
 async def test_baseline_mode_never_retries(tmp_path, monkeypatch):
     """对照组不过门禁，没有"全拒"这回事，不能引入 gated 才有的重试差异。"""
     agents = _Agents()

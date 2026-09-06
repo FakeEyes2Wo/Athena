@@ -124,6 +124,7 @@ def _runner(ideation: str) -> AgentTurnRunner:
         SimpleNamespace(
             model="fake-model",
             store=SimpleNamespace(),
+            client=object(),
             ideation=ideation,
             corpus_paper_ids=_no_corpus,
         )
