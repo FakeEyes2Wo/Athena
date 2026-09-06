@@ -1,5 +1,8 @@
 # Current Athena Work
 
+Active local baseline-authority design:
+- `codex_docs/2026-09-06-local-authority-design.md`
+
 Completed controller wiring and bounded environment repair mechanism:
 - `codex_docs/2026-09-06-controller-repair-completion.md`
 
