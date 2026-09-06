@@ -1362,8 +1362,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Reviewed; merge the forwarding composition facade into the single Plan runtime owner and delete the file |
 | `src/athena/research/supervisor/plan_runtime.py` | 450 | Reviewed; directly own persistence, settlement, hypotheses, checkpoints, dispatch, execution, and recovery with a four-argument constructor |
 | `src/athena/research/supervisor/plans.py` | 180 | Reviewed; remove three unread input fields and decision suggestions, share trusted-ref validation, and project frozen Human guidance into Plan prompts |
-| `src/athena/research/supervisor/prepare.py` | 296 | Pending |
-| `src/athena/research/supervisor/prompt_context.py` | 74 | Pending |
+| `src/athena/research/supervisor/prepare.py` | 296 | Reviewed; add slim dependency/request holders, inline prepare turn loop, and extract shared decision/outcome checks |
+| `src/athena/research/supervisor/prompt_context.py` | 74 | Reviewed; remove one-purpose PromptBlock class, keep helper block renderer |
 | `src/athena/research/supervisor/recovery.py` | 60 | Pending |
 | `src/athena/research/supervisor/run_state.py` | 145 | Pending |
 | `src/athena/research/supervisor/scheduling.py` | 389 | Pending |
