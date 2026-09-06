@@ -9,6 +9,8 @@ Tauri 桌面应用启动此 Python 进程并从 stdout 的第一行读取端口�
 """
 
 import asyncio
+import importlib
+import inspect
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -24,12 +26,44 @@ from athena.research.config import (
     SessionConfig,
     TaskConfig,
 )
+from gui_gateway.controller import ControllerFactory
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiStateStore
 from gui_gateway.transport import WebSocketTransport
 
 RuntimeFactory = Callable[..., ResearchRuntime]
+
+
+def _factory_accepts(factory: RuntimeFactory, keyword: str) -> bool:
+    """Preserve custom test/embedding factories that predate a new option."""
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == keyword or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _controller_factory_from_environment() -> ControllerFactory | None:
+    """Load the host-owned factory named by ``ATHENA_CONTROLLER_FACTORY``.
+
+    The value is only a Python import reference (`package.module:factory`), not
+    credentials. The imported host module owns credentials and its external
+    authority client; agent tools and GUI requests never receive either.
+    """
+    reference = os.environ.get("ATHENA_CONTROLLER_FACTORY", "").strip()
+    if not reference:
+        return None
+    module_name, separator, attribute = reference.partition(":")
+    if not separator or not module_name or not attribute:
+        raise RuntimeError("ATHENA_CONTROLLER_FACTORY must be package.module:callable")
+    factory = getattr(importlib.import_module(module_name), attribute, None)
+    if not callable(factory):
+        raise TypeError("ATHENA_CONTROLLER_FACTORY must resolve to a callable")
+    return factory
 
 
 def _make_runtime(
@@ -39,6 +73,7 @@ def _make_runtime(
     session_id: str = "default",
     broker: Any = None,
     skip_validate: bool = False,
+    controller_factory: ControllerFactory | None = None,
 ) -> ResearchRuntime:
     """按选定项目目录构造 research runtime；None 时沿用进程工作目录。
 
@@ -47,6 +82,11 @@ def _make_runtime(
     GUI 路径显式启用确认门并关闭自动确认：raw task 文本必须先经过
     ``task_clarification_start`` 与 ``start_search(draft_id, revision)``。
     """
+    capabilities = (
+        controller_factory(Path(project_root or ".").resolve(), session_id)
+        if controller_factory is not None
+        else None
+    )
     return ResearchRuntime(
         project_root=project_root,
         session=SessionConfig(state_root=state_root, session_id=session_id),
@@ -55,7 +95,14 @@ def _make_runtime(
             policy=ResearchPolicy(auto_validate=True, skip_validate=skip_validate),
         ),
         dependencies=RuntimeDependencies(
-            provider=ProviderConfig(model=settings.model_name()), broker=broker
+            provider=ProviderConfig(model=settings.model_name()),
+            broker=broker,
+            baseline_authority=(
+                capabilities.baseline_authority if capabilities is not None else None
+            ),
+            environment_repair_actions=(
+                dict(capabilities.repair_actions) if capabilities is not None else None
+            ),
         ),
     )
 
@@ -81,6 +128,7 @@ async def start_server(
     runtime: ResearchRuntime | None = None,
     make_runtime: RuntimeFactory = _make_runtime,
     port: int | None = None,
+    controller_factory: ControllerFactory | None = None,
 ) -> tuple[Any, int]:
     """启动 WebSocket 服务器并返回 (server, port) 元组。
 
@@ -92,6 +140,7 @@ async def start_server(
     Returns:
         ``(websockets.WebSocketServer, port)`` 元组。
     """
+    controller_factory = controller_factory or _controller_factory_from_environment()
     broker = HumanRequestBroker()
     state_store = GuiStateStore()
 
@@ -100,6 +149,12 @@ async def start_server(
     ) -> ResearchRuntime:
         session_id = state_root.name if state_root is not None else "default"
         stored = state_store.load()
+        controller_options = (
+            {"controller_factory": controller_factory}
+            if controller_factory is not None
+            and _factory_accepts(make_runtime, "controller_factory")
+            else {}
+        )
         runtime = make_runtime(
             project_root,
             state_root,
@@ -107,6 +162,7 @@ async def start_server(
             session_id=session_id,
             broker=broker,
             skip_validate=stored.skip_validate_for(project_root),
+            **controller_options,
         )
         broker.bind(session_id, "runtime", "runtime")
         return runtime

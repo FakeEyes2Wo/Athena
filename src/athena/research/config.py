@@ -149,6 +149,7 @@ class RuntimeDependencies:
     adapters: RuntimeAdapters = field(default_factory=RuntimeAdapters)
     broker: Any = None
     baseline_authority: Any = None
+    environment_repair_actions: Any = None
 
 
 @dataclass(frozen=True, slots=True)

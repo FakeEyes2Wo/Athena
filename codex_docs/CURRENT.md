@@ -1,5 +1,14 @@
 # Current Athena Work
 
+Completed controller wiring and bounded environment repair mechanism:
+- `codex_docs/2026-09-06-controller-repair-completion.md`
+
+Completed lightweight existing-split and FINAL lifecycle patch:
+- `codex_docs/2026-09-06-lightweight-final-completion.md`
+
+Completed TESS submission-material assembly (review draft; submission blockers remain):
+- `codex_docs/2026-09-06-tess-submission-material-completion.md`
+
 Active GUI-first repository closeout:
 - `codex_docs/2026-09-06-gui-first-closeout-plan.md`
 

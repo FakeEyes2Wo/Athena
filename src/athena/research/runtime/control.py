@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from athena.research.runtime.corpus import start_survey
+from athena.research.runtime.environment_repair import preflight
 from athena.research.runtime.resume_contract import (
     ResearchControlError,
     is_continue_command,
@@ -35,6 +36,10 @@ async def start(runtime: Any) -> asyncio.Task[None]:
     if lifecycle.task is not None and not lifecycle.task.done():
         return lifecycle.task
 
+    if runtime.provider is not None:
+        await preflight(
+            runtime, runtime.config.dependencies.environment_repair_actions or {}
+        )
     lifecycle.task_text = _task_text(runtime, runtime.task_text)
     await runtime.git.init(initial_file=".gitignore", initial_content=".venv/\n")
     runtime.agents.start()
