@@ -38,8 +38,8 @@ from athena.research.prepare.source_verification import (
     BaselineSourceVerifier,
     build_default_source_verifier,
 )
-from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
 from athena.research.supervisor.events import redact, sanitize_terminal_text
+from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
 
 logger = logging.getLogger(__name__)
 
@@ -483,18 +483,25 @@ async def _reap_ideator(runtime: Any) -> None:
 async def _publish_terminal_research_error(
     runtime: Any, error: BaselineResearchError
 ) -> None:
+    diagnostics = _diagnostics(error)
+    openalex_warning = bool(diagnostics) and all(
+        diagnostic == "OpenAlex did not resolve the paper locator"
+        or diagnostic.startswith("OpenAlex lookup failed:")
+        for diagnostic in diagnostics
+    )
     summary = _bounded_diagnostic(error)
     diagnostics = tuple(
-        diagnostic for diagnostic in _diagnostics(error) if diagnostic != summary
+        diagnostic for diagnostic in diagnostics if diagnostic != summary
     )
-    text = f"PREPARE: baseline research failed [{_error_code(error)}]: {summary}"
+    label = "warning" if openalex_warning else "failed"
+    text = f"PREPARE: baseline research {label} [{_error_code(error)}]: {summary}"
     if diagnostics:
         text += "\nDiagnostics:\n" + "\n".join(
             f"- {diagnostic}" for diagnostic in diagnostics
         )
     await runtime.publish_output(
         source="supervisor",
-        channel="error",
+        channel="warning" if openalex_warning else "error",
         text=text,
     )
     error.published = True

@@ -454,6 +454,22 @@ async def test_terminal_research_diagnostics_are_distinct_bounded_and_redacted()
 
 
 @pytest.mark.asyncio
+async def test_openalex_unresolved_locator_is_published_as_warning() -> None:
+    runtime = FakeRuntime()
+
+    await baseline._publish_terminal_research_error(
+        runtime,
+        BaselineResearchError(
+            "selected candidate has no qualifying source",
+            ("OpenAlex did not resolve the paper locator",),
+        ),
+    )
+
+    assert runtime.outputs[-1]["channel"] == "warning"
+    assert "baseline research warning" in runtime.outputs[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_eda_unavailable_is_a_hard_failure(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     handoff = ScriptedHandoff(tmp_path, [])
