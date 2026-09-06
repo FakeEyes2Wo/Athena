@@ -18,6 +18,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [Evaluator 契约](evaluator_contract_ch.md) | current | 预测与标签必须按 id 对齐；一个"安静地成功"的失效 |
 | [可运行研究工作流](../README.md#运行) | current | `Athena-cli` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
+| [TESS 数据划分与评估口径](tess-workflow-and-evaluation.md) | current | PREPARE/SEARCH/FINAL 隔离、训练约束与指标定义 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
 | [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
 

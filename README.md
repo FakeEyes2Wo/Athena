@@ -109,6 +109,9 @@ SEARCH 结果、历史 Athena 结果和独立复现结果，并遵守 API 预算
 也不包含数据集或密钥。架构与开发说明见 [`docs/README.md`](docs/README.md)，许可证
 见 [`LICENSE`](LICENSE)，第三方依赖许可见 [`third_party_licenses.md`](third_party_licenses.md)。
 
+TESS 的 `train/search/final` 数据隔离、阈值选择和指标定义见
+[`docs/tess-workflow-and-evaluation.md`](docs/tess-workflow-and-evaluation.md)。
+
 ## 开发验证
 
 ```bash
