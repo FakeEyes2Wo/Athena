@@ -3,16 +3,16 @@
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, new_id
+from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
 
 _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
-PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
+PublishEvent = Callable[[str, str, dict | None], Awaitable[None]]
 SequenceSink = Callable[[int], None]
 
 _PREVIEW_BYTES = 512
@@ -30,12 +30,6 @@ _SECRET_PATTERNS = (
     ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
 )
-
-
-class _TextStore(Protocol):
-    async def put_text(self, text: str) -> ArtifactRef:
-        """Persist text and return its immutable artifact reference."""
-        ...
 
 
 class OutputEvent(BaseModel):
@@ -134,17 +128,16 @@ def truncate_middle(text: str, max_chars: int) -> str:
 class EventProjector:
     """Create safe runtime records while retaining full tool output as artifacts."""
 
-    def __init__(self, store: _TextStore) -> None:
+    __slots__ = ("_sequence", "_store")
+
+    def __init__(self, store: ArtifactStore) -> None:
         self._store = store
         self._sequence = 0
 
-    def _next_sequence(self) -> int:
-        self._sequence += 1
-        return self._sequence
-
     def next_sequence(self) -> int:
         """Allocate the next output sequence number."""
-        return self._next_sequence()
+        self._sequence += 1
+        return self._sequence
 
     def resume(self, sequence: int) -> None:
         """Resume the sequence counter past replayed history.
@@ -157,57 +150,30 @@ class EventProjector:
 
     def output(
         self,
-        *,
         source: Literal["supervisor", "agent", "tool"],
         channel: Literal["text", "stdout", "stderr", "error"],
         text: str,
-        plan: str | None = None,
-        tool: str | None = None,
-        artifact_ref: ArtifactRef | None = None,
-        truncated: bool = False,
-        message_id: str | None = None,
-        session_id: str | None = None,
-        scope: str | None = None,
-        scope_id: str | None = None,
+        **metadata: Any,
     ) -> OutputEvent:
         """Project one already classified display record.
 
         调用方传入 ``message_id`` 把同一条消息的多次投影绑在一起；不传则这条记录
         自成一条消息。
         """
+        metadata["message_id"] = metadata.get("message_id") or new_id("msg")
         return OutputEvent(
-            seq=self._next_sequence(),
-            message_id=message_id or new_id("msg"),
-            session_id=session_id,
-            scope=scope,
-            scope_id=scope_id,
+            seq=self.next_sequence(),
             source=source,
             channel=channel,
             text=redact(text),
-            plan=plan,
-            tool=tool,
-            artifact_ref=artifact_ref,
-            truncated=truncated,
+            **metadata,
         )
-
-    def text(
-        self,
-        text: str,
-        *,
-        source: Literal["supervisor", "agent"] = "agent",
-        plan: str | None = None,
-    ) -> OutputEvent:
-        """Project redacted supervisor or Agent text."""
-        return self.output(source=source, channel="text", text=text, plan=plan)
 
     async def tool_output(
         self,
-        *,
         stdout: str = "",
         stderr: str = "",
-        tool: str | None = None,
-        plan: str | None = None,
-        artifact_ref: ArtifactRef | None = None,
+        **metadata: Any,
     ) -> OutputEvent:
         """Project a stderr-first bounded preview and spill full redacted output."""
         safe_stderr = redact(sanitize_terminal_text(stderr))
@@ -220,36 +186,22 @@ class EventProjector:
             if truncated
             else full
         )
+        artifact_ref = metadata.get("artifact_ref")
         if truncated and artifact_ref is None:
             artifact_ref = await self._store.put_text(full)
         channel: Literal["stdout", "stderr"] = "stderr" if safe_stderr else "stdout"
-        return OutputEvent(
-            seq=self._next_sequence(),
+        metadata.update(
             message_id=new_id("msg"),
-            source="tool",
-            channel=channel,
-            text=preview,
-            plan=plan,
-            tool=tool,
             artifact_ref=artifact_ref,
             truncated=truncated,
         )
-
-
-async def forward_run_events(
-    agents: AgentRuntime,
-    run_id: str,
-    publish: PublishEvent,
-    after_sequence: int = 0,
-    on_sequence: SequenceSink | None = None,
-) -> None:
-    """Forward one Agent journal through its terminal event."""
-    async for event in agents.run_events(run_id, after_sequence=after_sequence):
-        await publish(event.kind, event.event_ref, event.data)
-        if on_sequence is not None:
-            on_sequence(event.sequence)
-        if event.kind in _TERMINAL_EVENT_KINDS:
-            return
+        return OutputEvent(
+            seq=self.next_sequence(),
+            source="tool",
+            channel=channel,
+            text=preview,
+            **metadata,
+        )
 
 
 async def wait_run_events(
@@ -262,9 +214,16 @@ async def wait_run_events(
     """Wait for an Agent run and optionally forward its journal."""
     if publish is None:
         return await agents.wait_run(run_id)
-    events = asyncio.create_task(
-        forward_run_events(agents, run_id, publish, after_sequence, on_sequence)
-    )
+
+    async def _forward() -> None:
+        async for event in agents.run_events(run_id, after_sequence=after_sequence):
+            await publish(event.kind, event.event_ref, event.data)
+            if on_sequence is not None:
+                on_sequence(event.sequence)
+            if event.kind in _TERMINAL_EVENT_KINDS:
+                return
+
+    events = asyncio.create_task(_forward())
     wait = asyncio.create_task(agents.wait_run(run_id))
     try:
         summary = await wait

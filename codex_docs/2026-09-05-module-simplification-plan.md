@@ -683,6 +683,14 @@ Replace the eleven-parameter Plan entry with `run_evaluator_plan(runtime, evalua
 
 Remove the private validator's unread store argument and its `AttributeError` escape for test runners without `run_dir`. The test runner now scores the same synthetic row-order and value-permutation probes as production instead of skipping them. `evaluator_plan.py` falls from 425 baseline lines to 335; its six top-level functions take at most five parameters. The unchanged focused baseline passed 116 tests and the final selection passed 114 after deleting exactly two unreachable tests. The complete research plus Supervisor-architecture selection passed 1,380 tests. Ruff, Black, production hard-rule checks, Python compilation, old-interface searches, and `git diff --check` passed. Closing this row advances reviewed coverage to 361/602. Whole-repository acceptance remains pending.
 
+## Supervisor event-contract review
+
+Read `supervisor/events.py` completely and trace its schemas, sanitizers, projector, sequence recovery, Agent journal forwarding, and wire consumers through runtime projection, PREPARE/EDA/Ideator/Plan turns, GUI transport/traces, TUI state/rendering, and direct event tests. Retain the flat `OutputEvent` and `StateEvent` fields because they are persisted and consumed as the external GUI/TUI protocol; nesting them to reduce attribute counts would only move complexity into every consumer. Retain redaction, terminal sanitization, middle truncation, sequence cursors, full-output artifacts, and optional event publication because each has live callers and behavior tests.
+
+Make the two-attribute `EventProjector` slotted, merge its private sequence forwarder into `next_sequence`, and delete the uncalled text wrapper. Replace the twelve-parameter output factory and six-parameter tool factory with three/two explicit inputs plus schema-validated metadata; Pydantic continues to reject unknown fields and partial scope metadata. Delete the one-method `_TextStore` Protocol in favor of the existing `ArtifactStore`, and correct `PublishEvent` to the async-only contract the implementation and architecture test already require. Inline the sole `forward_run_events` caller into `wait_run_events`; keep the latter's five inputs because restart cursors and sequence sinks are both active.
+
+`events.py` falls from 277 baseline lines to 236 and its top-level definitions from nine to seven. The unchanged focused baseline passed 89 tests; the final selection passed 90 with a new slots/unknown-metadata regression. The complete research, TUI, and gateway transport/handler selection passed 1,509 tests. Ruff, Black, production hard-rule checks, Python compilation, removed-symbol/signature inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 362/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1309,7 +1317,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/__init__.py` | 5 | Reviewed; remove unused Supervisor reexport and retain package marker |
 | `src/athena/research/supervisor/deps.py` | 111 | Reviewed; slot five focused groups and collapse validation policy to one mode |
 | `src/athena/research/supervisor/evaluator_plan.py` | 425 | Reviewed; runtime-owned five-argument Plan and one real property-probe path replace dependency/test compatibility plumbing |
-| `src/athena/research/supervisor/events.py` | 277 | Pending |
+| `src/athena/research/supervisor/events.py` | 277 | Reviewed; slot the two-field projector and collapse forwarding/factory compatibility layers while preserving flat wire schemas |
 | `src/athena/research/supervisor/experiment.py` | 555 | Pending |
 | `src/athena/research/supervisor/manifest.py` | 108 | Pending |
 | `src/athena/research/supervisor/phases.py` | 650 | Pending |

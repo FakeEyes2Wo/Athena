@@ -140,6 +140,15 @@ def test_output_sequence_is_process_local_and_monotonic(tmp_path) -> None:
     assert (first.session_id, first.scope, first.scope_id) == (None, None, None)
 
 
+def test_projector_is_slotted_and_rejects_unknown_metadata(tmp_path) -> None:
+    projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
+
+    with pytest.raises(AttributeError):
+        projector.extra = True
+    with pytest.raises(ValidationError):
+        projector.output("agent", "text", "safe", unknown=True)
+
+
 def test_output_scope_metadata_is_atomic_and_redacted(tmp_path) -> None:
     projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
     event = projector.output(
