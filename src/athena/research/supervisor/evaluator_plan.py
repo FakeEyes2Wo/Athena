@@ -141,6 +141,32 @@ def _evaluator_readme(root: Path, *, entrypoint: str, prediction_format: str) ->
     )
 
 
+def _reject_bundled_predictions(evaluator_root: Path, prediction_file: str) -> None:
+    """Refuse a bundle that ships its own copy of the scored artifact.
+
+    The platform writes ``predictions/<prediction_file>`` before every scoring
+    run. A same-named file left beside the metric code shadows it for any script
+    that reads the bare name, and then every score is that stale file's score.
+    On 2026-09-06 the sensitivity probe answered "permuting values did not
+    change the score" for eight consecutive turns while the evaluator kept
+    scoring the sample predictions its own agent had written; the run spent its
+    whole evaluator budget and PREPARE failed.
+    """
+    stray = sorted(
+        path.name
+        for path in evaluator_root.glob("*.csv")
+        if path.name == prediction_file or path.name.startswith("predictions__")
+    )
+    if stray:
+        raise ValueError(
+            "the evaluator bundle must not contain a prediction file: "
+            + ", ".join(stray)
+            + f". The platform writes predictions/{prediction_file} before each "
+            "scoring run, and a copy beside the metric code shadows it. Delete "
+            f"these files and read predictions/{prediction_file}."
+        )
+
+
 async def _validate_frozen_evaluator(
     *,
     root: Path,
@@ -211,6 +237,7 @@ async def _validate_frozen_evaluator(
         )
 
     prediction_file = spec.prediction_file if spec is not None else "predictions.csv"
+    _reject_bundled_predictions(evaluator_root, prediction_file)
 
     async def score(predictions_csv: str) -> float:
         """Run the frozen evaluator against one synthetic prediction CSV."""
@@ -232,7 +259,14 @@ async def _validate_frozen_evaluator(
         probability_columns=spec.probability_columns if spec is not None else (),
     )
     if not outcome.get("ok"):
-        raise ValueError(outcome.get("reason", "evaluator property tests failed"))
+        # Name the file the probe wrote: a script that reads some other path
+        # sees a constant score, and the bare property name reads as a metric
+        # problem rather than a path problem.
+        raise ValueError(
+            f"{outcome.get('reason', 'evaluator property tests failed')}. The "
+            f"platform wrote predictions/{prediction_file} before running "
+            f"{entrypoint}; score exactly that file."
+        )
 
 
 async def run_evaluator_plan(
