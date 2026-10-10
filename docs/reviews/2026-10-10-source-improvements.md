@@ -35,6 +35,7 @@ Codex 对照另见[差异台账](codex-app-server-comparison.md)。
 2026-10-11 从实际提交创建隔离 worktree：原提交 **335 passed、27 subtests passed**；
 仅应用审阅修正后的相同选择集 **339 passed、27 subtests passed**，覆盖快照竞争、
 marker 写入失败、部分写入及 flush 错误恢复。没有混入既有未提交研究流程改动。
+具体审阅发现、提交和推送证据见[提交后审阅报告](../codex_docs/2026-10-11-source-repair-review-completion.md)。
 
 ## 范围和证据等级
 

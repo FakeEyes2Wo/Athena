@@ -1,7 +1,10 @@
 ﻿# Current Athena Work
 
-Active commit, review and push:
-- `docs/codex_docs/2026-10-11-source-repair-review-plan.md`
+Completed source commit, independent review and push:
+- `docs/codex_docs/2026-10-11-source-repair-review-completion.md`
+
+Source commits e3bf0969 and 13e76ba2 are pushed to origin/main. Post-review
+fork/checkpoint regressions passed in isolation: 339 tests and 27 subtests.
 
 Completed minimal source-review repairs:
 - `docs/codex_docs/2026-10-10-source-review-repair-completion.md`
@@ -56,6 +59,7 @@ Active error-ledger repair work:
 - `docs/codex_docs/2026-09-06-error-ledger-repair-plan.md`
 
 Most recent completed work:
+- `docs/codex_docs/2026-10-11-source-repair-review-completion.md`
 - `docs/codex_docs/2026-09-06-local-authority-completion.md`
 - `docs/codex_docs/2026-09-05-experiment-documents-simplification-completion-report.md`
 - `docs/codex_docs/2026-09-04-experiment-document-projection-completion-report.md`

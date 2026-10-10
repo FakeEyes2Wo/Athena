@@ -38,7 +38,8 @@ pending 请求或 RuntimeEvents 快照顺序。另一方面 RuntimeThreadManager
 
 上游仍固定 `806d9732c974bc8a51b8317c1bd8985544fe627c`，本轮没有宣称新的上游版本。
 Athena 初轮补丁已提交为 `e3bf0969`；初轮证据见[修复报告](../codex_docs/2026-10-10-source-review-repair-completion.md)。
-2026-10-11 的复审补充见 C09 与末尾核对记录。
+2026-10-11 的复审补充见 C09、末尾核对记录和
+[提交后审阅报告](../codex_docs/2026-10-11-source-repair-review-completion.md)。
 
 | 差异 | 当前处置 |
 |---|---|
