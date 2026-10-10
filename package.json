@@ -7,10 +7,8 @@
     "dev": "npm --prefix athena-gui run dev",
     "build": "node scripts/build.cjs --backend python",
     "build:python": "node scripts/build.cjs --backend python",
-    "build:ts": "node scripts/build.cjs --backend ts",
     "release": "node scripts/build.cjs --package --backend python",
     "release:python": "node scripts/build.cjs --package --backend python",
-    "release:ts": "node scripts/build.cjs --package --backend ts",
     "test": "npm --prefix athena-gui run test",
     "tauri": "npm --prefix athena-gui run tauri"
   }

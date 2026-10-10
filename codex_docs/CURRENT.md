@@ -1,5 +1,14 @@
 ﻿# Current Athena Work
 
+Completed repository organization and user-requested directory removal:
+- `docs/codex_docs/2026-10-10-repository-organization-completion.md`
+- `docs/repository-layout.md`
+- `docs/reviews/2026-10-10-redundant-mechanisms.md`
+
+The standalone `athena_ts/` tree has been removed at the user's request. Its
+entries in older review plans are historical; do not recreate it to finish them.
+Local reproduction materials now live under ignored `submission/reproduction/`.
+
 Completed gateway restart repair:
 - `docs/codex_docs/2026-09-06-gateway-restart-completion.md`
 

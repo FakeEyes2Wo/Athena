@@ -7,6 +7,9 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 
 ## 首读
 
+- [项目目录导航](repository-layout.md)：源码、测试、工具和历史材料的位置。
+- [冗余机制阅读记录](reviews/2026-10-10-redundant-mechanisms.md)：本次 subagent 阅读发现及后续合并前的验证边界。
+
 | 文档 | 状态 | 用途 |
 |---|---|---|
 | [Supervisor 设计基线](supervisor_design.md) | current | 目标架构：研究流程、控制面、数据隔离与验收门（最终产品合同） |
@@ -23,6 +26,8 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 | [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
 
 ## 归档与专题
+
+- [历史设计与笔记](archive/README.md)：原根目录 `code_spec/`、`asd.md` 与 `draft.md` 的归档位置。
 
 - [`codex_docs/`](codex_docs/)：实现完成报告、验证记录和当前工作索引的归档副本。
 - [`diff_docs/`](diff_docs/)：机制差异与改进记录。

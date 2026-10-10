@@ -1,8 +1,12 @@
 # Athena GUI — 完整设计规格 (athena-gui)
 
+> 历史设计：2026-10-10 已移除独立 `athena_ts/` 后端，构建仅保留 Python。
+> 下文的双后端约定及旧路径保留为设计历史，不再是当前实现合同；
+> 当前目录和入口见[项目目录导航](repository-layout.md)。
+
 > 目标：完成 `athena-gui`（Vite + React + ReactFlow + Tauri 桌面壳 + Python 后端网关），
 > 使其具备研究树可视化、假设图可视化与图算法、运行设置、LLM 输入/输出轨迹回放、实验管理，
-> 并保留 Python / TypeScript 双后端接口。本文为唯一权威契约，前端、Rust 桥、Python 网关三方以本文为准对齐。
+> 原设计还计划保留 Python / TypeScript 双后端接口，此要求现已撤销。
 
 ---
 

@@ -19,8 +19,8 @@ const packaging = args.includes("--package");
 const skipFrontend = args.includes("--skip-frontend");
 const skipRust = args.includes("--skip-rust");
 
-if (backend !== "python" && backend !== "ts") {
-  console.error("用法: node scripts/build.cjs --backend <python|ts> [--package|--release] [--skip-frontend] [--skip-rust]");
+if (backend !== "python") {
+  console.error("用法: node scripts/build.cjs [--backend python] [--package|--release] [--skip-frontend] [--skip-rust]");
   process.exit(2);
 }
 
@@ -37,28 +37,22 @@ function run(step, command, cwd) {
 }
 
 if (packaging) {
-  console.log(`[release] 后端打包方式: ${backend === "python" ? "Python (PyInstaller)" : "TypeScript"}`);
+  console.log("[release] 后端打包方式: Python (PyInstaller)");
 
-  if (backend === "python") {
-    const python = path.join(
-      repoRoot,
-      ".venv",
-      process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
-    );
-    const outDir = path.join(repoRoot, "athena-gui", "src-tauri", "resources");
-    const workDir = path.join(repoRoot, "build", "pyinstaller");
-    fs.mkdirSync(outDir, { recursive: true });
-    run(
-      "Python 后端 · PyInstaller 打包",
-      `${python} -m PyInstaller --onefile --noconfirm --name gui_gateway --paths src --collect-all athena --collect-all gui_gateway --copy-metadata genai_prices --copy-metadata pydantic_ai_slim --copy-metadata pydantic_ai --copy-metadata logfire_api --copy-metadata logfire --copy-metadata qoder_agent_sdk --copy-metadata pydantic --copy-metadata openai --distpath "${outDir}" --workpath "${workDir}" --specpath "${workDir}" scripts/gui_gateway_entry.py`,
-      repoRoot,
-    );
-    fs.rmSync(path.join(repoRoot, "build"), { recursive: true, force: true });
-  } else {
-    const tsRoot = path.join(repoRoot, "athena_ts");
-    run("TypeScript 后端 · 安装依赖", "npm install", tsRoot);
-    run("TypeScript 后端 · 编译", "npm run build", tsRoot);
-  }
+  const python = path.join(
+    repoRoot,
+    ".venv",
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
+  );
+  const outDir = path.join(repoRoot, "athena-gui", "src-tauri", "resources");
+  const workDir = path.join(repoRoot, "build", "pyinstaller");
+  fs.mkdirSync(outDir, { recursive: true });
+  run(
+    "Python 后端 · PyInstaller 打包",
+    `${python} -m PyInstaller --onefile --noconfirm --name gui_gateway --paths src --collect-all athena --collect-all gui_gateway --copy-metadata genai_prices --copy-metadata pydantic_ai_slim --copy-metadata pydantic_ai --copy-metadata logfire_api --copy-metadata logfire --copy-metadata qoder_agent_sdk --copy-metadata pydantic --copy-metadata openai --distpath "${outDir}" --workpath "${workDir}" --specpath "${workDir}" scripts/gui_gateway_entry.py`,
+    repoRoot,
+  );
+  fs.rmSync(path.join(repoRoot, "build"), { recursive: true, force: true });
 
   run("Tauri · release 打包", "npm run tauri build", path.join(repoRoot, "athena-gui"));
   console.log("\n[release] 完成");
@@ -66,17 +60,11 @@ if (packaging) {
   process.exit(0);
 }
 
-console.log(`[build] 后端构建方式: ${backend === "python" ? "Python" : "TypeScript"}`);
+console.log("[build] 后端构建方式: Python");
 
 // 1. 后端
-if (backend === "python") {
-  run("Python 后端 · 安装依赖", "uv sync", repoRoot);
-  run("Python 后端 · 构建产物", "uv build", repoRoot);
-} else {
-  const tsRoot = path.join(repoRoot, "athena_ts");
-  run("TypeScript 后端 · 安装依赖", "npm install", tsRoot);
-  run("TypeScript 后端 · 编译", "npm run build", tsRoot);
-}
+run("Python 后端 · 安装依赖", "uv sync", repoRoot);
+run("Python 后端 · 构建产物", "uv build", repoRoot);
 
 // 2. 前端
 if (!skipFrontend) {

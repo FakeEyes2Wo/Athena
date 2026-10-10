@@ -1,5 +1,7 @@
 # Athena
 
+项目结构见[目录导航](docs/repository-layout.md)，历史设计和工作笔记见[归档索引](docs/archive/README.md)。
+
 Athena 是一个自动研究工作台：通过对话描述任务，让智能体分析数据、提出假设、
 运行实验并比较结果。推荐先用 Web GUI 体验，再查看研究树和实验报告。
 
@@ -104,9 +106,9 @@ SEARCH 上限不包含 PREPARE 的数据分析与基线工作，也不是 API �
 历史实验分数、数据划分和硬件环境不等于新 GUI 运行的结果。请在报告中区分当前运行的
 SEARCH 结果、历史 Athena 结果和独立复现结果，并遵守 API 预算与数据使用限制。
 
-可选的离线 TESS 推理/复现材料见
-[`reproduction/tess/README.md`](reproduction/tess/README.md)；它不是 GUI 主流程，
-也不包含数据集或密钥。架构与开发说明见 [`docs/README.md`](docs/README.md)，许可证
+离线 TESS 推理/复现材料已移至本地 `submission/reproduction/tess/`，
+整个 `submission/` 不纳入 Git；新克隆只包含主应用源码与文档。
+架构与开发说明见 [`docs/README.md`](docs/README.md)，许可证
 见 [`LICENSE`](LICENSE)，第三方依赖许可见 [`third_party_licenses.md`](third_party_licenses.md)。
 
 TESS 的 `train/search/final` 数据隔离、阈值选择和指标定义见

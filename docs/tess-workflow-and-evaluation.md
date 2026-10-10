@@ -59,4 +59,5 @@ SEARCH 和 FINAL 的主排名均按 Macro F1；其余指标用于诊断漏报、
 - GUI 工作流与工作区隔离：根目录 [README](../README.md)。
 - EDA 产物与 `EDA_HANDOFF.md`：[`athena-guide/12-eda-system.md`](athena-guide/12-eda-system.md)。
 - Evaluator 的 ID 对齐契约：[`evaluator_contract_ch.md`](evaluator_contract_ch.md)。
-- 离线 TESS 复现材料：[`../reproduction/tess/README.md`](../reproduction/tess/README.md)。
+- 离线 TESS 复现材料位于本地 `submission/reproduction/tess/README.md`（相对仓库根目录）；
+  `submission/` 已被 Git 忽略，不随克隆分发。

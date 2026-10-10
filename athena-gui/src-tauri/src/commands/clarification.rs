@@ -118,7 +118,7 @@ mod tests {
     use super::*;
 
     const HUMAN_REPLY_VALID: &str =
-        include_str!("../../../../test/fixtures/clarification/human_reply_valid.json");
+        include_str!("../../../../tests/fixtures/clarification/human_reply_valid.json");
 
     #[test]
     fn human_contract_fixtures_deserialize_all_valid_replies() {
