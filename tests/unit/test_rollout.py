@@ -14,6 +14,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from athena.memory.rollout import RolloutRecorder, resume_context_sync
+
 
 def _user(text: str) -> ModelRequest:
     return ModelRequest(parts=[UserPromptPart(content=text)])
@@ -30,6 +32,54 @@ def tmp_project():
 
 
 class TestRolloutRecorder:
+
+    @pytest.mark.parametrize("stage", ["write", "flush"])
+    async def test_recovers_line_boundary_after_io_error(self, tmp_project, stage):
+        rec = RolloutRecorder(tmp_project)
+        path = await rec.open("io-error")
+        rec.record(_user("before-error"))
+        raw = rec._fd
+
+        class FailedFile:
+            failed = False
+            recovered = False
+
+            def write(self, data):
+                """Inject a partial write and reject retries until storage recovers."""
+                if self.failed and not self.recovered:
+                    raise OSError("still full")
+                if stage == "write" and not self.failed:
+                    self.failed = True
+                    raw.write(data[:10])
+                    raw.flush()
+                    raise OSError("disk full")
+                return raw.write(data)
+
+            def flush(self):
+                """Inject a flush error after the complete line reaches storage."""
+                raw.flush()
+                if stage == "flush" and not self.failed:
+                    self.failed = True
+                    raise OSError("disk full")
+
+        faulty = FailedFile()
+        rec._fd = faulty
+        try:
+            with pytest.raises(OSError, match="disk full"):
+                rec.record_turn_boundary("missing-or-uncertain")
+            with pytest.raises(OSError, match="still full"):
+                rec.record(_user("must-not-be-written"))
+            faulty.recovered = True
+            rec.record(_user("after-error"))
+            rec.record_turn_boundary("recovered")
+        finally:
+            rec._fd = raw
+            await rec.close()
+        context = resume_context_sync(path, through_turn_id="recovered")
+        assert [item.parts[0].content for item in context.items] == [
+            "before-error",
+            "after-error",
+        ]
 
     async def test_open_creates_file_in_date_hierarchy(self, tmp_project):
         from athena.memory.rollout import RolloutRecorder

@@ -42,13 +42,14 @@ class RolloutRecorder:
         path: 当前文件路径（``open()`` 之前为 ``None``）。
     """
 
-    __slots__ = ("_base", "_path", "_fd", "_seq")
+    __slots__ = ("_base", "_path", "_fd", "_seq", "_write_failed")
 
     def __init__(self, project_root: Path) -> None:
         self._base = project_root / ".athena" / "sessions"
         self._path: Path | None = None
         self._fd = None
         self._seq = 0
+        self._write_failed = False
 
     @property
     def path(self) -> Path | None:
@@ -134,10 +135,20 @@ class RolloutRecorder:
 
     def _write_line(self, obj: object) -> None:
         assert self._fd is not None
-        self._fd.write(
-            json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
-        )
-        self._fd.flush()
+        if self._write_failed:
+            # A failed write may have left a partial JSON line; separate the next record.
+            self._fd.write("\n")
+            self._fd.flush()
+            self._write_failed = False
+        try:
+            self._fd.write(
+                json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+            self._fd.flush()
+        except OSError:
+            # Disk/write errors may leave a torn tail; do not join later JSON onto it.
+            self._write_failed = True
+            raise
         self._seq += 1
 
 

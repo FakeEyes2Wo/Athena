@@ -5,7 +5,14 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from athena.app_server.submissions import GetForkSnapshot, InterruptTurn, StartTurn
+from athena.app_server.submissions import (
+    GetForkSnapshot,
+    InterruptTurn,
+    StartTurn,
+    Submission,
+    RunnerSucceeded,
+    TurnRuntime,
+)
 from athena.app_server.thread_runtime import ThreadHandle, ThreadRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.runtime import BaseAgent, agent_runner
@@ -17,6 +24,36 @@ from ._support import BlockingRunner, eventually, immediate_runner
 
 
 class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fork_ref_and_memory_are_frozen_before_next_completion(self):
+        ctx = ContextManager()
+        ctx.append(ModelRequest(parts=[UserPromptPart(content="old-history")]))
+        runtime = ThreadRuntime(
+            "thread", "session", "ctx-old", immediate_runner, ctx=ctx
+        )
+        ctx.append(ModelRequest(parts=[UserPromptPart(content="new-history")]))
+        runner = asyncio.create_task(asyncio.sleep(0))
+        active = TurnRuntime("turn-new", "request", runner)
+        runtime.active_turn = active
+        runtime._turn_done[active.turn_id] = active.done
+        await runtime._execution_observer.turn_started(active.turn_id)
+        snapshot = Submission("fork", GetForkSnapshot(include_memory=True))
+        runtime._merged._merged.put_nowait(snapshot)
+        runtime._merged._merged.put_nowait(
+            RunnerSucceeded("turn-new", "result", "ctx-new")
+        )
+        await runtime.start()
+        try:
+            context_ref, history = await asyncio.wait_for(snapshot.reply, 1)
+            await asyncio.wait_for(active.done, 1)
+            self.assertEqual(runtime.context_ref, "ctx-new")
+            self.assertEqual(context_ref, "ctx-old")
+            self.assertEqual(
+                [part.content for msg in history for part in msg.parts], ["old-history"]
+            )
+        finally:
+            await runner
+            await runtime.force_close()
+
     async def test_agent_runner_uses_runtime_memory_after_compaction(self) -> None:
         class MemoryAgent(BaseAgent):
             name = "memory"

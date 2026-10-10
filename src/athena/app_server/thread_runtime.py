@@ -282,15 +282,24 @@ class ThreadRuntime:
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
                 return
+            # Message recording finished; this marker only indexes historical forks.
+            record_boundary = getattr(self._rollout, "record_turn_boundary", None)
+            if callable(record_boundary):
+                try:
+                    record_boundary(turn_id)
+                except OSError:
+                    # Marker I/O failed after runner success; keep the result usable.
+                    logger.warning(
+                        "could not persist historical fork boundary for turn %s",
+                        turn_id,
+                        exc_info=True,
+                    )
             self.journal.append(self._make_lifecycle_event(turn_id, "turn_completed"))
             self.context_ref = next_context_ref
             self._completed_contexts[turn_id] = next_context_ref
             self._completed_results[turn_id] = result_ref
             memory = self._ctx.items if self._ctx is not None else []
             self._latest_completed_memory = memory
-            record_boundary = getattr(self._rollout, "record_turn_boundary", None)
-            if callable(record_boundary):
-                record_boundary(turn_id)
             self.last_terminal_kind = "turn_completed"
             self._turn_done[turn_id].set_result(
                 TurnTerminalState(
@@ -448,16 +457,23 @@ class ThreadRuntime:
         if not msg.reply.done():
             msg.reply.set_result(None)
 
-    async def _handle_fork_snapshot(self, msg: Submission, after: str | None) -> None:
+    async def _handle_fork_snapshot(self, msg: Submission) -> None:
         """返回指定 Turn 的上下文快照；after 不存在时回复错误。"""
+        assert isinstance(msg.op, GetForkSnapshot)
+        after = msg.op.after_turn_id
         try:
             ctx = self.completed_snapshot(after)
-        except KeyError as e:
+            # Freeze both parts in this submission, before another turn can commit.
+            snapshot = (
+                (ctx, self.memory_snapshot(after)) if msg.op.include_memory else ctx
+            )
+        except (KeyError, OSError) as e:
+            # The completed turn or its history is absent/unreadable; fail this request.
             if not msg.reply.done():
                 msg.reply.set_exception(e)
             return
         if not msg.reply.done():
-            msg.reply.set_result(ctx)
+            msg.reply.set_result(snapshot)
 
     async def _handle_shutdown(self, msg: Submission, reason: str) -> None:
         """中断活跃 Turn 并取消其 runner，随后回复完成。"""
@@ -542,8 +558,8 @@ async def submission_loop(runtime: ThreadRuntime) -> None:
                 case Submission(op=InterruptTurn(turn_id=tid, reason=reason)):
                     await runtime._handle_interrupt(msg, tid, reason)
 
-                case Submission(op=GetForkSnapshot(after_turn_id=after)):
-                    await runtime._handle_fork_snapshot(msg, after)
+                case Submission(op=GetForkSnapshot()):
+                    await runtime._handle_fork_snapshot(msg)
 
                 case Submission(op=ShutdownThread(reason=reason)):
                     await runtime._handle_shutdown(msg, reason)

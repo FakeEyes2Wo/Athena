@@ -234,6 +234,11 @@ dispatcher 负责接收，worker 负责执行。duplicate request id 检查在 w
 - 提供 `start`、`submit`、`fork`、`interrupt`、`wait_turn`、`events`、`get`、`delete`、`aclose`；
 - 校验 id 与 rollout 安全路径。
 
+`fork` 在同一次 submission 中取得上下文引用和已完成历史，子线程使用独立 rollout 文件。
+指定 `after_turn_id` 时必须能恢复对应的完成边界；缺少历史 marker 时明确报错。
+完成 marker 是辅助索引：它写入失败会记录警告，但不会将已经执行成功且消息记录完成的
+Turn 改成失败或让 `wait_turn` 悬挂。默认 fork 仍可使用最新完成的内存快照。
+
 依据：`src/athena/app_server/thread_manager.py:21-288`。
 
 ### 2.7.2 ThreadRuntime

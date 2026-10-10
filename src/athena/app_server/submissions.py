@@ -31,6 +31,7 @@ class GetForkSnapshot:
     """获取指定 Turn 的 fork 快照上下文。"""
 
     after_turn_id: str | None = None
+    include_memory: bool = False
 
 
 @dataclass(slots=True)

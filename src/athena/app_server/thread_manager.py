@@ -178,11 +178,10 @@ class RuntimeThreadManager:
             parent = self._handles.get(thread_id)
             if parent is None:
                 raise KeyError(f"unknown thread: {thread_id}")
-            context_ref = await parent.submit(
-                GetForkSnapshot(after_turn_id=after_turn_id)
+            context_ref, history = await parent.submit(
+                GetForkSnapshot(after_turn_id=after_turn_id, include_memory=True)
             )
             session_id = parent._runtime.session_id
-            history = parent._runtime.memory_snapshot(after_turn_id)
             child_id = str(uuid4())
             child_runtime = self._make_runtime(
                 child_id,

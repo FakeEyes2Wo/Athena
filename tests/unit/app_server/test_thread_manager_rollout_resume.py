@@ -6,7 +6,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from athena.app_server.thread_manager import RuntimeThreadManager
 from athena.memory.context_manager import ContextManager
-from athena.memory.rollout import resume_context_sync
+from athena.memory.rollout import RolloutRecorder, resume_context_sync
 
 from ._support import eventually
 
@@ -150,5 +150,58 @@ async def test_in_memory_fork_preserves_latest_but_rejects_unavailable_old_histo
         assert any("latest-prompt" in item for item in runner.captured[2])
         with pytest.raises(KeyError, match="rollout boundary"):
             await manager.fork(parent.thread_id, after_turn_id=first.turn_id)
+    finally:
+        await manager.aclose("done")
+
+
+async def test_turn_boundary_write_failure_preserves_success_and_rejects_missing_fork(
+    tmp_path, monkeypatch, caplog
+):
+    manager = RuntimeThreadManager(
+        _TurnHistoryRunner(), ctx=ContextManager(), rollout_dir=tmp_path / "sessions"
+    )
+    parent = await manager.start("agent", "ctx0")
+    handle = await manager.get(parent.thread_id)
+
+    def fail_boundary(self, turn_id):
+        raise OSError("disk full")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(RolloutRecorder, "record_turn_boundary", fail_boundary)
+            turn = await manager.submit(parent.thread_id, "first-prompt")
+            result = await asyncio.wait_for(
+                manager.wait_turn(parent.thread_id, turn.turn_id), 1
+            )
+        assert result == handle.context_ref == f"ctx:{turn.turn_id}"
+        assert handle.state == "idle"
+        assert not handle._runtime.loop_task.done()
+        assert "could not persist historical fork boundary" in caplog.text
+        with pytest.raises(KeyError, match="no completed rollout boundary"):
+            await asyncio.wait_for(
+                manager.fork(parent.thread_id, after_turn_id=turn.turn_id), 1
+            )
+        latest = await manager.fork(parent.thread_id)
+        latest_handle = await manager.get(latest.thread_id)
+        assert latest.context_ref == result
+        assert "first-prompt" in repr(latest_handle._runtime.memory_snapshot(None))
+
+        # A later successful checkpoint must include the earlier successful messages.
+        second = await manager.submit(parent.thread_id, "second-prompt")
+        await asyncio.wait_for(manager.wait_turn(parent.thread_id, second.turn_id), 1)
+        child = await manager.fork(parent.thread_id, after_turn_id=second.turn_id)
+        child_handle = await manager.get(child.thread_id)
+        assert child.context_ref == f"ctx:{second.turn_id}"
+        assert [
+            part.content
+            for msg in child_handle._runtime.memory_snapshot(None)
+            for part in msg.parts
+        ] == ["first-prompt", "second-prompt"]
+        assert [
+            part.content
+            for msg in resume_context_sync(handle._runtime._rollout.path).items
+            for part in msg.parts
+        ] == ["first-prompt", "second-prompt"]
+        assert not handle._runtime.loop_task.done()
     finally:
         await manager.aclose("done")

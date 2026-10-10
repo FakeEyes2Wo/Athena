@@ -1,6 +1,6 @@
 # Athena 与 Codex app-server 设计差异台账
 
-状态：持续维护入口；2026-10-10 已实施一轮最小修复，当前状态见下表。
+状态：持续维护入口；2026-10-10 实施最小修复，2026-10-11 完成提交后复审修正，当前状态见下表。
 
 Athena 借鉴了 Codex 的 Thread/Turn、双向请求和事件流组织方式，但当前实现不是
 Codex app-server 的直接协议兼容层。最值得对齐的是资源所有权、取消、断连清理、
@@ -9,6 +9,7 @@ Codex app-server 的直接协议兼容层。最值得对齐的是资源所有权
 ## 对照基线
 
 - Athena：`8fcc801e` 加本地未提交源码改动，具体范围见[源码清单](2026-10-10-source-improvements.md)。
+- Athena 提交后复审：`e3bf0969` 及 2026-10-11 的 fork/rollout 修正；没有更新上游快照。
 - 上游：OpenAI `openai/codex` 公共仓库 main 在本次查询时的
   [提交 806d9732c974bc8a51b8317c1bd8985544fe627c](https://github.com/openai/codex/commit/806d9732c974bc8a51b8317c1bd8985544fe627c)，
   committer 时间 `2026-10-10T08:51:21Z`，标题 `Report exec runtime resets before accepting further requests (#52825)`。
@@ -36,13 +37,14 @@ pending 请求或 RuntimeEvents 快照顺序。另一方面 RuntimeThreadManager
 ### 本轮实施状态（优先于下方初次对照快照）
 
 上游仍固定 `806d9732c974bc8a51b8317c1bd8985544fe627c`，本轮没有宣称新的上游版本。
-Athena 变化为工作区补丁；详见[修复报告](../codex_docs/2026-10-10-source-review-repair-completion.md)。
+Athena 初轮补丁已提交为 `e3bf0969`；初轮证据见[修复报告](../codex_docs/2026-10-10-source-review-repair-completion.md)。
+2026-10-11 的复审补充见 C09 与末尾核对记录。
 
 | 差异 | 当前处置 |
 |---|---|
 | C03 | 待执行队列已设上限（默认 max_inflight，可用 max_pending 调整），满队列返回自有 OVERLOADED；审批控制回复在执行饱和时仍可完成。仍保留 Athena 错误码。 |
 | C04/C05/C06 | 已验证取消 getter/发送阶段 pending 清理、transport EOF 及时失败请求；服务端调用统一 finally 清理，关闭时失败 pending，包括阻塞发送场景。满响应队列不再让 shutdown 卡住。 |
-| C08/C09 | 已验证重复线程 ID 拒绝与取消启动清理、独立 fork 文件和指定历史边界；无历史 marker 的旧 rollout 不支持精确历史恢复，无持久化的较早历史明确拒绝。 |
+| C08/C09 | 已验证重复线程 ID 拒绝与取消启动清理、独立 fork 文件和指定历史边界。2026-10-11 补充：引用与历史原子取快照；辅助 marker I/O 失败保留真实成功结果并记录警告，缺 marker 的指定历史 fork 拒绝，默认 fork 仍取最新完成内存。部分日志写入后先隔行再追加。无历史 marker 的旧 rollout 不支持精确历史恢复，无持久化的较早历史明确拒绝。 |
 | C11 | 已删除占位 ThreadEventHandlerRegistry 和未消费注入；真实订阅/多路投递保留。 |
 | C10 | 生命周期边界得到加强，但没有整体复制上游 TurnAdmission/连接架构；全生命周期审计仍开放。 |
 | C13 | 已修复快照顺序和发布取消（含任意 awaitable）；研究投影保留。慢订阅者隔离/关闭回调 drain 仍开放。 |
@@ -107,6 +109,7 @@ Athena 变化为工作区补丁；详见[修复报告](../codex_docs/2026-10-10-
 |---|---|---|
 | 2026-10-10 | `806d9732c974bc8a51b8317c1bd8985544fe627c` | 首次固定公共源码基线，建立 C01–C14；Athena 相关回归 171 passed、25 subtests passed；边界反例见源码清单；尚无跨项目互操作验证 |
 | 2026-10-10 修复轮 | 同上 | C03–C06、C08/C09、C11 的具体缺口修复并验证，C10/C13 部分改善；最终 Python 核心回归 262 passed、24 subtests passed；GUI/Rust 证据见报告，仍无跨项目互操作验收 |
+| 2026-10-11 提交后复审 | 同上，未重新查询上游 | C09 追加快照一致性、checkpoint I/O 结算及损坏尾行恢复回归；隔离的原提交 335 passed、27 subtests passed，修正后 339 passed、27 subtests passed；这些是 Athena 的本地行为验证，不是上游实现或协议互通证明 |
 
 下一轮重点：慢事件消费者 C07/C13、历史保留与恢复 C12/C14，及有需求时再确定
 协议兼容 C01/C02 的目标；已经修复的边界继续保留回归，不重复当作开放缺陷。

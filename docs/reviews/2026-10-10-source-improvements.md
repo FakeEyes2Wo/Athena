@@ -1,6 +1,7 @@
 # 源码改进与冗余清单
 
 核对日期：2026-10-10。Athena 基线为 `8fcc801e` 加本地未提交源码改动。
+提交后复审：2026-10-11，审阅 `e3bf0969` 并补充下述修正；上游对照基线不变。
 状态：包含初次审查记录和本轮最小补丁结果；**以下修复状态表为当前状态**。
 后面的原始清单保留触发条件和审查证据，不代表缺陷仍全部存在。
 Codex 对照另见[差异台账](codex-app-server-comparison.md)。
@@ -21,7 +22,7 @@ Codex 对照另见[差异台账](codex-app-server-comparison.md)。
 | R06/R07 | 已修复并覆盖：拒绝非 2xx、无 DONE 的截断流和无效 SSE；完整行到达后解码 UTF-8，等待 header/chunk 可取消。独立 Rust agent 15 项通过（新增 5 项本地 HTTP 测试）。取消沿用 Provider Error 契约。 |
 | R08/R11 | 已修复：取消事件等待会 join getter 并保留已取出消息；请求发送和响应等待共同受 finally 清理 pending。timeout 仍为既有发送/响应各阶段预算，不宣称总 deadline。 |
 | R09 | 已修复：锁内启动并登记，重复 ID 在创建前拒绝，启动取消/失败清理未登记 runtime；重复、关闭竞争及取消回归通过。 |
-| R10 | 已修复父子同文件：独立 child rollout key，按 completed-turn marker 恢复指定历史。无持久化时支持最新完成的内存快照，较早历史明确报错；旧 rollout 没有 marker 时不能假装支持精确历史截点。父子分支隔离测试通过。 |
+| R10 | 已修复父子同文件：独立 child rollout key，按 completed-turn marker 恢复指定历史。2026-10-11 复审补充：引用和历史在同一次 submission 中取快照，避免并发完成造成错配；辅助 marker 写入失败会记录警告并保留实际成功结果，缺 marker 的指定历史 fork 明确报错，默认内存快照仍可用。日志 I/O 失败后的追加先补换行，防止与半行粘连。无持久化时仅支持最新完成的内存快照；没有 marker 时不伪造历史截点。 |
 | R12/R13 | 已修复：关闭与队列操作同步线性化，唤醒所有等待方并拒绝新写；server 待执行队列有界，满时 OVERLOADED，控制回复仍可达。满响应队列时关闭错误回包不阻塞，shutdown 最终关闭 transport。 |
 | R14 | **保留候选**：未直接截断 Journal/完成索引，避免破坏重放和 fork；需要保留窗口、游标过期响应和长时内存证据。 |
 | D01/D02 | 已精简：删除两层纯转发 `_register`；公共 source_payload 统一 tar 判断与大小常量，保留两端错误映射。相关 73 项测试通过；一份旧测试桩移除了 PlanDecision 已不接受的 suggestions 字段。 |
@@ -30,6 +31,10 @@ Codex 对照另见[差异台账](codex-app-server-comparison.md)。
 
 最终 Python 核心选择集：262 passed、24 subtests passed；另一个未再修改的解析/注册选择集
 73 项通过。此前联合运行结果为 335 passed、27 subtests passed。不是全仓测试或真实模型端到端验收。
+
+2026-10-11 从实际提交创建隔离 worktree：原提交 **335 passed、27 subtests passed**；
+仅应用审阅修正后的相同选择集 **339 passed、27 subtests passed**，覆盖快照竞争、
+marker 写入失败、部分写入及 flush 错误恢复。没有混入既有未提交研究流程改动。
 
 ## 范围和证据等级
 
