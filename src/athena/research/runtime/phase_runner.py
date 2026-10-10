@@ -13,11 +13,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-logger = logging.getLogger(__name__)
-
 from athena.agents.ideator_agent import HandoffResult
 from athena.agents.task_agents import register_validate_agent
 from athena.core.agent.chat import single_turn_chat
+from athena.core.agent.types import RunStatus
 from athena.execution.runtime import ExecutionContext
 from athena.research.clarification.context import confirmed_task_context_block
 from athena.research.contracts import ValidationResult
@@ -44,6 +43,8 @@ from athena.research.supervisor.validation_contracts import (
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+logger = logging.getLogger(__name__)
 
 
 def _predict_features_path(
@@ -179,9 +180,14 @@ class PhaseRunner:
                 run_id,
                 partial(rt.events.project_agent_event, agent_id),
             )
+            if (
+                getattr(summary.status, "value", summary.status)
+                != RunStatus.COMPLETED.value
+            ):
+                raise RuntimeError(summary.error or f"{agent_id} handoff agent failed")
             result = await load_agent_result(summary, rt.store, HandoffResult)
             path = workspace / output_file
-            # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
+            # Completed runs may hand off a file without a structured response.
             if result is None:
                 if path.is_file():
                     return path.read_text(encoding="utf-8")

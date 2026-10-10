@@ -5,9 +5,10 @@
 
 import asyncio
 import logging
+from collections import deque
 from typing import Self
 
-from athena.app_server.exceptions import ClosedError, OverloadedError, RpcException
+from athena.app_server.exceptions import ClosedError, RpcException
 from athena.app_server.protocol import (
     ErrorCode,
     Method,
@@ -55,6 +56,7 @@ class ClientWorker:
         self._pending: dict[int, asyncio.Future[ResponseEnvelope]] = {}
         self._control_buf: asyncio.Queue[ServerRequest] = asyncio.Queue(16)
         self._event_buf: asyncio.Queue[EventNotification] = asyncio.Queue(256)
+        self._ready_events: deque[ServerEvent] = deque()
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -88,10 +90,10 @@ class ClientWorker:
 
     def fail_all_pending(self, error: RpcError) -> None:
         """将所有未完成的请求以错误回复完成并清空。"""
-        for fut in self._pending.values():
+        for request_id, fut in self._pending.items():
             if not fut.done():
                 fut.set_result(
-                    ResponseEnvelope(request_id=-1, result=None, error=error)
+                    ResponseEnvelope(request_id=request_id, result=None, error=error)
                 )
         self._pending.clear()
 
@@ -100,6 +102,11 @@ class ClientWorker:
             while True:
                 msg = await self._transport.recv_response_or_control()
                 if msg is None:
+                    self.fail_all_pending(
+                        RpcError(
+                            code=ErrorCode.CLOSED.value, message="transport closed"
+                        )
+                    )
                     await self._event_buf.put(None)
                     return  # type: ignore[arg-type]
                 if isinstance(msg, ResponseEnvelope):
@@ -130,51 +137,45 @@ class ClientWorker:
             tg.create_task(_read_events())
 
     async def next_event(self, timeout: float | None = None) -> ServerEvent | None:
-        """返回下一条 control 或 event 消息，超时返回 None。"""
+        """Return the next control or event message, or None on timeout."""
+        if self._ready_events:
+            return self._ready_events.popleft()
         try:
             return self._control_buf.get_nowait()
         except asyncio.QueueEmpty:
-            # 控制通道已空 → 回退到异步等待，同时监听 control 和 event
+            # No control message is buffered; wait on both inbound lanes.
             pass
-        # 同时等待 control 和 event — 审批等控制消息到达时立即返回
-        ctrl_task = asyncio.ensure_future(self._control_buf.get())
-        evt_task = asyncio.ensure_future(self._event_buf.get())
+
+        ctrl_task = asyncio.create_task(self._control_buf.get())
+        evt_task = asyncio.create_task(self._event_buf.get())
         tasks = [ctrl_task, evt_task]
         try:
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
             )
-        except asyncio.TimeoutError:
-            # 等待超时 → 取消所有挂起任务，返回 None
-            for t in tasks:
-                t.cancel()
+            for task in pending:
+                task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Caller cancellation while waiting; join getters and preserve raced items.
+            for task in tasks:
+                task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            self._stash_getter_results(results)
+            raise
+        got_items = self._stash_getter_results(results)
+        if not done:
             return None
-        for t in pending:
-            t.cancel()
-        # 取第一条，其余放回 — 防止同时到达时丢失
-        result = None
-        for t in done:
-            r = t.result()
-            if result is None:
-                result = r
-            else:
-                self._put_back(r)
-        return result
+        return self._ready_events.popleft() if got_items else None
 
-    def _put_back(self, item: ServerEvent) -> None:
-        """将未消费的事件放回对应队列。"""
-        if isinstance(item, ServerRequest):
-            try:
-                self._control_buf.put_nowait(item)
-            except asyncio.QueueFull:
-                # 缓冲区满 → 静默丢弃（回退项不是关键消息）
-                pass
-        elif isinstance(item, EventNotification):
-            try:
-                self._event_buf.put_nowait(item)
-            except asyncio.QueueFull:
-                # 缓冲区满 → 静默丢弃（回退项不是关键消息）
-                pass
+    def _stash_getter_results(self, results: list[object]) -> bool:
+        items = [
+            result
+            for result in results
+            if result is not None and not isinstance(result, BaseException)
+        ]
+        self._ready_events.extend(items)  # type: ignore[arg-type]
+        return bool(items)
 
 
 class AthenaClient:
@@ -344,27 +345,19 @@ class AthenaClient:
     ) -> dict:
         if self._closing:
             raise ClosedError("client is closing")
-        fut: asyncio.Future[ResponseEnvelope] = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[ResponseEnvelope] = (
+            asyncio.get_running_loop().create_future()
+        )
         self._worker.register_pending(request_id, fut)
         try:
             await self._transport.send_request(
                 RequestEnvelope(request_id=request_id, method=method, params=params),
                 timeout=timeout,
             )
-        except OverloadedError:
-            # transport 过载拒绝发送 → 注销 pending 后原样传播
-            self._worker.unregister_pending(request_id)
-            raise
-        try:
             response = await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
-            # RPC 响应等待超时 → 清理注册后传播超时
+        finally:
+            # Covers send failures, timeout, response, and cancellation uniformly.
             self._worker.unregister_pending(request_id)
-            raise
-        except asyncio.CancelledError:
-            # RPC 请求被取消 → 清理注册后传播取消
-            self._worker.unregister_pending(request_id)
-            raise
         result: dict = {"result": None}
         if response.result is not None:
             result["result"] = response.result
@@ -392,6 +385,7 @@ if __name__ == "__main__":
         )
 
     async def main():
+        """Run the local AppServer client demonstration."""
         print("=== Athena Client Demo ===\n")
 
         # 1. 创建 ThreadManager + AppServer（内部完成 initialize 握手）

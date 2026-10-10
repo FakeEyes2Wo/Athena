@@ -1,9 +1,11 @@
 ﻿import asyncio
 import unittest
+from unittest.mock import patch
 
 import pytest
 
 from athena.app_server.client import AthenaClient, ClientWorker, Sequencer
+from athena.app_server.exceptions import RpcException
 from athena.app_server.protocol import (
     ErrorCode,
     EventNotification,
@@ -76,6 +78,21 @@ class ClientWorkerTests(unittest.IsolatedAsyncioTestCase):
         await self.transport.send_event(event)
         self.assertIs(await self.worker.next_event(timeout=0.1), event)
 
+    async def test_cancel_after_getter_dequeues_preserves_message(self) -> None:
+        event = notification()
+        await self.transport.send_event(event)
+        original_wait = asyncio.wait
+
+        async def wait_then_cancel(awaitables, **kwargs):
+            result = await original_wait(awaitables, **kwargs)
+            asyncio.current_task().cancel()
+            return result
+
+        with patch("asyncio.wait", side_effect=wait_then_cancel):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.worker.next_event(timeout=0.1)
+        self.assertIs(await self.worker.next_event(timeout=0.1), event)
+
     async def test_ready_control_is_delivered_before_ready_event(self) -> None:
         await self.transport.send_event(notification())
         await self.transport.send_server_request(reverse_request(1))
@@ -99,13 +116,13 @@ class ClientWorkerTests(unittest.IsolatedAsyncioTestCase):
         for request_id in (7, 8):
             future = asyncio.get_running_loop().create_future()
             self.worker.register_pending(request_id, future)
-            futures.append(future)
+            futures.append((request_id, future))
         self.worker.fail_all_pending(
             RpcError(code=ErrorCode.CLOSED.value, message="client closed")
         )
-        for future in futures:
+        for request_id, future in futures:
             response = future.result()
-            self.assertEqual(response.request_id, -1)
+            self.assertEqual(response.request_id, request_id)
             self.assertEqual(response.error.code, ErrorCode.CLOSED.value)
         self.assertEqual(self.worker._pending, {})
 
@@ -129,6 +146,31 @@ class AthenaClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_timeout_unregisters_pending_future(self) -> None:
         with self.assertRaises(asyncio.TimeoutError):
             await self.client.request("no/server", timeout=0.01)
+        self.assertEqual(self.worker._pending, {})
+
+    async def test_cancel_during_send_unregisters_pending_future(self) -> None:
+        entered_send = asyncio.Event()
+
+        async def blocked_send(*args, **kwargs):
+            entered_send.set()
+            await asyncio.Future()
+
+        self.transport.send_request = blocked_send
+        request = asyncio.create_task(self.client.request("blocked"))
+        await entered_send.wait()
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        self.assertEqual(self.worker._pending, {})
+
+    async def test_transport_eof_fails_pending_request_promptly(self) -> None:
+        request = asyncio.create_task(self.client.request("waiting"))
+        await eventually(lambda: bool(self.worker._pending))
+        await self.transport.recv_client_message()
+        await self.transport.aclose()
+        with self.assertRaises(RpcException) as raised:
+            await asyncio.wait_for(request, timeout=0.1)
+        self.assertEqual(raised.exception.code, ErrorCode.CLOSED.value)
         self.assertEqual(self.worker._pending, {})
 
     async def test_respond_to_server_request_writes_reply(self) -> None:

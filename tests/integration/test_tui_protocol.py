@@ -29,6 +29,61 @@ class _AnswerProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_first", [False, True])
+@pytest.mark.parametrize("return_task", [False, True])
+async def test_concurrent_outputs_wait_for_snapshot(
+    tmp_path, cancel_first, return_task
+):
+    runtime = ResearchRuntime(project_root=tmp_path)
+    snapshot_started, release = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    async def receive(kind, payload):
+        if kind == "state":
+            snapshot_started.set()
+            await release.wait()
+            seen.append("snapshot")
+        else:
+            seen.append(payload["text"])
+
+    runtime.subscribe(
+        (lambda kind, payload: asyncio.create_task(receive(kind, payload)))
+        if return_task
+        else receive
+    )
+    await snapshot_started.wait()
+    first = asyncio.create_task(
+        runtime.publish_output(
+            source="agent",
+            channel="text",
+            text="first",
+        )
+    )
+    await asyncio.sleep(0)
+    second = asyncio.create_task(
+        runtime.publish_output(
+            source="agent",
+            channel="text",
+            text="second",
+        )
+    )
+    await asyncio.sleep(0)
+    if cancel_first:
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+    assert seen == []
+    release.set()
+    await asyncio.wait_for(second, 1)
+    if not cancel_first:
+        await first
+    assert seen == (
+        ["snapshot", "second"] if cancel_first else ["snapshot", "first", "second"]
+    )
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_runtime_publishes_only_output_and_state_and_reconnects_with_state_first(
     tmp_path,
 ) -> None:

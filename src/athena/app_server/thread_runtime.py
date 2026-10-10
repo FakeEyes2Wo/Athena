@@ -32,6 +32,7 @@ from athena.app_server.submissions import (
 from athena.core.contracts import ArtifactRef
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.execution import MonitorLimits
+from athena.memory.rollout import resume_context_sync
 
 if TYPE_CHECKING:
     from athena.memory.compaction import Compaction, Compactor
@@ -57,18 +58,21 @@ class _MergedQueue:
         self._tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
+        """Begin forwarding control and submission messages into one input stream."""
         self._tasks = [
             asyncio.create_task(self._drain(self._ctrl), name="merged-ctrl"),
             asyncio.create_task(self._drain(self._sub), name="merged-sub"),
         ]
 
     async def stop(self) -> None:
+        """Cancel and join both input forwarding tasks."""
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
     async def get(self) -> Submission | RuntimeSignal:
+        """Wait for the next message from either input lane."""
         return await self._merged.get()
 
     async def _drain(self, src: asyncio.Queue) -> None:
@@ -137,6 +141,9 @@ class ThreadRuntime:
         self.last_terminal_kind: str | None = None
         self._completed_contexts: dict[str, ArtifactRef] = {}
         self._completed_results: dict[str, ArtifactRef] = {}
+        self._latest_completed_memory: list["ModelMessage"] = (
+            self._ctx.items if self._ctx is not None else []
+        )
 
     async def start(self) -> None:
         """启动合并队列和 submission_loop 后台任务。"""
@@ -224,6 +231,7 @@ class ThreadRuntime:
 
     @property
     def has_memory(self) -> bool:
+        """Report whether this thread owns a model conversation context."""
         return self._ctx is not None
 
     def _make_lifecycle_event(self, turn_id: str, kind: str) -> Event:
@@ -278,6 +286,11 @@ class ThreadRuntime:
             self.context_ref = next_context_ref
             self._completed_contexts[turn_id] = next_context_ref
             self._completed_results[turn_id] = result_ref
+            memory = self._ctx.items if self._ctx is not None else []
+            self._latest_completed_memory = memory
+            record_boundary = getattr(self._rollout, "record_turn_boundary", None)
+            if callable(record_boundary):
+                record_boundary(turn_id)
             self.last_terminal_kind = "turn_completed"
             self._turn_done[turn_id].set_result(
                 TurnTerminalState(
@@ -348,7 +361,26 @@ class ThreadRuntime:
             return ctx
         return self.context_ref
 
+    def memory_snapshot(self, after_turn_id: str | None) -> list["ModelMessage"]:
+        """Return the model history at the same completed-turn boundary as the ref."""
+        if after_turn_id is None:
+            return list(self._latest_completed_memory)
+        if after_turn_id not in self._completed_contexts:
+            raise KeyError(f"no completed snapshot: {after_turn_id}")
+        # Persistent histories can recover older completed-turn boundaries.
+        if self._rollout is not None and self._rollout.path is not None:
+            snapshot = resume_context_sync(
+                self._rollout.path, through_turn_id=after_turn_id
+            )
+            return snapshot.items
+        if self._ctx is None:
+            return []
+        if after_turn_id == next(reversed(self._completed_contexts)):
+            return list(self._latest_completed_memory)
+        raise KeyError("historical memory snapshot requires a rollout boundary")
+
     async def wait_turn(self, turn_id: str) -> ArtifactRef:
+        """Return a completed result or propagate the turn's terminal failure."""
         try:
             done = self._turn_done[turn_id]
         except KeyError as exc:
@@ -475,14 +507,17 @@ class ThreadHandle:
         await self._runtime.shutdown(reason)
 
     async def wait_turn(self, turn_id: str) -> ArtifactRef:
+        """Await the result of one turn through its owning runtime."""
         return await self._runtime.wait_turn(turn_id)
 
     @property
     def state(self) -> str:
+        """Expose the runtime's current execution lifecycle state."""
         return self._runtime.state
 
     @property
     def context_ref(self) -> ArtifactRef:
+        """Return the context reference committed by the latest completed turn."""
         return self._runtime.context_ref
 
 
@@ -545,6 +580,7 @@ async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
     """
 
     async def emit(kind: str, event_ref: ArtifactRef, data: dict | None = None) -> None:
+        """Append an event only while this runner still owns the active turn."""
         async with runtime.journal.condition:
             if runtime.active_turn is None:
                 raise RuntimeError("no active turn")

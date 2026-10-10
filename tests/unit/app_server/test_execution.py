@@ -56,14 +56,6 @@ class FakeManager:
         )
 
 
-class FakeHandlers:
-    def __init__(self) -> None:
-        self.attached = []
-
-    async def attach(self, thread_id: str) -> None:
-        self.attached.append(thread_id)
-
-
 class FakeSubscriptions:
     def __init__(self) -> None:
         self.created = []
@@ -80,18 +72,16 @@ class FakeSubscriptions:
 class ExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.manager = FakeManager()
-        self.handlers = FakeHandlers()
         self.subscriptions = FakeSubscriptions()
-        self.adapter = ExecutionAdapter(self.manager, self.handlers, self.subscriptions)
+        self.adapter = ExecutionAdapter(self.manager, self.subscriptions)
 
-    async def test_thread_start_calls_manager_and_attaches(self) -> None:
+    async def test_thread_start_calls_manager(self) -> None:
         result = await self.adapter.execute(
             Method.THREAD_START,
             {"session_id": "session:1", "context_ref": "artifact:context"},
         )
         self.assertEqual(result, {"thread_id": "thread:1"})
         self.assertEqual(self.manager.started, [("session:1", "artifact:context")])
-        self.assertEqual(self.handlers.attached, ["thread:1"])
 
     async def test_turn_start_submits_current_start_turn_op(self) -> None:
         result = await self.adapter.execute(
@@ -111,14 +101,13 @@ class ExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(operation.reason, "test")
         self.assertEqual(result, {"turn_id": "turn:1", "status": "interrupted"})
 
-    async def test_thread_fork_attaches_child(self) -> None:
+    async def test_thread_fork_returns_child(self) -> None:
         result = await self.adapter.execute(
             Method.THREAD_FORK,
             {"thread_id": "thread:1", "after_turn_id": "turn:1"},
         )
         self.assertEqual(result, {"thread_id": "thread:child"})
         self.assertEqual(self.manager.forked, [("thread:1", "turn:1")])
-        self.assertEqual(self.handlers.attached, ["thread:child"])
 
     async def test_subscribe_and_unsubscribe_use_registry(self) -> None:
         subscribed = await self.adapter.execute(

@@ -803,6 +803,63 @@ describe("usePipeline", () => {
     await waitFor(() => expect(result.current.humanRequests).toHaveLength(0));
   });
 
+  it("keeps human-request polling single-flight while a backend request is pending", async () => {
+    vi.useFakeTimers();
+    let resolvePending!: (value: { requests: [] }) => void;
+    bridgeMocks.humanPending.mockImplementation(
+      () => new Promise((resolve) => { resolvePending = resolve; }),
+    );
+    const { result, unmount } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.startClarification("predict churn");
+    });
+    expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20000);
+    });
+    expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1);
+
+    unmount();
+    await act(async () => { resolvePending({ requests: [] }); });
+    vi.useRealTimers();
+  });
+
+  it("ignores a pending human poll after switching sessions and polls the new session", async () => {
+    const pendingResolvers: Array<(value: { requests: Array<Record<string, unknown>> }) => void> = [];
+    bridgeMocks.humanPending.mockImplementation(
+      () => new Promise((resolve) => { pendingResolvers.push(resolve); }),
+    );
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => { await result.current.startClarification("old session task"); });
+    expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1);
+    act(() => { result.current.newSession(); });
+    await act(async () => { await result.current.startClarification("new session task"); });
+    expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      pendingResolvers[0]({
+        requests: [{
+          request_id: "old-session-request",
+          session_id: "old-session",
+          scope_id: "old-draft",
+          scope_kind: "clarification",
+          prompt: "Old request",
+          choices: [],
+          allow_custom: true,
+          allow_skip: true,
+          created_at: "2026-09-01T10:00:00Z",
+          expires_at: "2026-09-01T10:02:00Z",
+        }],
+      });
+    });
+    expect(result.current.humanRequests).toEqual([]);
+
+    await act(async () => { pendingResolvers[1]({ requests: [] }); });
+  });
+
   it("restores persisted session records into the conversation on mount", async () => {
     bridgeMocks.sessionSwitch.mockResolvedValue({
       records: [

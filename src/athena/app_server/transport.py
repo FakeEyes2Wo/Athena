@@ -6,7 +6,7 @@ response/control 必达，event 独立通道不被 control 阻塞。
 
 import asyncio
 
-from athena.app_server.exceptions import OverloadedError
+from athena.app_server.exceptions import ClosedError, OverloadedError
 from athena.app_server.protocol import (
     ClientNotification,
     EventNotification,
@@ -34,87 +34,110 @@ class Transport:
         self._s2c_event: asyncio.Queue = asyncio.Queue(cap_e)
         self._closed = False
         self._ready = asyncio.Event()
-        self._eof_queues: set[int] = set()  # 追踪已发 EOF 的队列，取消后重试不重复
+        self._changed = asyncio.Event()
 
     # Client 侧
 
+    async def _put(self, queue: asyncio.Queue, item, *, timeout=None) -> None:
+        async with asyncio.timeout(timeout):
+            while True:
+                if self._closed:
+                    raise ClosedError("transport is closed")
+                try:
+                    queue.put_nowait(item)
+                except asyncio.QueueFull:
+                    # Lane full; wait for a dequeue or close to wake this writer.
+                    self._changed.clear()
+                    await self._changed.wait()
+                else:
+                    self._changed.set()
+                    return
+
+    async def _recv(self, queue: asyncio.Queue):
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                # Lane empty; wait for a write or close before checking again.
+                if self._closed:
+                    return None
+                self._changed.clear()
+                await self._changed.wait()
+            else:
+                self._changed.set()
+                return item
+
     async def send_request(self, envelope: RequestEnvelope, *, timeout=5.0) -> None:
-        """投递请求信封到控制通道；通道满时抛 OverloadedError。"""
+        """Enqueue a request, raising OverloadedError when its lane stays full."""
         try:
-            await asyncio.wait_for(self._c2s.put(envelope), timeout=timeout)
+            await self._put(self._c2s, envelope, timeout=timeout)
         except asyncio.TimeoutError:
-            # 控制通道满，规定时间内无法放入 → 拒绝请求
+            # Request enqueue timed out because the control lane stayed full.
             raise OverloadedError("control channel full") from None
 
     async def send_notification(self, notification: ClientNotification) -> None:
-        """投递通知（尽力而为，通道满则丢弃）。"""
+        """Best-effort enqueue a notification; drop it when the lane is full."""
+        if self._closed:
+            raise ClosedError("transport is closed")
         try:
             self._c2s.put_nowait(notification)
         except asyncio.QueueFull:
-            # 通知通道满 → 丢弃通知（尽力而为语义）
+            # Notifications are best-effort when the client command lane is full.
             pass
+        else:
+            self._changed.set()
 
     async def send_server_request_reply(self, reply: "ServerRequestReply") -> None:
-        """投递 Client 对 ServerRequest 的回复到控制通道。"""
-        await self._c2s.put(reply)
+        """Enqueue a client reply to a server-originated request."""
+        await self._put(self._c2s, reply)
 
     async def recv_response_or_control(
         self,
     ) -> "ResponseEnvelope | ServerRequest | None":
-        """从服务端控制通道接收响应或服务端请求。"""
-        return await self._s2c_control.get()
+        """Receive a response or server request, or None after close."""
+        return await self._recv(self._s2c_control)
 
     async def recv_event(self) -> EventNotification | None:
-        """从事件通道接收一个事件通知。"""
-        return await self._s2c_event.get()
+        """Receive one event notification, or None after close."""
+        return await self._recv(self._s2c_event)
 
     async def wait_ready(self) -> None:
-        """等待传输就绪信号。"""
-        await self._ready.wait()
+        """Wait until ready, raising ClosedError if closed first."""
+        while not self._ready.is_set():
+            if self._closed:
+                raise ClosedError("transport is closed")
+            self._changed.clear()
+            await self._changed.wait()
 
     def set_ready(self) -> None:
-        """置就绪信号，唤醒等待方。"""
+        """Mark the transport ready and wake readiness waiters."""
         self._ready.set()
-
-    # Server 侧
+        self._changed.set()
 
     async def recv_client_message(
         self,
     ) -> "RequestEnvelope | ClientNotification | ServerRequestReply | None":
-        """从客户端控制通道接收一条消息。"""
-        return await self._c2s.get()
+        """Receive one client message, or None after close."""
+        return await self._recv(self._c2s)
 
     async def send_response(self, envelope: ResponseEnvelope) -> None:
-        """投递响应信封到服务端控制通道。"""
-        await self._s2c_control.put(envelope)
+        """Enqueue a server response."""
+        await self._put(self._s2c_control, envelope)
 
     async def send_server_request(self, request: ServerRequest) -> None:
-        """投递服务端请求到控制通道。"""
-        await self._s2c_control.put(request)
+        """Enqueue a server-originated client request."""
+        await self._put(self._s2c_control, request)
 
     async def send_event(self, notification: EventNotification) -> None:
-        """投递事件通知到事件通道。"""
-        await self._s2c_event.put(notification)
-
-    # 双端
+        """Enqueue an event notification on its independent lane."""
+        await self._put(self._s2c_event, notification)
 
     async def aclose(self) -> None:
+        """Close the transport and wake blocked readers and writers."""
         if self._closed:
             return
-        for i, q in enumerate((self._c2s, self._s2c_control, self._s2c_event)):
-            if i in self._eof_queues:
-                continue
-            try:
-                q.put_nowait(None)
-            except asyncio.QueueFull:
-                # 队列满无法放入 EOF 哨兵 → 回退到阻塞 put
-                try:
-                    await asyncio.wait_for(q.put(None), timeout=2.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    # 超时或取消 → 队列仍阻塞，跳过（closed 标记后不再接受新消息）
-                    pass
-            self._eof_queues.add(i)
         self._closed = True
+        self._changed.set()
 
     @property
     def closed(self) -> bool:

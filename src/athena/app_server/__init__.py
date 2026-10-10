@@ -12,7 +12,6 @@ from athena.app_server.exceptions import (
 from athena.app_server.lifecycle import (
     AppServer,
     SubscriptionRegistry,
-    ThreadEventHandlerRegistry,
 )
 from athena.app_server.protocol import (
     ErrorCode,
@@ -48,5 +47,4 @@ __all__ = [
     "ProtocolError",
     "RpcException",
     "SubscriptionRegistry",
-    "ThreadEventHandlerRegistry",
 ]

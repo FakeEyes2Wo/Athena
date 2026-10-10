@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from athena.research.runtime.phase_runner import PhaseRunner
+from athena.research.runtime.events import RuntimeEvents
+from athena.core.agent.types import RunStatus
 
 
 class _Events:
@@ -30,7 +32,7 @@ class _Agents:
 
     async def wait_run(self, run_id):
         return SimpleNamespace(
-            status="COMPLETED",
+            status=RunStatus.COMPLETED,
             response_ref=None,
             result_ref=None,
             error=None,
@@ -69,9 +71,34 @@ async def test_handoff_forwards_events_reads_output_and_reaps(tmp_path: Path) ->
 
 
 def test_project_agent_event_is_async() -> None:
-    from athena.research.runtime.events import RuntimeEvents
-
     assert asyncio.iscoroutinefunction(RuntimeEvents.project_agent_event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status", [RunStatus.FAILED, RunStatus.INTERRUPTED, RunStatus.RUNNING]
+)
+async def test_unsuccessful_handoff_rejects_old_file_and_reaps(tmp_path, status):
+    class FailedAgents(_Agents):
+        async def wait_run(self, run_id):
+            return SimpleNamespace(status=status, error="handoff did not complete")
+
+    agents = FailedAgents()
+    path = tmp_path / "EDA_INDEX.md"
+    path.write_text("previous run", encoding="utf-8")
+    runner = PhaseRunner(
+        SimpleNamespace(agents=agents, store=object(), events=_Events())
+    )
+    with pytest.raises(RuntimeError, match="handoff did not complete"):
+        await runner._run_handoff_agent(
+            agent_id="prepare_eda",
+            workspace=tmp_path,
+            output_file=path.name,
+            content="finalize",
+            reap_after=True,
+        )
+    assert agents.reaped == ["prepare_eda"]
+    assert path.read_text(encoding="utf-8") == "previous run"
 
 
 def test_no_event_callback_is_left_synchronous() -> None:

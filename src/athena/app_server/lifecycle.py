@@ -24,21 +24,6 @@ DEFAULT_STARTUP_TIMEOUT = 5.0
 DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 
 
-class ThreadEventHandlerRegistry:
-    """Thread 事件处理器注册表 — 管理 Thread 生命周期回调的注册与清理。"""
-
-    def __init__(self):
-        self._handlers: dict[str, object] = {}
-
-    async def attach(self, thread_id: str) -> None:
-        """为 Thread 注册事件处理回调。"""
-        self._handlers.setdefault(thread_id, None)
-
-    async def stop_all(self) -> None:
-        """清理所有已注册的处理器。"""
-        self._handlers.clear()
-
-
 class SubscriptionRegistry:
     """订阅注册表 — 创建/管理 EventJournal 订阅，通过 FairMux 多路复用事件。"""
 
@@ -48,6 +33,7 @@ class SubscriptionRegistry:
         self._subs: dict[str, Subscription] = {}
 
     async def create(self, thread_id: str, after_sequence=0) -> Subscription:
+        """Subscribe to a known thread and replay events after the given cursor."""
         # 先校验 thread 存在 — 失败立即报错，不返回僵尸订阅
         if self._manager is not None:
             await self._manager.get(thread_id)  # type: ignore[union-attr]
@@ -83,6 +69,7 @@ class SubscriptionRegistry:
             self._mux.remove(sub.subscription_id)  # 从 mux 清理，防止残留
 
     async def remove(self, subscription_id: str) -> None:
+        """Stop one subscription's pump and remove its multiplexed event lane."""
         sub = self._subs.pop(subscription_id, None)
         if sub is not None:
             sub.active = False
@@ -96,6 +83,7 @@ class SubscriptionRegistry:
             self._mux.remove(subscription_id)
 
     async def remove_all(self) -> None:
+        """Stop all subscription pumps before their transport is released."""
         for sid in list(self._subs):
             await self.remove(sid)
 
@@ -108,7 +96,6 @@ class AppServer:
     server: MessageProcessor
     client: AthenaClient
     manager: object
-    event_handlers: ThreadEventHandlerRegistry
     subscriptions: SubscriptionRegistry
     mux: FairMux
     _exit_stack: AsyncExitStack
@@ -128,6 +115,7 @@ class AppServer:
         startup_timeout=DEFAULT_STARTUP_TIMEOUT,
         owns_manager=True,
     ) -> "AppServer":
+        """Assemble the in-process server and complete its client handshake."""
         stack = AsyncExitStack()
         try:
             transport = Transport(
@@ -137,16 +125,12 @@ class AppServer:
             mux = FairMux(transport.send_event)
             await mux.start()
             stack.push_async_callback(mux.stop)
-            event_handlers = ThreadEventHandlerRegistry()
-
-            stack.push_async_callback(event_handlers.stop_all)
             subscriptions = SubscriptionRegistry(mux, manager)
             stack.push_async_callback(subscriptions.remove_all)
 
             server = MessageProcessor(transport, max_inflight=max_inflight)
-            executor = ExecutionAdapter(manager, event_handlers, subscriptions)
+            executor = ExecutionAdapter(manager, subscriptions)
             server.set_executor(executor)
-            server.set_event_system(event_handlers, mux)
             await server.start()
 
             stack.push_async_callback(lambda: server.shutdown(timeout=1.0))
@@ -163,7 +147,6 @@ class AppServer:
                 server=server,
                 client=client,
                 manager=manager,
-                event_handlers=event_handlers,
                 subscriptions=subscriptions,
                 mux=mux,
                 _exit_stack=stack,
@@ -175,6 +158,7 @@ class AppServer:
             raise
 
     async def shutdown(self, timeout=DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """Close the client and server, then release an owned thread manager."""
         await self.client.shutdown(timeout=timeout)
         await self._exit_stack.aclose()
         if self._owns_manager and hasattr(self.manager, "aclose"):

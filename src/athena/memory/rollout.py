@@ -119,6 +119,13 @@ class RolloutRecorder:
             }
         )
 
+    def record_turn_boundary(self, turn_id: str) -> None:
+        """Mark the end of one completed turn for historical fork replay."""
+        if self._fd is not None:
+            self._write_line(
+                {"seq": self._seq, "type": "turn_completed", "turn_id": turn_id}
+            )
+
     async def close(self) -> None:
         """关闭底层文件句柄。"""
         if self._fd is not None:
@@ -143,10 +150,13 @@ async def resume_context(rollout_path: Path) -> "ContextManager":
     return await asyncio.to_thread(resume_context_sync, rollout_path)
 
 
-def resume_context_sync(rollout_path: Path) -> ContextManager:
+def resume_context_sync(
+    rollout_path: Path, *, through_turn_id: str | None = None
+) -> ContextManager:
     """流式读取一个 rollout，仅保留最新的 compacted 上下文。"""
     adapter = ModelMessagesTypeAdapter
     ctx = ContextManager()
+    boundary_found = False
 
     with rollout_path.open("r", encoding="utf-8", errors="replace") as fd:
         for line in fd:
@@ -158,6 +168,12 @@ def resume_context_sync(rollout_path: Path) -> ContextManager:
                 # JSON 解析失败（崩溃导致截断）→ 跳过损坏记录而非丢失整个会话
                 continue
             if not isinstance(record, dict):
+                continue
+
+            if record.get("type") == "turn_completed":
+                if record.get("turn_id") == through_turn_id:
+                    boundary_found = True
+                    break
                 continue
 
             if record.get("type") == "compaction":
@@ -187,4 +203,6 @@ def resume_context_sync(rollout_path: Path) -> ContextManager:
             for message in messages:
                 ctx.append(message)
 
+    if through_turn_id is not None and not boundary_found:
+        raise KeyError(f"no completed rollout boundary: {through_turn_id}")
     return ctx

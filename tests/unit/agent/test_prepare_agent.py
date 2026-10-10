@@ -45,9 +45,7 @@ class _WriteManifestProvider:
                 },
             )
         else:
-            answer = json.dumps(
-                {"decision": "submit", "reason": "baseline ready", "suggestions": []}
-            )
+            answer = json.dumps({"decision": "submit", "reason": "baseline ready"})
             yield StreamEvent(
                 kind="text_delta", data={"delta": answer, "accumulated": answer}
             )

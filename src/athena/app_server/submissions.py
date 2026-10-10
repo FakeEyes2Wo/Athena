@@ -55,7 +55,6 @@ class Submission:
     id: str
     op: Op
     reply: asyncio.Future[object] = field(default_factory=asyncio.Future)
-    trace_context: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -101,6 +100,7 @@ class TurnRuntime:
 
     @property
     def is_active(self) -> bool:
+        """Report whether the turn is still awaiting a terminal outcome."""
         return not self.done.done()
 
 

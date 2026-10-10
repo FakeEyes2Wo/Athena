@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 _MAX_COMMAND_CHARS = 400
 
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
-_Subscriber = tuple[EmitFn, asyncio.Task[object] | None]
+_Subscriber = tuple[EmitFn, asyncio.Future[object] | None, asyncio.Lock]
 
 # Agent 流式增量不再逐 token 持久化到 session transcript。实时订阅仍逐 delta
 # 推送；落盘时在消息边界（函数调用 / turn 终态）合并成一条完整文本。
@@ -76,24 +77,26 @@ class RuntimeEvents:
     def subscribe(self, emit: EmitFn) -> str:
         """Subscribe and immediately receive one complete state snapshot."""
         subscription_id = new_id("research")
-        self._subscribers[subscription_id] = (emit, None)
+        lock = asyncio.Lock()
+        self._subscribers[subscription_id] = (emit, None, lock)
         result = emit(
             "state",
             supervisor_state(self._supervisor, self._ideator_lanes).model_dump(
                 mode="json"
             ),
         )
-        if asyncio.iscoroutine(result):
+        if isawaitable(result):
             self._subscribers[subscription_id] = (
                 emit,
-                asyncio.create_task(result),
+                asyncio.ensure_future(result),
+                lock,
             )
         return subscription_id
 
     def unsubscribe(self, subscription_id: str) -> None:
         """Remove one runtime event subscriber and cancel its pending snapshot."""
         subscriber = self._subscribers.pop(subscription_id, None)
-        _, ready = subscriber or (None, None)
+        _, ready, _ = subscriber or (None, None, None)
         if ready is not None and not ready.done():
             ready.cancel()
 
@@ -389,15 +392,20 @@ class RuntimeEvents:
         async def invoke(subscription_id: str, subscriber: _Subscriber) -> None:
             """Deliver one event to a subscriber after its initial snapshot."""
             try:
-                emit, ready = subscriber
-                if ready is not None:
-                    if self._subscribers.get(subscription_id) == subscriber:
-                        self._subscribers[subscription_id] = (emit, None)
-                    await ready
-                result = emit(kind, payload)
-                if asyncio.iscoroutine(result):
-                    await result
+                emit, ready, lock = subscriber
+                async with lock:
+                    if ready is not None:
+                        # A cancelled publisher must not cancel the shared snapshot.
+                        await asyncio.shield(ready)
+                    if self._subscribers.get(subscription_id) is not subscriber:
+                        return
+                    result = emit(kind, payload)
+                    if isawaitable(result):
+                        await result
             except asyncio.CancelledError:
+                # Unsubscribe cancels its snapshot; publisher cancellation propagates.
+                if subscription_id not in self._subscribers:
+                    return
                 raise
             except Exception:
                 logger.exception(
@@ -417,10 +425,12 @@ class RuntimeEvents:
         # complete message in the resume transcript, not a dangling delta buffer.
         for plan in list(self._agent_buffers):
             self._flush_agent_text(plan)
-        for _, ready in self._subscribers.values():
+        snapshots = [ready for _, ready, _ in self._subscribers.values() if ready]
+        for ready in snapshots:
             if ready is not None and not ready.done():
                 ready.cancel()
         self._subscribers.clear()
+        await asyncio.gather(*snapshots, return_exceptions=True)
 
     def _append_log(self, record: dict[str, object]) -> None:
         """Append one session record to the active session's transcript (best-effort)."""

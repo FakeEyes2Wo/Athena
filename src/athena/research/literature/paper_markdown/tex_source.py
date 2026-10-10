@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from athena.research.literature.contracts import ProcessingDiagnostic, TexSourceFormat
+from athena.research.literature.source_payload import MAX_SOURCE_BYTES, is_tar_payload
 
 MAX_SOURCE_FILES = 5000
-MAX_SOURCE_BYTES = 256 * 1024 * 1024
 INCLUDE_PATTERN = re.compile(
     r"\\(?:input|include|subfile)(?![A-Za-z@])\s*(?:\{([^}]+)\}|([^\s%]+))"
 )
@@ -143,16 +143,6 @@ def read_plain(payload: bytes, entrypoint: str | None) -> dict[str, bytes]:
     """把单个 TeX 文本包装成源码包。"""
     name = normalize_member_path(entrypoint or "main.tex")
     return checked_files({name: payload})
-
-
-def is_tar_payload(payload: bytes) -> bool:
-    """只判断字节是否为可读 tar，不吞掉后续成员安全错误。"""
-    try:
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*"):
-            return True
-    except tarfile.ReadError:
-        # 格式自动识别发现内容不是 tar → 继续尝试其他格式
-        return False
 
 
 def decompress_gzip(payload: bytes) -> bytes:

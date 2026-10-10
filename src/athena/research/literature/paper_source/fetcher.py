@@ -18,7 +18,6 @@ import gzip
 import io
 import json
 import re
-import tarfile
 import urllib.parse
 import zipfile
 from dataclasses import InitVar, dataclass, field
@@ -32,6 +31,7 @@ from athena.research.literature.contracts import (
     ProcessingDiagnostic,
     TexSourceFormat,
 )
+from athena.research.literature.source_payload import MAX_SOURCE_BYTES, is_tar_payload
 from athena.research.literature.paper_source.arxiv import (
     ArxivClient,
     ArxivMetadata,
@@ -62,7 +62,6 @@ TEX_FORMATS = frozenset({"auto", "tar", "tar.gz", "zip", "gzip", "plain"})
 PDF_HINT_KINDS = frozenset({"oa_pdf", "publisher_pdf"})
 TITLE_MATCH_THRESHOLD = 0.75
 MAX_PDF_CANDIDATES = 3
-MAX_SOURCE_BYTES = 256 * 1024 * 1024
 NON_ALNUM = re.compile(r"[^0-9a-z]+")
 
 
@@ -73,14 +72,6 @@ class PayloadError(ValueError):
 def diagnostic(level: str, code: str, message: str) -> ProcessingDiagnostic:
     """Construct a stable source diagnostic record."""
     return ProcessingDiagnostic(level=level, code=code, message=message)
-
-
-def _is_tar_payload(payload: bytes) -> bool:
-    try:
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*"):
-            return True
-    except tarfile.ReadError:
-        return False
 
 
 def _decompress_gzip(payload: bytes) -> bytes:
@@ -100,7 +91,7 @@ def _gzip_format(payload: bytes) -> TexSourceFormat | None:
         inner = _decompress_gzip(payload)
     except PayloadError:
         return None
-    return "tar.gz" if _is_tar_payload(inner) else "gzip"
+    return "tar.gz" if is_tar_payload(inner) else "gzip"
 
 
 def _looks_like_tex(payload: bytes) -> bool:
@@ -122,7 +113,7 @@ def sniff_payload(payload: bytes) -> tuple[str, TexSourceFormat | None]:
     if payload.startswith(b"\x1f\x8b"):
         detected = _gzip_format(payload)
         return ("tex", detected) if detected else ("unknown", None)
-    if _is_tar_payload(payload):
+    if is_tar_payload(payload):
         return "tex", "tar"
     if _looks_like_tex(payload):
         return "tex", "plain"
@@ -311,6 +302,7 @@ class _FetchAttempt:
 
     @property
     def version(self) -> int | None:
+        """Return the resolved upstream version, if version lookup succeeded."""
         return self.resolved.latest_version if self.resolved else None
 
 
@@ -894,6 +886,7 @@ class PaperFetchTool(BaseTool):
         self.fetcher = fetcher
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Fetch the referenced paper-source request and store its result artifact."""
         request_ref = input.get("request_ref")
         if not isinstance(request_ref, str) or not request_ref.strip():
             raise ValueError("request_ref must be a non-empty artifact reference.")

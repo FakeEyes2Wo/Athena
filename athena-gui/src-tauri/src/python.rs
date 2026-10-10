@@ -2,14 +2,78 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const LONG_RPC_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>>;
+
+fn fail_pending(pending: &mut HashMap<u64, oneshot::Sender<RpcResult<Value>>>, message: &str) {
+    for (_, sender) in pending.drain() {
+        let _ = sender.send(Err(RpcError::transport(message)));
+    }
+}
+
+struct PendingRequestGuard {
+    pending: PendingRequests,
+    request_id: u64,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.try_lock() {
+            pending.remove(&self.request_id);
+            return;
+        }
+        let pending = self.pending.clone();
+        let request_id = self.request_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                pending.lock().await.remove(&request_id);
+            });
+        }
+    }
+}
+
+async fn send_and_await<F>(
+    request_id: u64,
+    pending: &PendingRequests,
+    timeout: Duration,
+    send: F,
+    response: oneshot::Receiver<RpcResult<Value>>,
+) -> RpcResult<Value>
+where
+    F: Future<Output = RpcResult<()>>,
+{
+    let operation = async {
+        send.await?;
+        match response.await {
+            Ok(result) => result,
+            Err(_) => Err(RpcError::transport("Request cancelled")),
+        }
+    };
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => {
+            if result.is_err() {
+                pending.lock().await.remove(&request_id);
+            }
+            result
+        }
+        Err(_) => {
+            pending.lock().await.remove(&request_id);
+            Err(RpcError::transport("RPC request timed out"))
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct RpcError {
@@ -62,7 +126,8 @@ pub struct PythonBridge {
             Message,
         >,
     >,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>>,
+    pending: PendingRequests,
+    connection_closed: Arc<AtomicBool>,
     events: broadcast::Sender<EventNotification>,
 }
 
@@ -135,9 +200,10 @@ impl PythonBridge {
         let events_clone = events_tx.clone();
 
         // 4. Spawn receive loop that dispatches responses and events
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_recv = pending.clone();
+        let connection_closed = Arc::new(AtomicBool::new(false));
+        let connection_closed_recv = connection_closed.clone();
         tokio::spawn(async move {
             while let Some(msg) = ws_recv.next().await {
                 match msg {
@@ -165,12 +231,18 @@ impl PythonBridge {
                     _ => {}
                 }
             }
+            // Serialize closure with request registration so no request can be
+            // inserted after the receiver has drained the pending map.
+            let mut pending = pending_recv.lock().await;
+            connection_closed_recv.store(true, Ordering::Release);
+            fail_pending(&mut pending, "Python gateway connection closed");
         });
 
         Ok(Self {
             child: Mutex::new(child),
             ws_send,
             pending,
+            connection_closed,
             events: events_tx,
         })
     }
@@ -184,18 +256,31 @@ impl PythonBridge {
             "params": params,
         });
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        self.ws_send
-            .lock()
-            .await
-            .send(Message::Text(req.to_string()))
-            .await
-            .map_err(|e| RpcError::transport(format!("WS send failed: {e}")))?;
-        match rx.await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(RpcError::transport("Request cancelled")),
+        {
+            let mut pending = self.pending.lock().await;
+            if self.connection_closed.load(Ordering::Acquire) {
+                return Err(RpcError::transport("Python gateway connection closed"));
+            }
+            pending.insert(id, tx);
         }
+        let _pending_guard = PendingRequestGuard {
+            pending: self.pending.clone(),
+            request_id: id,
+        };
+        let send = async {
+            self.ws_send
+                .lock()
+                .await
+                .send(Message::Text(req.to_string()))
+                .await
+                .map(|_| ())
+                .map_err(|error| RpcError::transport(format!("WS send failed: {error}")))
+        };
+        let timeout = match method {
+            "generate_report" | "start_validation" => LONG_RPC_TIMEOUT,
+            _ => DEFAULT_RPC_TIMEOUT,
+        };
+        send_and_await(id, &self.pending, timeout, send, rx).await
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -270,6 +355,67 @@ mod tests {
         .expect_err("domain error");
         assert_eq!(error.code, -32602);
         assert_eq!(error.data.unwrap()["code"], "stale_revision");
+    }
+
+    #[test]
+    fn blocked_send_times_out_and_removes_its_pending_sender() {
+        tauri::async_runtime::block_on(async {
+            let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+            let (sender, receiver) = oneshot::channel();
+            pending.lock().await.insert(7, sender);
+
+            let (send_gate, send_blocker) = oneshot::channel::<()>();
+            let send = async move {
+                send_blocker
+                    .await
+                    .map_err(|_| RpcError::transport("test send gate closed"))?;
+                Ok(())
+            };
+            let error = send_and_await(7, &pending, Duration::from_millis(1), send, receiver)
+                .await
+                .expect_err("blocked send should time out");
+            drop(send_gate);
+
+            assert_eq!(error.message, "RPC request timed out");
+            assert!(pending.lock().await.is_empty());
+        });
+    }
+
+    #[test]
+    fn dropped_rpc_future_guard_removes_its_pending_sender() {
+        tauri::async_runtime::block_on(async {
+            let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+            let (sender, receiver) = oneshot::channel();
+            pending.lock().await.insert(8, sender);
+
+            drop(PendingRequestGuard {
+                pending: pending.clone(),
+                request_id: 8,
+            });
+
+            assert!(pending.lock().await.is_empty());
+            assert!(receiver.await.is_err());
+        });
+    }
+
+    #[test]
+    fn receiver_shutdown_fails_all_pending_rpcs() {
+        tauri::async_runtime::block_on(async {
+            let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+            let (sender, receiver) = oneshot::channel();
+            pending.lock().await.insert(9, sender);
+            {
+                let mut pending = pending.lock().await;
+                fail_pending(&mut pending, "Python gateway connection closed");
+            }
+
+            let error = receiver
+                .await
+                .expect("pending call is awakened")
+                .unwrap_err();
+            assert_eq!(error.message, "Python gateway connection closed");
+            assert!(pending.lock().await.is_empty());
+        });
     }
 
     #[test]

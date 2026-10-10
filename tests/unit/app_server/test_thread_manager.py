@@ -27,6 +27,94 @@ class RuntimeThreadManagerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await manager.aclose("test_cleanup")
 
+    async def test_duplicate_explicit_thread_id_keeps_original_runtime(self) -> None:
+        manager = RuntimeThreadManager(immediate_runner)
+        try:
+            first = await manager.start(
+                "session:1", "artifact:context", thread_id="thread:fixed"
+            )
+            original = await manager.get(first.thread_id)
+            with self.assertRaisesRegex(RuntimeError, "thread already exists"):
+                await manager.start(
+                    "session:2", "artifact:other", thread_id="thread:fixed"
+                )
+            self.assertIs(await manager.get(first.thread_id), original)
+            await manager.aclose("test_cleanup")
+            self.assertEqual(original.state, "closed")
+        finally:
+            await manager.aclose("test_cleanup")
+
+    async def test_close_waits_for_start_to_register_runtime(self) -> None:
+        manager = RuntimeThreadManager(immediate_runner)
+        runtime_ready = asyncio.Event()
+        allow_start = asyncio.Event()
+        original_make = manager._make_runtime
+        runtimes = []
+
+        def delayed_runtime(*args, **kwargs):
+            runtime = original_make(*args, **kwargs)
+            runtimes.append(runtime)
+            original_start = runtime.start
+
+            async def delayed_start():
+                runtime_ready.set()
+                await allow_start.wait()
+                await original_start()
+
+            runtime.start = delayed_start
+            return runtime
+
+        manager._make_runtime = delayed_runtime
+        start_task = asyncio.create_task(manager.start("session:1", "artifact:context"))
+        try:
+            await asyncio.wait_for(runtime_ready.wait(), timeout=1)
+            close_task = asyncio.create_task(manager.aclose("race"))
+            await asyncio.sleep(0)
+            self.assertFalse(close_task.done())
+            allow_start.set()
+            await start_task
+            await close_task
+            self.assertEqual(runtimes[0].state, "closed")
+        finally:
+            allow_start.set()
+            if not start_task.done():
+                start_task.cancel()
+                await asyncio.gather(start_task, return_exceptions=True)
+            await manager.aclose("test_cleanup")
+
+    async def test_cancelled_start_closes_unregistered_runtime(self) -> None:
+        manager = RuntimeThreadManager(immediate_runner)
+        runtime_started = asyncio.Event()
+        hold_start = asyncio.Event()
+        original_make = manager._make_runtime
+        runtimes = []
+
+        def held_runtime(*args, **kwargs):
+            runtime = original_make(*args, **kwargs)
+            runtimes.append(runtime)
+            original_start = runtime.start
+
+            async def held_start():
+                await original_start()
+                runtime_started.set()
+                await hold_start.wait()
+
+            runtime.start = held_start
+            return runtime
+
+        manager._make_runtime = held_runtime
+        task = asyncio.create_task(manager.start("session:1", "artifact:context"))
+        try:
+            await asyncio.wait_for(runtime_started.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(runtimes[0].state, "closed")
+            self.assertFalse(manager._handles)
+        finally:
+            hold_start.set()
+            await manager.aclose("test_cleanup")
+
     async def test_submit_returns_turn_and_events(self) -> None:
         manager = RuntimeThreadManager(immediate_runner)
         try:

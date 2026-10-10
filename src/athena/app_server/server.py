@@ -9,6 +9,7 @@ import logging
 from typing import Literal
 from uuid import uuid4
 
+from athena.app_server.exceptions import ClosedError
 from athena.app_server.protocol import (
     ErrorCode,
     Method,
@@ -53,9 +54,16 @@ class MessageProcessor:
     """Server 侧请求入口——状态机 + Dispatcher + admission gate。"""
 
     def __init__(
-        self, transport: Transport, *, max_inflight=DEFAULT_MAX_INFLIGHT
+        self,
+        transport: Transport,
+        *,
+        max_inflight=DEFAULT_MAX_INFLIGHT,
+        max_pending: int | None = None,
     ) -> None:
+        if max_inflight < 1 or (max_pending is not None and max_pending < 1):
+            raise ValueError("request limits must be positive")
         self._transport = transport
+        self._max_pending = max_inflight if max_pending is None else max_pending
         self._state: ServerState = "CREATED"
         self._inflight: dict[int, asyncio.Task[None]] = {}
         self._slots = asyncio.Semaphore(max_inflight)
@@ -63,17 +71,10 @@ class MessageProcessor:
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._pending_server_calls: dict[str, asyncio.Future[dict]] = {}
         self._executor = None
-        self._event_handlers = None
-        self._mux = None
 
     def set_executor(self, executor) -> None:
         """注入 ExecutionAdapter — 将协议方法映射到 ThreadManager 调用。"""
         self._executor = executor
-
-    def set_event_system(self, event_handlers, mux) -> None:
-        """注入事件处理器和 FairMux，用于事件路由。"""
-        self._event_handlers = event_handlers
-        self._mux = mux
 
     # 生命周期
 
@@ -91,6 +92,7 @@ class MessageProcessor:
         if self._state in ("TERMINATED", "FAILED", "FORCE_CLOSED"):
             return
         self._state = "DRAINING"
+        self._fail_server_calls()
         if self._inflight:
             tasks = list(self._inflight.values())
             try:
@@ -113,6 +115,7 @@ class MessageProcessor:
             except asyncio.CancelledError:
                 # dispatcher 任务已被 cancel，等待其完全退出
                 pass
+        await self._transport.aclose()
 
     # 分发器
 
@@ -122,24 +125,36 @@ class MessageProcessor:
         将 semaphore 等待和 inflight 检查从接收循环移入 worker，
         避免满载时阻断控制消息，同时消除重复 request_id 的 TOCTOU 竞态。
         """
-        pending: asyncio.Queue[RequestEnvelope] = asyncio.Queue()
+        pending: asyncio.Queue[RequestEnvelope] = asyncio.Queue(self._max_pending)
+        queued_ids: set[int] = set()
 
         async def _worker() -> None:
             while True:
-                msg = await pending.get()
-                rid = msg.request_id
-                # inflight 检查在 worker 内，与 _inflight 写入同任务 — 无竞态
-                if rid in self._inflight:
-                    await self._send_error(
-                        rid, ErrorCode.DUPLICATE_REQUEST_ID, "duplicate request id"
-                    )
-                    continue
                 await self._slots.acquire()
-                task = asyncio.create_task(
-                    self._execute_and_reply(msg), name=f"srv-request-{rid}"
-                )
-                self._inflight[rid] = task
-                task.add_done_callback(lambda t, r=rid: self._cleanup(r, t))
+                try:
+                    msg = await pending.get()
+                    rid = msg.request_id
+                    queued_ids.remove(rid)
+                    if self._state in (
+                        "DRAINING",
+                        "TERMINATED",
+                        "FAILED",
+                        "FORCE_CLOSED",
+                    ):
+                        await self._send_error(
+                            rid, ErrorCode.CLOSED, "server shutting down"
+                        )
+                        self._slots.release()
+                        continue
+                    task = asyncio.create_task(
+                        self._execute_and_reply(msg), name=f"srv-request-{rid}"
+                    )
+                    self._inflight[rid] = task
+                    task.add_done_callback(lambda t, r=rid: self._cleanup(r, t))
+                except BaseException:
+                    # Worker startup/cancellation failed before a task owned the slot.
+                    self._slots.release()
+                    raise
 
         worker_task = asyncio.create_task(_worker(), name="srv-worker")
         try:
@@ -166,30 +181,31 @@ class MessageProcessor:
                 if not self._request_allowed(msg):
                     await self._reject_for_state(msg)
                     continue
-                await pending.put(msg)
+                if rid in queued_ids or rid in self._inflight:
+                    await self._send_error(
+                        rid, ErrorCode.DUPLICATE_REQUEST_ID, "duplicate request id"
+                    )
+                    continue
+                try:
+                    pending.put_nowait(msg)
+                except asyncio.QueueFull:
+                    # Execution backlog is full; keep control messages reachable.
+                    await self._send_error(
+                        rid, ErrorCode.OVERLOADED, "server request queue full"
+                    )
+                else:
+                    queued_ids.add(rid)
         except asyncio.CancelledError:
             # dispatcher 循环被 cancel — 正常退出
             pass
         finally:
+            self._fail_server_calls()
+            worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
             # Bug 8 fix: 排空 pending 队列，回复 ClosedError
             while not pending.empty():
-                try:
-                    msg = pending.get_nowait()
-                    await self._transport.send_response(
-                        ResponseEnvelope(
-                            request_id=msg.request_id,
-                            error=rpc_error(ErrorCode.CLOSED, "server shutting down"),
-                        )
-                    )
-                except Exception:
-                    # 发送 ClosedError 失败 — 忽略，关闭流程已在进行
-                    pass
-            worker_task.cancel()
-            try:
-                await asyncio.shield(worker_task)
-            except asyncio.CancelledError:
-                # worker 已被 cancel 且已等待完毕 — 预期行为
-                pass
+                msg = pending.get_nowait()
+                await self._reply_closed(msg.request_id)
 
     # 请求执行
 
@@ -209,13 +225,9 @@ class MessageProcessor:
                 )
             )
         except asyncio.CancelledError:
-            # 请求被取消 — 发送 CLOSED 错误回复
-            await self._transport.send_response(
-                ResponseEnvelope(
-                    request_id=rid,
-                    error=rpc_error(ErrorCode.CLOSED, "request cancelled"),
-                )
-            )
+            # Shutdown cancelled this request; never wait for a stopped reader.
+            await self._reply_closed(rid)
+            raise
         except Exception as exc:
             # 执行过程中发生异常 — 映射为协议错误码并回复
             await self._transport.send_response(
@@ -275,59 +287,81 @@ class MessageProcessor:
         if self._state in ("DRAINING", "TERMINATED", "FAILED", "FORCE_CLOSED"):
             return
         self._state = "DRAINING"
+        self._fail_server_calls()
+
+    def _fail_server_calls(self) -> None:
+        """Wake pending approval/input callers when the connection stops."""
+        pending, self._pending_server_calls = self._pending_server_calls, {}
+        for future in pending.values():
+            if not future.done():
+                future.set_exception(ClosedError("server shutting down"))
 
     # Server→Client 调用
+
+    async def _call_client(self, method: str, params: dict, timeout: float) -> dict:
+        if self._state in ("DRAINING", "TERMINATED", "FAILED", "FORCE_CLOSED"):
+            raise ClosedError("server shutting down")
+        call_id = f"s:{uuid4().hex}"
+        future = asyncio.get_running_loop().create_future()
+        self._pending_server_calls[call_id] = future
+        send = asyncio.create_task(
+            self._transport.send_server_request(
+                ServerRequest(server_call_id=call_id, method=method, params=params)
+            )
+        )
+        try:
+            async with asyncio.timeout(timeout):
+                # Shutdown must also wake a caller blocked on a full send queue.
+                await asyncio.wait((send, future), return_when=asyncio.FIRST_COMPLETED)
+                if future.done():
+                    return await future
+                await send
+                return await future
+        finally:
+            send.cancel()
+            await asyncio.gather(send, return_exceptions=True)
+            self._pending_server_calls.pop(call_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
 
     async def request_approval(
         self, thread_id: str, turn_id: str, message: str, timeout=300.0
     ) -> bool:
         """向 Client 发送审批请求，等待用户批准或拒绝。超时默认返回 False。"""
-        call_id = f"s:{uuid4().hex}"
-        fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
-        self._pending_server_calls[call_id] = fut
-        await self._transport.send_server_request(
-            ServerRequest(
-                server_call_id=call_id,
-                method=Method.ITEM_APPROVAL_REQUEST,
-                params={"thread_id": thread_id, "turn_id": turn_id, "message": message},
-            )
-        )
         try:
-            result = await asyncio.wait_for(fut, timeout=timeout)
+            result = await self._call_client(
+                Method.ITEM_APPROVAL_REQUEST,
+                {"thread_id": thread_id, "turn_id": turn_id, "message": message},
+                timeout,
+            )
             return result.get("approved", False)
         except asyncio.TimeoutError:
             # Client 在超时内未响应审批请求
-            self._pending_server_calls.pop(call_id, None)
             return False
 
     async def request_user_input(
         self, thread_id: str, turn_id: str, questions: list[dict], timeout=300.0
     ) -> dict | None:
-        """向 Client 发送提问请求，等待用户回答。超时/取消返回 None。
+        """向 Client 发送提问请求，等待用户回答。超时返回 None，取消向上传播。
 
         ``questions`` 是 ``UserInputQuestion`` 的 dict 形式：
         ``{"id": ..., "question": ..., ...}``。回复形如
         ``{"answers": {qid: {"answers": [...]}}}``。
         """
-        call_id = f"s:{uuid4().hex}"
-        fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
-        self._pending_server_calls[call_id] = fut
-        await self._transport.send_server_request(
-            ServerRequest(
-                server_call_id=call_id,
-                method=Method.ITEM_USER_INPUT_REQUEST,
-                params={
+        try:
+            return await self._call_client(
+                Method.ITEM_USER_INPUT_REQUEST,
+                {
                     "thread_id": thread_id,
                     "turn_id": turn_id,
                     "questions": questions,
                 },
+                timeout,
             )
-        )
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             # Client 在超时内未响应提问请求
-            self._pending_server_calls.pop(call_id, None)
             return None
 
     # 辅助
@@ -352,10 +386,22 @@ class MessageProcessor:
             ResponseEnvelope(request_id=request_id, error=rpc_error(code, message))
         )
 
+    async def _reply_closed(self, request_id: int) -> None:
+        try:
+            async with asyncio.timeout(0):
+                await self._send_error(
+                    request_id, ErrorCode.CLOSED, "server shutting down"
+                )
+        except (TimeoutError, ClosedError):
+            # Full or closed response lane: EOF will settle pending client calls.
+            pass
+
     @property
     def state(self) -> str:
+        """Expose the request admission lifecycle state."""
         return self._state
 
     @property
     def ready(self) -> asyncio.Event:
+        """Signal that the client handshake has completed."""
         return self._ready

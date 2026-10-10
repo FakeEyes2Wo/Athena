@@ -525,6 +525,7 @@ export function usePipeline(
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
   const humanPollFailures = useRef(0);
+  const humanPollInFlightRef = useRef<{ sessionId: string; epoch: number } | null>(null);
 
   const advanceSessionEpoch = useCallback(() => {
     sessionTransitionRef.current?.settle(false);
@@ -1093,26 +1094,42 @@ export function usePipeline(
 
     let cancelled = false;
     const interval = running ? 1500 : 10000;
+    const pollSessionId = currentSessionId;
+    const pollEpoch = sessionRequestEpochRef.current;
+    const pollIdentity = { sessionId: pollSessionId, epoch: pollEpoch };
+    const isCurrentPoll = () =>
+      !cancelled &&
+      mountedRef.current &&
+      pollSessionId === activeSessionIdRef.current &&
+      pollEpoch === sessionRequestEpochRef.current;
     const poll = async () => {
+      const inFlight = humanPollInFlightRef.current;
+      if (inFlight?.sessionId === pollSessionId && inFlight.epoch === pollEpoch) return;
+      humanPollInFlightRef.current = pollIdentity;
       try {
         const { requests } = await bridge.humanPending();
-        if (!cancelled) {
+        if (isCurrentPoll()) {
           setHumanRequests(requests);
           requests.forEach((request) => appendClarificationQuestion(request));
           setHumanPendingError(null);
           humanPollFailures.current = 0;
         }
       } catch (err) {
+        if (!isCurrentPoll()) return;
         humanPollFailures.current += 1;
-        if (humanPollFailures.current >= 3 && !cancelled) {
+        if (humanPollFailures.current >= 3) {
           setHumanPendingError(`无法获取待确认问题：${errorMessage(err)}`);
+        }
+      } finally {
+        if (humanPollInFlightRef.current === pollIdentity) {
+          humanPollInFlightRef.current = null;
         }
       }
     };
     void poll();
     const timer = setInterval(poll, interval);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [appendClarificationQuestion, clarificationStatus, viewModel.status]);
+  }, [appendClarificationQuestion, clarificationStatus, currentSessionId, viewModel.status]);
 
   // The backend is the only owner of task understanding. When its authoritative
   // state event fills the preview card, use that understanding to name the

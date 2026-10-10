@@ -1,5 +1,24 @@
 ﻿# Current Athena Work
 
+Active commit, review and push:
+- `docs/codex_docs/2026-10-11-source-repair-review-plan.md`
+
+Completed minimal source-review repairs:
+- `docs/codex_docs/2026-10-10-source-review-repair-completion.md`
+
+Open design candidates remain in the review ledger: slow-subscriber delivery,
+structured data-contract migration, history retention/recovery and gzip reuse.
+Do not reopen verified fixes merely because their original findings are retained.
+
+Completed source-review documentation; ongoing comparison ledger:
+- `docs/codex_docs/2026-10-10-source-review-documentation-completion.md`
+- `docs/reviews/2026-10-10-source-improvements.md`
+- `docs/reviews/codex-app-server-comparison.md`
+
+When app-server/GUI transport changes or the referenced Codex baseline is updated,
+refresh the comparison ledger's pinned revision, differences and verification.
+Its open findings are not implemented fixes or a background monitoring schedule.
+
 Completed repository organization and user-requested directory removal:
 - `docs/codex_docs/2026-10-10-repository-organization-completion.md`
 - `docs/repository-layout.md`

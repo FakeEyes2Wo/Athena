@@ -70,26 +70,40 @@ class RuntimeThreadManager:
         }
 
     def _make_runtime(
-        self, thread_id: str, session_id: str, context_ref: str
+        self,
+        thread_id: str,
+        session_id: str,
+        context_ref: str,
+        *,
+        rollout_key: str | None = None,
+        initial_history: list[Any] | None = None,
     ) -> ThreadRuntime:
         """每个 Thread 创建独立的 Memory 组件 — 防止串话。"""
         kwargs: dict[str, Any] = {}
         if self._memory_kwargs["ctx"] is not None:
-            kwargs["ctx"] = ContextManager(
-                context_limit=self._memory_kwargs["ctx"].limit
-            )
+            ctx = ContextManager(context_limit=self._memory_kwargs["ctx"].limit)
+            for message in initial_history or ():
+                ctx.append(message)
+            kwargs["ctx"] = ctx
         if self._memory_kwargs["compactor"] is not None:
             kwargs["compactor"] = self._memory_kwargs["compactor"]
         if self._memory_kwargs["rollout"] is not None or self._rollout_dir is not None:
             recorder = RolloutRecorder(self._project_root)
             if self._rollout_dir is not None:
                 # 确定性路径:同一 agent_id(session_id)重启复用同一 JSONL
-                path = self._rollout_dir / f"{session_id}.jsonl"
+                path = self._rollout_dir / f"{rollout_key or session_id}.jsonl"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 recorder.open_sync(session_id, append_to=path)
-                if path.exists() and path.stat().st_size > 0:
+                if initial_history is not None:
+                    for message in initial_history:
+                        recorder.record(message)
+                elif path.exists() and path.stat().st_size > 0:
                     # COMPAT: 重开会话恢复记忆;清理条件:Codex 风格会话恢复并入 ThreadRuntime 后。
                     kwargs["ctx"] = resume_context_sync(path)
+            elif initial_history is not None:
+                recorder.open_sync(thread_id)
+                for message in initial_history:
+                    recorder.record(message)
             kwargs["rollout"] = recorder
         if self._memory_kwargs["llm"] is not None:
             kwargs["llm"] = self._memory_kwargs["llm"]
@@ -117,17 +131,20 @@ class RuntimeThreadManager:
             self.require_safe_path_basename(session_id, "session_id")
         thread_id = thread_id or str(uuid4())
         self._require_ref(thread_id, "thread_id")
-        # 先检查状态 — 避免创建 runtime 后因状态不对而泄漏后台任务
+        # Hold the lock through startup so concurrent starts cannot claim one ID.
         async with self._lock:
             if self._state != "alive":
                 raise RuntimeError("manager is not alive")
-        runtime = self._make_runtime(thread_id, session_id, context_ref)
-        await runtime.start()
-        handle = ThreadHandle(runtime)
-        async with self._lock:
-            if self._state != "alive":
-                await runtime.shutdown("manager closed")
-                raise RuntimeError("manager is not alive")
+            if thread_id in self._handles:
+                raise RuntimeError(f"thread already exists: {thread_id}")
+            runtime = self._make_runtime(thread_id, session_id, context_ref)
+            try:
+                await runtime.start()
+            except BaseException:
+                # Startup failed or was cancelled before this runtime gained an owner.
+                await runtime.force_close()
+                raise
+            handle = ThreadHandle(runtime)
             self._handles[thread_id] = handle
         return AthenaThread(
             thread_id=thread_id,
@@ -165,9 +182,21 @@ class RuntimeThreadManager:
                 GetForkSnapshot(after_turn_id=after_turn_id)
             )
             session_id = parent._runtime.session_id
+            history = parent._runtime.memory_snapshot(after_turn_id)
             child_id = str(uuid4())
-            child_runtime = self._make_runtime(child_id, session_id, context_ref)
-            await child_runtime.start()
+            child_runtime = self._make_runtime(
+                child_id,
+                session_id,
+                context_ref,
+                rollout_key=child_id,
+                initial_history=history,
+            )
+            try:
+                await child_runtime.start()
+            except BaseException:
+                # Fork startup failed or was cancelled before child registration.
+                await child_runtime.force_close()
+                raise
             self._handles[child_id] = ThreadHandle(child_runtime)
         return AthenaThread(
             thread_id=child_id,
@@ -185,6 +214,7 @@ class RuntimeThreadManager:
         await handle.submit(InterruptTurn(turn_id=turn_id, reason=reason))
 
     async def wait_turn(self, thread_id: str, turn_id: str) -> ArtifactRef:
+        """Wait for a turn's result, propagating interruption or execution failure."""
         self._require_ref(thread_id, "thread_id")
         self._require_ref(turn_id, "turn_id")
         return await (await self.get(thread_id)).wait_turn(turn_id)
@@ -267,6 +297,7 @@ class RuntimeThreadManager:
 
     @staticmethod
     def require_safe_path_basename(value: object, name: str) -> str:
+        """Validate an identifier before using it as a portable rollout filename."""
         RuntimeThreadManager._require_ref(value, name)
         assert isinstance(value, str)
         stem = value.split(".", 1)[0].upper()
@@ -285,4 +316,5 @@ class RuntimeThreadManager:
 
     @property
     def state(self) -> str:
+        """Expose whether this manager can still accept thread operations."""
         return self._state

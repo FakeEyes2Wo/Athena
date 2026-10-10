@@ -3,6 +3,7 @@ import unittest
 
 import pytest
 
+from athena.app_server.exceptions import ClosedError
 from athena.app_server.protocol import (
     ClientNotification,
     ErrorCode,
@@ -189,3 +190,83 @@ class MessageProcessorTests(unittest.IsolatedAsyncioTestCase):
             "thread:1", "turn:1", [{"id": "q1", "question": "which?"}], timeout=0.05
         )
         self.assertIsNone(result)
+
+    async def test_full_backlog_rejects_request_but_accepts_control_reply(self):
+        await self.initialize()
+        self.executor.release = asyncio.Event()
+        for rid in range(1, 9):
+            await self.transport.send_request(
+                RequestEnvelope(request_id=rid, method=Method.THREAD_START)
+            )
+        for _ in range(100):
+            if len(self.executor.calls) == 8:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(len(self.executor.calls), 8)
+        for rid in range(9, 18):
+            await self.transport.send_request(
+                RequestEnvelope(request_id=rid, method=Method.THREAD_START)
+            )
+        overloaded = await asyncio.wait_for(
+            self.transport.recv_response_or_control(), 1
+        )
+        self.assertEqual(overloaded.request_id, 17)
+        self.assertEqual(overloaded.error.code, ErrorCode.OVERLOADED)
+        approval = asyncio.create_task(self.processor.request_approval("t", "u", "ok?"))
+        request = await asyncio.wait_for(self.transport.recv_response_or_control(), 1)
+        await self.transport.send_server_request_reply(
+            ServerRequestReply(request.server_call_id, result={"approved": True})
+        )
+        self.assertTrue(await asyncio.wait_for(approval, 1))
+        self.executor.release.set()
+
+    async def test_shutdown_fails_pending_server_call(self):
+        pending = asyncio.create_task(self.processor.request_user_input("t", "u", []))
+        await asyncio.wait_for(self.transport.recv_response_or_control(), 1)
+        await self.processor.shutdown()
+        with self.assertRaises(ClosedError):
+            await asyncio.wait_for(pending, 1)
+        self.assertEqual(self.processor._pending_server_calls, {})
+
+    async def test_shutdown_unblocks_server_call_with_full_send_queue(self):
+        transport = Transport(control_capacity=1)
+        processor = MessageProcessor(transport)
+        await processor.start()
+        await transport.send_response(ResponseEnvelope(request_id=99, result={}))
+        pending = asyncio.create_task(processor.request_approval("t", "u", "ok?"))
+        await asyncio.sleep(0)
+        await processor.shutdown()
+        with self.assertRaises(ClosedError):
+            await asyncio.wait_for(pending, 1)
+        self.assertEqual(processor._pending_server_calls, {})
+        await transport.aclose()
+
+    async def test_cancel_server_call_cleans_pending(self):
+        pending = asyncio.create_task(self.processor.request_approval("t", "u", "ok?"))
+        await asyncio.wait_for(self.transport.recv_response_or_control(), 1)
+        pending.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await pending
+        self.assertEqual(self.processor._pending_server_calls, {})
+
+    async def test_shutdown_completes_when_client_stops_reading_responses(self):
+        transport = Transport(control_capacity=1)
+        processor = MessageProcessor(transport, max_inflight=1, max_pending=1)
+        executor = RecordingExecutor()
+        executor.release = asyncio.Event()
+        processor.set_executor(executor)
+        await processor.start()
+        processor._state = "READY"
+        await transport.send_response(ResponseEnvelope(request_id=99, result={}))
+        await transport.send_request(
+            RequestEnvelope(request_id=1, method=Method.THREAD_START)
+        )
+        await asyncio.wait_for(executor.started.wait(), 1)
+        await transport.send_request(
+            RequestEnvelope(request_id=2, method=Method.THREAD_START)
+        )
+        await asyncio.sleep(0)
+        await asyncio.wait_for(processor.shutdown(timeout=0.01), 0.5)
+        self.assertTrue(transport.closed)
+        self.assertTrue(processor._dispatcher_task.done())
+        self.assertEqual(processor._inflight, {})

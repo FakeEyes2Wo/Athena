@@ -26,32 +26,6 @@ VALIDATE_AGENT_TYPE = "validate"
 PLAN_AGENT_TYPE = "plan"
 
 
-def _register(
-    registry: AgentTypeRegistry,
-    *,
-    provider: object,
-    artifacts: ArtifactStore,
-    workspace: Path | Callable[[str], Path],
-    runtime: ExecutionRuntime,
-    agent_type: str,
-    output_type: type,
-    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
-    name: str | None = None,
-) -> None:
-    """Single registration path for thin prompt-driven task agents."""
-    register_prompt_agent(
-        registry,
-        agent_type=agent_type,
-        output_type=output_type,
-        workspace=workspace,
-        runtime=runtime,
-        provider=provider,
-        artifacts=artifacts,
-        extra_tools=extra_tools,
-        name=name,
-    )
-
-
 class GeneralResult(BaseModel):
     """General Agent 的通用杂活结果."""
 
@@ -79,7 +53,7 @@ def register_data_agent(
     extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh Data Agent factory bound to the EDA workspace."""
-    _register(
+    register_prompt_agent(
         registry,
         provider=provider,
         artifacts=artifacts,
@@ -101,7 +75,7 @@ def register_general_agent(
     extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh General Agent factory rooted at ``project_root``."""
-    _register(
+    register_prompt_agent(
         registry,
         provider=provider,
         artifacts=artifacts,
@@ -122,7 +96,7 @@ def register_validate_agent(
     runtime: ExecutionRuntime,
 ) -> None:
     """Register fresh validate Agent factories bound to one isolated workspace."""
-    _register(
+    register_prompt_agent(
         registry,
         provider=provider,
         artifacts=artifacts,
@@ -143,7 +117,7 @@ def register_plan_agent(
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
 ) -> None:
     """Register fresh PlanAgent factories bound to each Hypothesis workspace."""
-    _register(
+    register_prompt_agent(
         registry,
         provider=provider,
         artifacts=artifacts,

@@ -7,6 +7,8 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 
 ## 首读
 
+- [源码改进与冗余清单](reviews/2026-10-10-source-improvements.md)：已复现问题、静态发现、适用路径和验证证据。
+- [Codex app-server 差异台账](reviews/codex-app-server-comparison.md)：固定上游版本、设计差异及后续跟踪验收条件。
 - [项目目录导航](repository-layout.md)：源码、测试、工具和历史材料的位置。
 - [冗余机制阅读记录](reviews/2026-10-10-redundant-mechanisms.md)：本次 subagent 阅读发现及后续合并前的验证边界。
 

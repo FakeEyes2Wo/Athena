@@ -8,7 +8,6 @@ from athena.app_server.events import FairMux, Subscription
 from athena.app_server.lifecycle import (
     AppServer,
     SubscriptionRegistry,
-    ThreadEventHandlerRegistry,
 )
 from athena.app_server.protocol import EventNotification, Method
 from athena.app_server.thread_manager import RuntimeThreadManager
@@ -37,13 +36,6 @@ class SubscriptionTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_handler_registry_tracks_current_placeholder(self) -> None:
-        registry = ThreadEventHandlerRegistry()
-        await registry.attach("thread:1")
-        self.assertEqual(registry._handlers, {"thread:1": None})
-        await registry.stop_all()
-        self.assertEqual(registry._handlers, {})
-
     async def test_subscription_registry_adds_and_removes_mux_entry(self) -> None:
         transport = Transport()
         mux = FairMux(transport.send_event)

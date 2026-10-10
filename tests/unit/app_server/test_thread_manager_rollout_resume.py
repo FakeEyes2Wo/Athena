@@ -1,6 +1,7 @@
 ﻿import asyncio
 from pathlib import Path
 
+import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from athena.app_server.thread_manager import RuntimeThreadManager
@@ -41,6 +42,16 @@ class _CaptureRunner:
             self.captured.append([repr(m) for m in memory.items])
             memory.append(ModelRequest(parts=[UserPromptPart(content="echo")]))
         return _Outcome("art:x")
+
+
+class _TurnHistoryRunner:
+    def __init__(self):
+        self.captured: list[list[str]] = []
+
+    async def run_with_context(self, thread, turn, emit, memory, cancel):
+        self.captured.append([repr(message) for message in memory.items])
+        memory.append(ModelRequest(parts=[UserPromptPart(content=turn.request_ref)]))
+        return _Outcome(f"ctx:{turn.turn_id}")
 
 
 async def test_deterministic_rollout_resumes_context(tmp_path: Path):
@@ -86,3 +97,58 @@ async def test_restart_resumes_memory_from_deterministic_rollout(tmp_path: Path)
     assert second.captured, "restarted agent should see restored memory"
     assert any("echo" in line for line in second.captured[0])
     await manager2.aclose("done")
+
+
+async def test_fork_has_isolated_rollout_at_requested_completed_turn(tmp_path: Path):
+    rollout_dir = tmp_path / "sessions"
+    runner = _TurnHistoryRunner()
+    manager = RuntimeThreadManager(
+        runner, ctx=ContextManager(), rollout_dir=rollout_dir
+    )
+    try:
+        parent = await manager.start("agent-1", "ctx0")
+        first = await manager.submit(parent.thread_id, "first-prompt")
+        parent_handle = await manager.get(parent.thread_id)
+        await eventually(lambda: parent_handle.state == "idle")
+        second = await manager.submit(parent.thread_id, "second-prompt")
+        await eventually(lambda: parent_handle.state == "idle")
+
+        child = await manager.fork(parent.thread_id, after_turn_id=first.turn_id)
+        assert child.context_ref == f"ctx:{first.turn_id}"
+        await manager.submit(child.thread_id, "child-prompt")
+        child_handle = await manager.get(child.thread_id)
+        await eventually(lambda: child_handle.state == "idle")
+
+        child_seen = runner.captured[2]
+        assert any("first-prompt" in item for item in child_seen)
+        assert not any("second-prompt" in item for item in child_seen)
+        parent_path = rollout_dir / "agent-1.jsonl"
+        child_path = rollout_dir / f"{child.thread_id}.jsonl"
+        assert child_path != parent_path
+        child_history = resume_context_sync(child_path).items
+        assert any("first-prompt" in repr(item) for item in child_history)
+        assert not any("second-prompt" in repr(item) for item in child_history)
+        assert second.turn_id != first.turn_id
+    finally:
+        await manager.aclose("done")
+
+
+async def test_in_memory_fork_preserves_latest_but_rejects_unavailable_old_history():
+    runner = _TurnHistoryRunner()
+    manager = RuntimeThreadManager(runner, ctx=ContextManager())
+    try:
+        parent = await manager.start("agent", "ctx0")
+        handle = await manager.get(parent.thread_id)
+        first = await manager.submit(parent.thread_id, "first-prompt")
+        await eventually(lambda: handle.state == "idle")
+        latest = await manager.submit(parent.thread_id, "latest-prompt")
+        await eventually(lambda: handle.state == "idle")
+        child = await manager.fork(parent.thread_id, after_turn_id=latest.turn_id)
+        await manager.submit(child.thread_id, "child-prompt")
+        child_handle = await manager.get(child.thread_id)
+        await eventually(lambda: child_handle.state == "idle")
+        assert any("latest-prompt" in item for item in runner.captured[2])
+        with pytest.raises(KeyError, match="rollout boundary"):
+            await manager.fork(parent.thread_id, after_turn_id=first.turn_id)
+    finally:
+        await manager.aclose("done")

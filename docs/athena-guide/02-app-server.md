@@ -287,12 +287,15 @@ accept_turn
 ```text
 Transport
 → FairMux
-→ ThreadEventHandlerRegistry
 → SubscriptionRegistry
 → MessageProcessor + ExecutionAdapter
 → AthenaClient + ClientWorker
 → initialize 握手
 ```
+
+Thread 事件由 `SubscriptionRegistry` 连接到 `FairMux`；原先仅保存占位值的
+`ThreadEventHandlerRegistry` 已删除。请求等待队列受 `max_pending` 限制，
+满载时返回 `OVERLOADED`；关闭会结束待回复的服务端调用并关闭 transport。
 
 关闭：
 

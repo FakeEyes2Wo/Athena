@@ -1,7 +1,7 @@
 ﻿import asyncio
 import unittest
 
-from athena.app_server.exceptions import OverloadedError
+from athena.app_server.exceptions import ClosedError, OverloadedError
 from athena.app_server.protocol import (
     ClientNotification,
     EventNotification,
@@ -94,13 +94,68 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         await transport.aclose()
         self.assertTrue(transport.closed)
 
-    async def test_full_lane_close_completes_after_consumer_drains(self) -> None:
+    async def test_close_with_full_lane_preserves_messages_then_returns_eof(
+        self,
+    ) -> None:
         transport = Transport(control_capacity=1, event_capacity=1)
         request = RequestEnvelope(request_id=1, method="one")
         await transport.send_request(request)
-        closing = asyncio.create_task(transport.aclose())
-        await asyncio.sleep(0)
-        self.assertFalse(closing.done())
+        await asyncio.wait_for(transport.aclose(), timeout=0.1)
         self.assertIs(await transport.recv_client_message(), request)
-        await asyncio.wait_for(closing, timeout=0.1)
         self.assertIsNone(await transport.recv_client_message())
+
+    async def test_close_wakes_waiting_reader(self) -> None:
+        transport = Transport()
+        reader = asyncio.create_task(transport.recv_event())
+        await asyncio.sleep(0)
+        await transport.aclose()
+        self.assertIsNone(await asyncio.wait_for(reader, timeout=0.1))
+
+    async def test_close_before_scheduled_send_rejects_without_enqueue(self) -> None:
+        transport = Transport()
+        send = asyncio.create_task(
+            transport.send_request(RequestEnvelope(request_id=1, method="late"))
+        )
+        await transport.aclose()
+        with self.assertRaises(ClosedError):
+            await send
+        self.assertTrue(transport._c2s.empty())
+
+    async def test_cancelled_reader_does_not_steal_concurrent_event(self) -> None:
+        transport = Transport()
+        reader = asyncio.create_task(transport.recv_event())
+        await asyncio.sleep(0)
+        reader.cancel()
+        event = EventNotification(
+            subscription_id="sub:1",
+            thread_id="thread:1",
+            turn_id=None,
+            sequence=1,
+            kind="item",
+            event_ref="artifact:item",
+        )
+        await transport.send_event(event)
+        with self.assertRaises(asyncio.CancelledError):
+            await reader
+        self.assertIs(await transport.recv_event(), event)
+
+    async def test_close_wakes_waiting_ready_barrier(self) -> None:
+        transport = Transport()
+        waiting = asyncio.create_task(transport.wait_ready())
+        await asyncio.sleep(0)
+        await transport.aclose()
+        with self.assertRaises(ClosedError):
+            await asyncio.wait_for(waiting, timeout=0.1)
+
+    async def test_close_wakes_blocked_writer_and_rejects_later_writes(self) -> None:
+        transport = Transport(control_capacity=1)
+        await transport.send_request(RequestEnvelope(request_id=1, method="one"))
+        blocked = asyncio.create_task(
+            transport.send_request(RequestEnvelope(request_id=2, method="two"))
+        )
+        await asyncio.sleep(0)
+        await transport.aclose()
+        with self.assertRaises(ClosedError):
+            await asyncio.wait_for(blocked, timeout=0.1)
+        with self.assertRaises(ClosedError):
+            await transport.send_response(ResponseEnvelope(request_id=3, result={}))

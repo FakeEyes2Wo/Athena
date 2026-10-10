@@ -53,6 +53,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.server.state, "READY")
             self.assertTrue(app.transport._ready.is_set())
             self.assertFalse(app.transport.closed)
+            self.assertFalse(hasattr(app, "event_handlers"))
         finally:
             await cleanup_app(app)
 

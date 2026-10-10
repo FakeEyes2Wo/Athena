@@ -7,8 +7,8 @@ use tokio::sync::watch;
 
 /// OpenAI-compatible Chat Completions streaming provider.
 ///
-/// This performs real network I/O and is therefore not exercised by the crate's
-/// tests (which use a fake provider); it mirrors the Python `ResponsesProvider`.
+/// Local HTTP tests cover stream failures and cancellation without contacting a
+/// model service. This provider uses the Chat Completions wire format.
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
@@ -83,118 +83,185 @@ async fn run_stream(
     cancel: watch::Receiver<bool>,
     tx: EventTx,
 ) {
-    let resp = match client.post(&url).bearer_auth(&key).json(&body).send().await {
+    let mut cancel = cancel;
+    if *cancel.borrow() {
+        send_error(&tx, "cancelled");
+        return;
+    }
+    let response = tokio::select! {
+        biased;
+        _ = wait_for_cancel(&mut cancel) => {
+            send_error(&tx, "cancelled");
+            return;
+        }
+        response = client.post(&url).bearer_auth(&key).json(&body).send() => response,
+    };
+    let resp = match response {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.unbounded_send(ProviderEvent::Error {
-                message: format!("request failed: {e}"),
-            });
+            send_error(&tx, &format!("request failed: {e}"));
             return;
         }
     };
+    if !resp.status().is_success() {
+        send_error(&tx, &format!("request returned HTTP {}", resp.status()));
+        return;
+    }
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     let mut text = String::new();
     let mut finish = String::new();
     let mut calls: BTreeMap<u64, (String, String, String)> = BTreeMap::new();
 
-    while let Some(chunk) = stream.next().await {
-        if *cancel.borrow() {
-            let _ = tx.unbounded_send(ProviderEvent::Error {
-                message: "cancelled".into(),
-            });
-            return;
-        }
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&mut cancel) => {
+                send_error(&tx, "cancelled");
+                return;
+            }
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = next else { break };
         let bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
-                let _ = tx.unbounded_send(ProviderEvent::Error {
-                    message: format!("stream read failed: {e}"),
-                });
+                send_error(&tx, &format!("stream read failed: {e}"));
                 return;
             }
         };
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        buffer.extend_from_slice(&bytes);
 
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer.drain(..=pos);
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data == "[DONE]" {
-                emit_calls(&mut calls, &tx);
-                let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
-                    finish_reason: if finish.is_empty() {
-                        "stop".into()
-                    } else {
-                        finish.clone()
-                    },
-                    accumulated_text: text.clone(),
-                });
-                return;
+        while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = buffer.drain(..=pos).collect();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
             }
-            let Ok(value) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
-            for choice in value
-                .get("choices")
-                .and_then(|c| c.as_array())
-                .into_iter()
-                .flatten()
-            {
-                if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
-                    finish = reason.to_string();
-                }
-                let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
-                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-                    && !content.is_empty()
-                {
-                    text.push_str(content);
-                    let _ = tx.unbounded_send(ProviderEvent::TextDelta {
-                        delta: content.to_string(),
-                        accumulated: text.clone(),
+            match process_line(&line, &mut text, &mut finish, &mut calls, &tx) {
+                Ok(true) => {
+                    let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
+                        finish_reason: if finish.is_empty() {
+                            "stop".into()
+                        } else {
+                            finish
+                        },
+                        accumulated_text: text,
                     });
+                    return;
                 }
-                for call in delta
-                    .get("tool_calls")
-                    .and_then(|t| t.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-                    let entry = calls.entry(idx).or_default();
-                    if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
-                        entry.0 = id.to_string();
-                    }
-                    if let Some(func) = call.get("function") {
-                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                            entry.1 = name.to_string();
-                        }
-                        if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
-                            entry.2.push_str(args);
-                        }
-                    }
+                Ok(false) => {}
+                Err(error) => {
+                    send_error(&tx, &error);
+                    return;
                 }
-            }
-            if finish == "tool_calls" {
-                emit_calls(&mut calls, &tx);
-                finish.clear();
             }
         }
     }
 
-    emit_calls(&mut calls, &tx);
-    let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
-        finish_reason: if finish.is_empty() {
-            "stop".into()
-        } else {
-            finish
-        },
-        accumulated_text: text,
+    if !buffer.is_empty() {
+        match process_line(&buffer, &mut text, &mut finish, &mut calls, &tx) {
+            Ok(true) => {
+                let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
+                    finish_reason: if finish.is_empty() {
+                        "stop".into()
+                    } else {
+                        finish
+                    },
+                    accumulated_text: text,
+                });
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                send_error(&tx, &error);
+                return;
+            }
+        }
+    }
+    send_error(&tx, "stream ended before the [DONE] marker");
+}
+
+async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
+    while !*cancel.borrow() {
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn send_error(tx: &EventTx, message: &str) {
+    let _ = tx.unbounded_send(ProviderEvent::Error {
+        message: message.to_string(),
     });
+}
+
+fn process_line(
+    line: &[u8],
+    text: &mut String,
+    finish: &mut String,
+    calls: &mut BTreeMap<u64, (String, String, String)>,
+    tx: &EventTx,
+) -> Result<bool, String> {
+    let line = std::str::from_utf8(line).map_err(|e| format!("invalid UTF-8 in SSE: {e}"))?;
+    let Some(data) = line.trim().strip_prefix("data:") else {
+        return Ok(false);
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        emit_calls(calls, tx);
+        return Ok(true);
+    }
+    let value: Value = serde_json::from_str(data).map_err(|e| format!("invalid SSE JSON: {e}"))?;
+    if let Some(error) = value.get("error") {
+        return Err(format!("provider returned an error: {error}"));
+    }
+    for choice in value
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+            *finish = reason.to_string();
+        }
+        let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+        if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+            && !content.is_empty()
+        {
+            text.push_str(content);
+            let _ = tx.unbounded_send(ProviderEvent::TextDelta {
+                delta: content.to_string(),
+                accumulated: text.clone(),
+            });
+        }
+        for call in delta
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+            let entry = calls.entry(idx).or_default();
+            if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
+                entry.0 = id.to_string();
+            }
+            if let Some(func) = call.get("function") {
+                if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                    entry.1 = name.to_string();
+                }
+                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                    entry.2.push_str(args);
+                }
+            }
+        }
+    }
+    if finish == "tool_calls" {
+        emit_calls(calls, tx);
+        finish.clear();
+    }
+    Ok(false)
 }
 
 fn emit_calls(calls: &mut BTreeMap<u64, (String, String, String)>, tx: &EventTx) {

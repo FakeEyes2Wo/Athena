@@ -24,7 +24,6 @@ EXPECTED_EXPORTS = {
     "ProtocolError",
     "RpcException",
     "SubscriptionRegistry",
-    "ThreadEventHandlerRegistry",
 }
 
 
