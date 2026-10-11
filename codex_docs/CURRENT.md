@@ -1,5 +1,9 @@
 ﻿# Current Athena Work
 
+Active plan (awaiting user review before execution):
+- `docs/codex_docs/2026-10-10-primer-gui-redesign-plan.md`
+- Spec: `docs/architecture/2026-10-10-primer-gui-redesign-design.md`
+
 Completed source commit, independent review and push:
 - `docs/codex_docs/2026-10-11-source-repair-review-completion.md`
 
