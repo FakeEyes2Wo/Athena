@@ -1,68 +1,160 @@
 .composer {
+  position: relative;
   width: 100%;
-  max-width: 860px;
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md) 24px var(--space-xl);
-  border-top: 1px solid var(--border);
-  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surface-muted) 55%, transparent));
-}
-.composer__input {
-  width: 100%;
-  padding: var(--space-md) 14px;
-  border-radius: var(--radius-btn);
-  border: 1px solid var(--border);
-  background: var(--surface-muted);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-xs);
-  resize: none;
-  font-size: 14px;
-  line-height: 1.5;
-  font-family: var(--font-sans);
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
-    box-shadow var(--dur) var(--ease);
-}
-.composer__input:hover {
-  border-color: var(--border-strong);
-}
-.composer__input:focus {
-  outline: none;
-  border-color: var(--border-focus);
+  gap: 4px;
+  padding: 12px 12px 10px 16px;
+  border-radius: 20px;
   background: var(--surface);
-  box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-sm);
+  box-shadow: var(--shadow-composer);
+  cursor: text;
+  transition: box-shadow var(--dur) var(--ease);
 }
-.composer__send {
-  align-self: flex-end;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px var(--space-xl);
-  height: 34px;
-  border-radius: var(--radius-btn);
-  border: none;
-  background: var(--accent);
-  color: #fff;
-  box-shadow: 0 1px 2px var(--accent-soft), var(--shadow-xs);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+
+.composer:focus-within {
+  box-shadow: 0 2px 16px rgba(41, 37, 30, 0.08), 0 0 0 1px var(--border-strong);
 }
-.composer__send:hover:not(:disabled) {
-  background: var(--accent-hover);
-  box-shadow: 0 4px 12px var(--accent-soft);
-}
-.composer__send:active:not(:disabled) {
-  transform: translateY(1px);
-}
-.composer__send:disabled {
-  opacity: 0.4;
+
+.composer[data-disabled] {
+  background: var(--surface-muted);
   cursor: default;
 }
-.composer__hint {
-  font-size: 11px;
+
+.large {
+  padding: 16px 14px 12px 18px;
+  border-radius: 22px;
+}
+
+.input {
+  width: 100%;
+  min-height: 26px;
+  max-height: 240px;
+  padding: 2px 0;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.6;
+  font-family: var(--font-sans);
+}
+
+.large .input {
+  min-height: 52px;
+  font-size: 15.5px;
+}
+
+/* The composer's :focus-within ring is the focus indicator; the global
+   :focus-visible outline would draw a second box inside it. */
+.input:focus-visible {
+  outline: none;
+}
+
+.input::placeholder {
   color: var(--text-tertiary);
-  margin-top: 2px;
+}
+
+.input:disabled {
+  cursor: not-allowed;
+}
+
+.bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.toolbar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.send {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.send:disabled {
+  background: var(--border-strong);
+  color: var(--surface);
+  cursor: default;
+}
+
+/* ===== Slash command menu ===== */
+.menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 8px);
+  z-index: 10;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-md);
+  animation: pop-in var(--dur) var(--ease) both;
+}
+
+.menuItem {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem[aria-selected="true"] {
+  background: var(--hover);
+}
+
+.menuCommand {
+  min-width: 150px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.menuArgs {
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.menuDesc {
+  font-size: 12.5px;
+  color: var(--text-secondary);
 }

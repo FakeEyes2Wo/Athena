@@ -1,69 +1,73 @@
-import { useCallback, useEffect, useState } from "react";
-import { errorMessage } from "../lib/errors";
-import { experimentsList, type ExperimentDetail } from "../lib/tauri-bridge";
+import { experimentsList } from "../lib/tauri-bridge";
+import { formatMetric } from "../lib/labels";
+import { useRemoteData } from "../hooks/useRemoteData";
 import { EmptyState } from "./common/EmptyState";
+import { Icon } from "./common/Icon";
 import { StatusBadge } from "./common/StatusBadge";
 
-function primaryOf(d: ExperimentDetail): string {
-  return d.experiment.eval?.primary != null ? d.experiment.eval.primary.toFixed(4) : "—";
-}
-
-function winnerOf(d: ExperimentDetail): string {
-  return d.experiment.verdict?.winner ?? "—";
-}
-
-/** Compact, ordered timeline of experiment lifecycle events. */
+/** Compact, newest-first list of experiments for the conversation inspector. */
 export default function ExperimentLog() {
-  const [experiments, setExperiments] = useState<ExperimentDetail[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await experimentsList();
-      setExperiments(res.experiments);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  const { data, error, loading, refresh } = useRemoteData(() => experimentsList().then((res) => res.experiments));
+  const experiments = [...(data ?? [])].reverse();
 
   return (
     <div className="detail-panel">
       <div className="panel-toolbar">
-        <h3>实验日志 ({experiments.length})</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()} disabled={loading}>
-          {loading ? "加载中…" : "刷新"}
+        <h3>
+          实验记录 <span className="panel-toolbar__count">{experiments.length}</span>
+        </h3>
+        <button
+          type="button"
+          className="icon-btn icon-btn--sm"
+          onClick={() => void refresh()}
+          disabled={loading}
+          aria-label="刷新"
+          title="刷新"
+        >
+          <Icon name="refresh" size={14} className={loading ? "icon--spin" : undefined} />
         </button>
       </div>
 
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+      {error && (
+        <div className="callout callout--error" role="alert">
+          <Icon name="alert" size={15} />
+          <div className="callout__body">{error}</div>
+        </div>
+      )}
 
       {experiments.length === 0 ? (
-        <EmptyState icon="log" message="暂无实验记录。启动搜索后将在此处按序展示实验生命周期。" />
+        <EmptyState
+          icon={loading ? "loader" : "experiments"}
+          message={loading ? "加载中…" : "暂无实验记录。研究开始后会在这里按时间列出。"}
+        />
       ) : (
-        <ol className="timeline">
-          {experiments.map((d) => (
-            <li key={d.experiment.id} className="timeline__item">
-              <StatusBadge status={d.experiment.status} />
-              <div className="timeline__body">
-                <div className="timeline__head">
-                  <span className="timeline__id">
-                    {d.experiment.id}
-                    {d.sota ? " ★" : ""}
+        <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+          {experiments.map((item) => (
+            <li
+              key={item.experiment.id}
+              style={{
+                padding: "10px 12px",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--surface)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <StatusBadge status={item.experiment.status} />
+                <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                  {item.experiment.id}
+                </span>
+                {item.sota && (
+                  <span className="badge badge--gold">
+                    <Icon name="star" size={10} /> SOTA
                   </span>
-                  <span>primary {primaryOf(d)}</span>
-                  <span>winner {winnerOf(d)}</span>
-                </div>
-                <div className="timeline__statement">{d.hypothesis.statement}</div>
+                )}
+                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{formatMetric(item.experiment.eval?.primary)}</span>
               </div>
+              <div style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text-primary)" }}>{item.hypothesis.statement}</div>
             </li>
           ))}
         </ol>

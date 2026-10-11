@@ -44,7 +44,7 @@ export interface HypothesisData {
   statement: string;
   intervention: string;
   expected_effect: string;
-  status: "PROPOSED" | "SUPPORTED" | "REFUTED" | "REJECTED";
+  status: "PROPOSED" | "SUPPORTED" | "REFUTED" | "INCONCLUSIVE" | "REJECTED";
   evidence_refs: string[];
   patience_grant: number;
   patience_evidence_ref: string | null;
@@ -424,7 +424,7 @@ export interface TraceMessage {
   role: TraceRole;
   kind: string;
   content: string;
-  args?: Record<string, unknown>;
+  args?: unknown;
 }
 
 export interface TraceDetail {
@@ -482,7 +482,7 @@ export interface HypothesisObject {
   statement: string;
   intervention: string;
   expected_effect: string;
-  status: "PROPOSED" | "SUPPORTED" | "REFUTED" | "REJECTED";
+  status: "PROPOSED" | "SUPPORTED" | "REFUTED" | "INCONCLUSIVE" | "REJECTED";
   evidence_refs: string[];
   parent_id: string | null;
   supersedes: string[];

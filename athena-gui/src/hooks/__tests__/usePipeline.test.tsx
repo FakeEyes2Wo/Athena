@@ -1583,4 +1583,103 @@ describe("usePipeline", () => {
     expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith("default");
     expect(result.current.sessions).toEqual([]);
   });
+
+  it("re-runs clarification after a revision until the draft is ready again", async () => {
+    bridgeMocks.taskClarificationStart
+      .mockResolvedValueOnce(readyDraft)
+      .mockResolvedValueOnce({
+        ...readyDraft,
+        revision: 4,
+        understanding: { ...readyDraft.understanding, primary_metric: "auc" },
+      });
+    bridgeMocks.taskClarificationRevise.mockResolvedValue({ ...readyDraft, revision: 3, status: "CLARIFYING" });
+
+    const { result } = renderHook(() => usePipeline());
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+
+    await act(async () => {
+      await result.current.reviseDraft("use AUC");
+    });
+
+    expect(bridgeMocks.taskClarificationRevise).toHaveBeenCalledWith("draft-1", 2, "use AUC");
+    // revise only persists the instruction; the loop runs inside start-or-resume.
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledTimes(2);
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenLastCalledWith("predict churn");
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+    expect(result.current.activeDraft).toMatchObject({
+      revision: 4,
+      understanding: { primary_metric: "auc" },
+    });
+  });
+
+  it("falls back to the submitted task when the revise result is only a summary", async () => {
+    bridgeMocks.taskClarificationStart.mockResolvedValueOnce(readyDraft).mockResolvedValueOnce(readyDraft);
+    bridgeMocks.taskClarificationRevise.mockResolvedValue({ draft_id: "draft-1", revision: 3, status: "CLARIFYING" });
+
+    const { result } = renderHook(() => usePipeline());
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+    await act(async () => {
+      await result.current.reviseDraft("use AUC");
+    });
+
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenLastCalledWith("predict churn");
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+  });
+
+  it("drives clarification again after retrying a failed draft", async () => {
+    const failedDraft = {
+      ...readyDraft,
+      status: "FAILED",
+      failure: { code: "provider_unavailable", message: "LLM down", retryable: true },
+    };
+    bridgeMocks.taskClarificationStart.mockResolvedValueOnce(failedDraft).mockResolvedValueOnce(readyDraft);
+
+    const { result } = renderHook(() => usePipeline());
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+    expect(result.current.status).toBe("FAILED");
+
+    await act(async () => {
+      await result.current.retryDraft();
+    });
+
+    expect(bridgeMocks.taskClarificationRetry).toHaveBeenCalledWith("draft-1", 2);
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+  });
+
+  it("reports a failed cancellation in the conversation", async () => {
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    bridgeMocks.taskClarificationCancel.mockRejectedValue(new Error("cancel failed"));
+
+    const { result } = renderHook(() => usePipeline());
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+    await act(async () => {
+      await result.current.cancelDraft().catch(() => undefined);
+    });
+
+    const last = result.current.viewModel.messages[result.current.viewModel.messages.length - 1];
+    expect(last).toMatchObject({ kind: "error", content: "cancel failed" });
+  });
+
+  it("renames a session and persists the title per workspace", async () => {
+    const { result } = renderHook(() => usePipeline("C:/ws"));
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalled());
+
+    act(() => {
+      result.current.renameSession("default", "流失预测");
+    });
+
+    expect(JSON.parse(localStorage.getItem("athena-session-titles:C:/ws") ?? "{}")).toMatchObject({
+      default: "流失预测",
+    });
+  });
 });

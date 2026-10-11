@@ -40,15 +40,14 @@ export const CONTEXT_PANELS = [
 
 export type ContextPanelKey = (typeof CONTEXT_PANELS)[number];
 
-/** 顶层模块（功能轨入口）：会话 + 六个研究视图 + 设置。 */
+/** 顶层视图（侧栏入口）：对话 + 五个研究视图。设置以对话框形式打开，不是视图。 */
 export type ModuleKey =
   | "session"
   | "research-tree"
   | "experiments"
   | "eda"
   | "llm-io"
-  | "report"
-  | "settings";
+  | "report";
 
 export type PipelineStatus = "idle" | "running" | "paused" | "completed" | "error";
 

@@ -1,10 +1,20 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/athena.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Athena GUI</title>
+    <meta name="description" content="Athena — 对话式自动机器学习研究工作台" />
+    <title>Athena</title>
+    <script>
+      // Resolve the theme before first paint (mirrors src/hooks/useTheme.ts) so
+      // dark-mode users don't see a light flash while the bundle loads.
+      try {
+        var t = localStorage.getItem("athena-theme");
+        if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

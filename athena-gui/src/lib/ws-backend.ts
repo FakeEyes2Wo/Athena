@@ -4,6 +4,10 @@ import { toBackendError } from "./rpc-error";
 
 type EventHandler = (kind: string, data: unknown) => void;
 
+/** Connection lifecycle of the browser-mode gateway socket. */
+export type BackendStatus = "connecting" | "open" | "closed";
+type StatusListener = (status: BackendStatus) => void;
+
 interface PendingCall {
   resolve(value: unknown): void;
   reject(error: Error): void;
@@ -50,9 +54,31 @@ export class WsBackend {
   private connectPromise: Promise<WebSocket> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private attempts = 0;
+  private status: BackendStatus = "connecting";
+  private statusListeners = new Set<StatusListener>();
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Current connection status (``connecting`` until the first attempt settles). */
+  get currentStatus(): BackendStatus {
+    return this.status;
+  }
+
+  /** Observe connection changes; the listener is called immediately with the current status. */
+  onStatus(listener: StatusListener): () => void {
+    this.statusListeners.add(listener);
+    listener(this.status);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  private setStatus(next: BackendStatus): void {
+    if (this.status === next) return;
+    this.status = next;
+    for (const listener of this.statusListeners) listener(next);
   }
 
   connect(url: string = DEFAULT_URL): Promise<WebSocket> {
@@ -63,6 +89,7 @@ export class WsBackend {
       ws.onopen = () => {
         settled = true;
         this.attempts = 0;
+        this.setStatus("open");
         resolve(ws);
       };
       ws.onmessage = (event) => this.handleMessage(event.data);
@@ -73,6 +100,7 @@ export class WsBackend {
         if (this.ws !== ws) return;
         this.ws = null;
         this.connectPromise = null;
+        this.setStatus("closed");
         if (!settled) {
           settled = true;
           reject(new Error(`无法连接后端 ${url}，请先启动后端`));

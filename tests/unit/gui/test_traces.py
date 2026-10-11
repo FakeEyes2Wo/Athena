@@ -36,3 +36,48 @@ def test_trace_summary_and_message_projection(tmp_path) -> None:
         ("text", "go"),
         ("tool_call", "shell"),
     ]
+
+
+def test_trace_projection_reads_pydantic_ai_dumps(tmp_path) -> None:
+    from pydantic_ai.messages import (
+        ModelMessagesTypeAdapter,
+        ModelRequest,
+        ModelResponse,
+        SystemPromptPart,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+        UserPromptPart,
+    )
+
+    history = [
+        ModelRequest(
+            parts=[SystemPromptPart(content="sys"), UserPromptPart(content="go")]
+        ),
+        ModelResponse(
+            parts=[
+                TextPart(content="thinking"),
+                ToolCallPart(
+                    tool_name="shell", args='{"command": "ls"}', tool_call_id="c1"
+                ),
+            ]
+        ),
+        ModelRequest(
+            parts=[ToolReturnPart(tool_name="shell", content="ok", tool_call_id="c1")]
+        ),
+    ]
+    payload = ModelMessagesTypeAdapter.dump_python(history, mode="json")
+    (tmp_path / "plan-2.jsonl").write_text(
+        json.dumps({"seq": 0, "ts": "t", "msg": payload}), encoding="utf-8"
+    )
+
+    trace = read_trace(tmp_path, "plan-2")
+
+    assert [(m["role"], m["kind"], m["content"]) for m in trace["messages"]] == [
+        ("system", "system", "sys"),
+        ("user", "text", "go"),
+        ("assistant", "text", "thinking"),
+        ("assistant", "tool_call", "shell"),
+        ("tool", "tool_return", "ok"),
+    ]
+    assert trace["messages"][3]["args"] == {"command": "ls"}

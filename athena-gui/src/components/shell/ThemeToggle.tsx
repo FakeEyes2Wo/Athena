@@ -1,24 +1,20 @@
 import { useTheme } from "../../hooks/useTheme";
-import { Icon, type IconName } from "../common/Icon";
+import { Icon } from "../common/Icon";
 
-const META: Record<string, { icon: IconName; label: string }> = {
-  light: { icon: "moon", label: "深色" },
-  dark: { icon: "sun", label: "浅色" },
-};
-
-/** Two-state theme toggle (light ↔ dark) shown in the top bar. */
+/** Two-state theme toggle (light ↔ dark) shown in the sidebar footer. */
 export function ThemeToggle() {
   const { mode, cycleMode } = useTheme();
-  const meta = META[mode];
+  const target = mode === "light" ? "深色" : "浅色";
 
   return (
     <button
+      type="button"
       className="icon-btn"
       onClick={cycleMode}
-      aria-label={`主题：${meta.label}`}
-      title={`切换到${meta.label}`}
+      aria-label={`主题：${target}`}
+      title={`切换到${target}主题`}
     >
-      <Icon name={meta.icon} size={17} />
+      <Icon name={mode === "light" ? "moon" : "sun"} size={17} />
     </button>
   );
 }
