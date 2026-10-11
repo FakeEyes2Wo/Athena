@@ -90,6 +90,23 @@ Geist 字体依赖已全部删除。只改动前端，未触及 Python、Rust �
 - 模型轨迹消息流、报告统计、EDA 的 markdown/图片有数据形态未实机查看（无数据源）。
 - 窄于约 450px 时的「More items」菜单未实测（Tauri 窗口不会这么窄）。
 
+## 界面截图
+
+1440×900，无头 Chrome 截取。工作区为临时空目录；研究树、实验、模型轨迹中的数据与人工确认请求均为上文所述的
+开发态假数据，仅用于展示界面。
+
+| 暗色 | 亮色 |
+|---|---|
+| ![会话（暗）](../assets/primer-gui/dark-02-conversation.png) | ![会话（亮）](../assets/primer-gui/light-02-conversation.png) |
+| ![研究树与假设图（暗）](../assets/primer-gui/dark-03-research-tree.png) | ![研究树与假设图（亮）](../assets/primer-gui/light-03-research-tree.png) |
+| ![实验管理、详情与实验日志（暗）](../assets/primer-gui/dark-04-experiments.png) | ![实验管理、详情与实验日志（亮）](../assets/primer-gui/light-04-experiments.png) |
+| ![模型轨迹（暗）](../assets/primer-gui/dark-05-model-trace.png) | ![模型轨迹（亮）](../assets/primer-gui/light-05-model-trace.png) |
+| ![人工确认弹窗（暗）](../assets/primer-gui/dark-06-human-request.png) | ![人工确认弹窗（亮）](../assets/primer-gui/light-06-human-request.png) |
+
+工作区选择页（暗）：
+
+![工作区选择（暗）](../assets/primer-gui/dark-01-workspace-picker.png)
+
 ## Codex 评审处理
 
 Codex 只读评审（`codex exec --sandbox read-only`）共 7 项，`tsc --noEmit` 与 `git diff --check` 通过。
