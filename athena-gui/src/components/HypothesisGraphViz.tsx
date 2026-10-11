@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, Flash, Label } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import ReactFlow, {
   Background,
   BackgroundVariant,
   Controls,
-  Handle,
   MiniMap,
-  Position,
   MarkerType,
   type Node,
   type Edge,
@@ -16,8 +15,10 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { hypothesisGraph, type HypGraph, type HypGraphNode } from "../lib/tauri-bridge";
 import { layoutLineage } from "../lib/graphLayout";
-import { STATUS_COLORS, statusColor } from "./ResearchTreeViz";
 import { EmptyState } from "./common/EmptyState";
+import { FlowNodeCard, GraphFrame, minimapNodeClass } from "./common/FlowNodeCard";
+import { HYPOTHESIS_STATUS_VARIANT } from "./common/hypothesisStatus";
+import { Panel } from "./common/Panel";
 import styles from "./HypothesisGraphViz.module.css";
 
 const NODE_W = 220;
@@ -29,29 +30,13 @@ interface HypNodeData {
 
 /** Custom React Flow node for a single hypothesis. */
 function HypNode({ data }: { data: HypNodeData }) {
-  const colors = statusColor(data.node.status);
-  const primary =
-    data.node.primary != null ? data.node.primary.toFixed(4) : "未安排实验";
-
   return (
-    <div className="flow-node" style={{ borderColor: colors.border }}>
-      <Handle type="target" position={Position.Top} />
-      <div className="flow-node__title">
-        {data.node.statement.slice(0, 48)}
-        {data.node.statement.length > 48 ? "…" : ""}
-      </div>
-      <div className="flow-node__meta">
-        Primary: <strong>{primary}</strong>
-      </div>
-      <div
-        className="flow-node__badge"
-        style={{ background: colors.bg, borderColor: colors.border, color: colors.text }}
-      >
-        {data.node.status}
-        {data.node.sota ? " ★ SOTA" : ""}
-      </div>
-      <Handle type="source" position={Position.Bottom} />
-    </div>
+    <FlowNodeCard
+      statement={data.node.statement}
+      primaryText={data.node.primary != null ? data.node.primary.toFixed(4) : "未安排实验"}
+      status={data.node.status}
+      badge={`${data.node.status}${data.node.sota ? " ★ SOTA" : ""}`}
+    />
   );
 }
 
@@ -78,7 +63,7 @@ function buildHypGraph(graph: HypGraph): { nodes: Node[]; edges: Edge[] } {
 
   const edges: Edge[] = graph.edges.map((edge) => {
     const supersedes = edge.kind === "supersedes";
-    const color = supersedes ? "var(--danger)" : "var(--text-tertiary)";
+    const color = supersedes ? "var(--fgColor-danger)" : "var(--fgColor-muted)";
     return {
       id: edge.id,
       source: edge.source,
@@ -99,29 +84,21 @@ function buildHypGraph(graph: HypGraph): { nodes: Node[]; edges: Edge[] } {
 /** Legend describing edge and status coloring. */
 function Legend() {
   return (
-    <div className={styles["legend"]}>
-      <span className={styles["legend__title"]}>图例</span>
-      <span className={styles["legend__row"]}>
-        <span className={styles["legend__line"]} />
+    <div className={styles.legend}>
+      <span className={styles.legendTitle}>图例</span>
+      <span className={styles.legendRow}>
+        <span className={styles.legendLine} />
         谱系 (lineage)
       </span>
-      <span className={styles["legend__row"]}>
-        <span className={`${styles["legend__line"]} ${styles["legend__line--dashed"]}`} />
+      <span className={styles.legendRow}>
+        <span className={`${styles.legendLine} ${styles.legendLineDashed}`} />
         取代 (supersedes)
       </span>
-      <span className={styles["legend__swatches"]}>
-        {Object.entries(STATUS_COLORS).map(([status, colors]) => (
-          <span
-            key={status}
-            className="badge"
-            style={{
-              background: colors.bg,
-              border: `1px solid ${colors.border}`,
-              color: colors.text,
-            }}
-          >
+      <span className={styles.legendSwatches}>
+        {Object.entries(HYPOTHESIS_STATUS_VARIANT).map(([status, variant]) => (
+          <Label key={status} variant={variant} size="small">
             {status}
-          </span>
+          </Label>
         ))}
       </span>
     </div>
@@ -167,20 +144,21 @@ export default function HypothesisGraphViz() {
   const nodeCount = graphData?.nodes.length ?? 0;
 
   return (
-    <div className="detail-panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="panel-toolbar">
-        <h3>假设图 ({nodeCount} 个假设)</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()} disabled={loading}>
+    <Panel
+      fill
+      title={`假设图 (${nodeCount} 个假设)`}
+      actions={
+        <Button size="small" onClick={() => void refresh()} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
-        </button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {!graphData || nodeCount === 0 ? (
         <EmptyState icon="network" message="暂无假设图数据。启动搜索产生假设后，此处将展示谱系与取代关系。" />
       ) : (
-        <div className="graph-container" role="region" aria-label="假设图可视化">
+        <GraphFrame label="假设图可视化">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -192,19 +170,13 @@ export default function HypothesisGraphViz() {
             minZoom={0.3}
             maxZoom={2}
           >
-            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border-strong)" />
+            <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
             <Controls />
-            <MiniMap
-              nodeColor={(n) => {
-                const d = n.data as HypNodeData;
-                return statusColor(d.node.status).border;
-              }}
-              style={{ borderRadius: 8 }}
-            />
+            <MiniMap nodeClassName={(n) => minimapNodeClass((n.data as HypNodeData).node.status)} />
           </ReactFlow>
           <Legend />
-        </div>
+        </GraphFrame>
       )}
-    </div>
+    </Panel>
   );
 }

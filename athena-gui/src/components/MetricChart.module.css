@@ -1,0 +1,49 @@
+/* 指标趋势图：Recharts 曲线、数据点与浮层，全部使用 Primer 变量。 */
+
+.chart {
+  width: 100%;
+  height: 280px;
+}
+
+.dot {
+  fill: var(--data-blue-color-emphasis);
+  stroke: var(--bgColor-default);
+}
+
+.sotaDot {
+  fill: var(--fgColor-success);
+  stroke: var(--bgColor-default);
+}
+
+.tooltip {
+  padding: var(--base-size-8) var(--base-size-12);
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--overlay-bgColor);
+  box-shadow: var(--shadow-floating-small);
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-default);
+}
+
+.tooltipTitle {
+  margin-bottom: var(--base-size-4);
+  font-family: var(--fontStack-monospace);
+  font-weight: var(--base-text-weight-semibold);
+}
+
+.tooltipRow {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--base-size-12);
+  color: var(--fgColor-muted);
+}
+
+.tooltipRow strong {
+  color: var(--fgColor-default);
+}
+
+.tooltipSota {
+  margin-top: var(--base-size-4);
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-success);
+}

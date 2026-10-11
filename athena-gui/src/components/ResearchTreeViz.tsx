@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button, Checkbox, Flash, FormControl } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import ReactFlow, {
   Background,
   BackgroundVariant,
   Controls,
-  Handle,
   MiniMap,
-  Position,
   type Node,
   type Edge,
   type NodeChange,
@@ -24,22 +23,12 @@ import {
 } from "../lib/tauri-bridge";
 import { layoutLineage } from "../lib/graphLayout";
 import { EmptyState } from "./common/EmptyState";
+import { FlowNodeCard, GraphFrame, minimapNodeClass } from "./common/FlowNodeCard";
+import { Panel } from "./common/Panel";
 
 const AUTO_SAVE_MS = 30_000;
 const NODE_W = 220;
 const NODE_H = 92;
-
-/** Color palette mapping hypothesis status to visual style (semantic tokens, no literals). */
-export const STATUS_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  SUPPORTED: { bg: "var(--status-supported-bg)", border: "var(--status-supported-border)", text: "var(--status-supported-text)" },
-  REFUTED: { bg: "var(--status-refuted-bg)", border: "var(--status-refuted-border)", text: "var(--status-refuted-text)" },
-  REJECTED: { bg: "var(--status-rejected-bg)", border: "var(--status-rejected-border)", text: "var(--status-rejected-text)" },
-  PROPOSED: { bg: "var(--status-proposed-bg)", border: "var(--status-proposed-border)", text: "var(--status-proposed-text)" },
-};
-
-export function statusColor(status: string) {
-  return STATUS_COLORS[status] ?? STATUS_COLORS.PROPOSED;
-}
 
 /** Custom React Flow node rendering a research experiment with hypothesis status. */
 interface ResearchNodeData {
@@ -49,29 +38,13 @@ interface ResearchNodeData {
 }
 
 function ResearchNode({ data }: { data: ResearchNodeData }) {
-  const colors = statusColor(data.hypothesis.status);
-  const result = data.experiment.eval
-    ? data.experiment.eval.primary.toFixed(4)
-    : "无指标";
-
   return (
-    <div className="flow-node" style={{ borderColor: colors.border }}>
-      <Handle type="target" position={Position.Top} />
-      <div className="flow-node__title">
-        {data.hypothesis.statement.slice(0, 48)}
-        {data.hypothesis.statement.length > 48 ? "…" : ""}
-      </div>
-      <div className="flow-node__meta">
-        Primary: <strong>{result}</strong>
-      </div>
-      <div
-        className="flow-node__badge"
-        style={{ background: colors.bg, borderColor: colors.border, color: colors.text }}
-      >
-        {data.experiment.status}
-      </div>
-      <Handle type="source" position={Position.Bottom} />
-    </div>
+    <FlowNodeCard
+      statement={data.hypothesis.statement}
+      primaryText={data.experiment.eval ? data.experiment.eval.primary.toFixed(4) : "无指标"}
+      status={data.hypothesis.status}
+      badge={data.experiment.status}
+    />
   );
 }
 
@@ -109,45 +82,11 @@ function buildGraph(tree: ResearchTreeData): { nodes: Node[]; edges: Edge[] } {
     id: `${edge.source}->${edge.target}`,
     source: edge.source,
     target: edge.target,
-    markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "var(--text-tertiary)" },
-    style: { stroke: "var(--text-tertiary)", strokeWidth: 1.75 },
+    markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "var(--fgColor-muted)" },
+    style: { stroke: "var(--fgColor-muted)", strokeWidth: 1.75 },
   }));
 
   return { nodes, edges };
-}
-
-/** Toolbar with save, refresh, and auto-save toggle for the research tree. */
-function ControlsBar({
-  saving,
-  autoSave,
-  nodeCount,
-  onRefresh,
-  onSave,
-  onToggleAutoSave,
-}: {
-  saving: boolean;
-  autoSave: boolean;
-  nodeCount: number;
-  onRefresh: () => void;
-  onSave: () => void;
-  onToggleAutoSave: () => void;
-}) {
-  return (
-    <div className="panel-toolbar">
-      <h3>研究树 ({nodeCount} 个实验)</h3>
-      <div className="panel-toolbar__actions">
-        <button className="btn btn--subtle btn--sm" onClick={onRefresh}>刷新</button>
-        <button className="btn btn--subtle btn--sm" onClick={onSave} disabled={saving}>
-          {saving ? "保存中…" : "保存"}
-        </button>
-        <label className="switch">
-          <input type="checkbox" checked={autoSave} onChange={onToggleAutoSave} />
-          <span className="switch__track" />
-          自动保存
-        </label>
-      </div>
-    </div>
-  );
 }
 
 /**
@@ -242,26 +181,33 @@ export default function ResearchTreeViz() {
     setEdges(graph.edges);
   }, [graph.edges, graph.nodes, setEdges, setNodes]);
 
+  const actions = (
+    <>
+      <Button size="small" onClick={() => void refresh()}>
+        刷新
+      </Button>
+      <Button size="small" onClick={() => void save()} disabled={saving}>
+        {saving ? "保存中…" : "保存"}
+      </Button>
+      <FormControl>
+        <Checkbox checked={autoSave} onChange={toggleAutoSave} />
+        <FormControl.Label>自动保存</FormControl.Label>
+      </FormControl>
+    </>
+  );
+
   if (!tree || nodeCount === 0) {
     return (
-      <div className="detail-panel">
-        <ControlsBar
-          saving={saving} autoSave={autoSave} nodeCount={0}
-          onRefresh={refresh} onSave={save} onToggleAutoSave={toggleAutoSave}
-        />
-        {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+      <Panel title="研究树 (0 个实验)" actions={actions}>
+        {error && <Flash variant="danger">{error}</Flash>}
         <EmptyState icon="tree" message="暂无实验数据。启动搜索后研究树将自动构建。" />
-      </div>
+      </Panel>
     );
   }
 
   return (
-    <div className="detail-panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <ControlsBar
-        saving={saving} autoSave={autoSave} nodeCount={nodeCount}
-        onRefresh={refresh} onSave={save} onToggleAutoSave={toggleAutoSave}
-      />
-      <div className="graph-container" role="region" aria-label="研究树可视化">
+    <Panel fill title={`研究树 (${nodeCount} 个实验)`} actions={actions}>
+      <GraphFrame label="研究树可视化">
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -273,17 +219,11 @@ export default function ResearchTreeViz() {
           minZoom={0.3}
           maxZoom={2}
         >
-          <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border-strong)" />
+          <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
           <Controls />
-          <MiniMap
-            nodeColor={(n) => {
-              const d = n.data as ResearchNodeData;
-              return statusColor(d.hypothesis.status).border;
-            }}
-            style={{ borderRadius: 8 }}
-          />
+          <MiniMap nodeClassName={(n) => minimapNodeClass((n.data as ResearchNodeData).hypothesis.status)} />
         </ReactFlow>
-      </div>
-    </div>
+      </GraphFrame>
+    </Panel>
   );
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import {
   CartesianGrid,
@@ -11,6 +12,8 @@ import {
 } from "recharts";
 import { experimentsList, type ExperimentDetail } from "../lib/tauri-bridge";
 import { EmptyState } from "./common/EmptyState";
+import { Panel } from "./common/Panel";
+import styles from "./MetricChart.module.css";
 
 interface Point {
   name: string;
@@ -27,17 +30,17 @@ function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{
   if (!active || !payload || payload.length === 0) return null;
   const point = payload[0].payload;
   return (
-    <div className="chart-tooltip">
-      <div className="chart-tooltip__title">{point.name}</div>
-      <div className="chart-tooltip__row">
+    <div className={styles.tooltip}>
+      <div className={styles.tooltipTitle}>{point.name}</div>
+      <div className={styles.tooltipRow}>
         <span>primary</span>
         <strong>{point.primary.toFixed(4)}</strong>
       </div>
-      <div className="chart-tooltip__row">
+      <div className={styles.tooltipRow}>
         <span>status</span>
         <strong>{point.status}</strong>
       </div>
-      {point.sota && <div className="chart-tooltip__sota">★ SOTA</div>}
+      {point.sota && <div className={styles.tooltipSota}>★ SOTA</div>}
     </div>
   );
 }
@@ -75,54 +78,52 @@ export default function MetricChart() {
   }, [refresh]);
 
   return (
-    <div className="detail-panel" style={{ display: "flex", flexDirection: "column" }}>
-      <div className="panel-toolbar">
-        <h3>指标趋势 ({points.length})</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()} disabled={loading}>
+    <Panel
+      title={`指标趋势 (${points.length})`}
+      actions={
+        <Button size="small" onClick={() => void refresh()} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
-        </button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {points.length === 0 ? (
         <EmptyState icon="metrics" message="暂无评估指标。运行实验后此处展示 primary 指标趋势。" />
       ) : (
-        <div style={{ width: "100%", height: 280 }}>
+        <div className={styles.chart}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={points} margin={{ top: 12, right: 16, bottom: 4, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--borderColor-muted)" vertical={false} />
               <XAxis
                 dataKey="name"
-                tick={{ fontSize: 11, fill: "var(--text-secondary)" }}
+                tick={{ fontSize: 11, fill: "var(--fgColor-muted)" }}
                 tickLine={false}
-                axisLine={{ stroke: "var(--border)" }}
+                axisLine={{ stroke: "var(--borderColor-default)" }}
               />
               <YAxis
-                tick={{ fontSize: 11, fill: "var(--text-secondary)" }}
+                tick={{ fontSize: 11, fill: "var(--fgColor-muted)" }}
                 tickLine={false}
                 axisLine={false}
                 width={52}
                 domain={["auto", "auto"]}
               />
-              <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--border-strong)" }} />
+              <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--borderColor-default)" }} />
               <Line
                 type="monotone"
                 dataKey="primary"
-                stroke="var(--accent)"
+                stroke="var(--data-blue-color-emphasis)"
                 strokeWidth={2}
                 isAnimationActive={false}
                 dot={({ cx, cy, payload }: { cx?: number; cy?: number; payload?: Point }) => {
                   if (cx == null || cy == null || !payload) return <></>;
-                  const sota = payload.sota;
                   return (
                     <circle
                       cx={cx}
                       cy={cy}
-                      r={sota ? 6 : 3}
-                      fill={sota ? "var(--success)" : "var(--accent)"}
-                      stroke="var(--surface)"
-                      strokeWidth={sota ? 2 : 1}
+                      r={payload.sota ? 6 : 3}
+                      className={payload.sota ? styles.sotaDot : styles.dot}
+                      strokeWidth={payload.sota ? 2 : 1}
                     />
                   );
                 }}
@@ -132,6 +133,6 @@ export default function MetricChart() {
           </ResponsiveContainer>
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

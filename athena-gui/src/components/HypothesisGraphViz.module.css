@@ -1,39 +1,47 @@
+/* 假设图图例：浮在图容器右上角。 */
+
 .legend {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: var(--base-size-12);
+  right: var(--base-size-12);
   z-index: 5;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 10px 12px;
-  font-size: 11px;
-  color: var(--text-secondary);
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  box-shadow: var(--shadow-md);
+  gap: var(--base-size-4);
+  padding: var(--base-size-8) var(--base-size-12);
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--overlay-bgColor);
+  box-shadow: var(--shadow-floating-small);
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-muted);
 }
-.legend__title {
-  font-weight: 600;
-  color: var(--text-primary);
+
+.legendTitle {
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-default);
 }
-.legend__row {
+
+.legendRow {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--base-size-4);
 }
-.legend__line {
+
+.legendLine {
   display: inline-block;
-  width: 20px;
+  width: var(--base-size-20);
   height: 0;
-  border-top: 2px solid var(--text-tertiary);
+  border-top: 2px solid var(--fgColor-muted);
 }
-.legend__line--dashed {
-  border-top: 2px dashed var(--danger);
+
+.legendLineDashed {
+  border-top-style: dashed;
+  border-top-color: var(--fgColor-danger);
 }
-.legend__swatches {
+
+.legendSwatches {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--base-size-4);
 }
