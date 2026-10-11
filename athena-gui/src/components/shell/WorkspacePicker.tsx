@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { Button, Flash, Heading, TextInput } from "@primer/react";
+import { FileDirectoryIcon } from "@primer/octicons-react";
 import { Icon } from "../common/Icon";
 import styles from "./WorkspacePicker.module.css";
 import {
@@ -69,64 +71,61 @@ export function WorkspacePicker({
     <div className={styles.picker}>
       <div className={styles.card}>
         <div className={styles.brand}>
-          <span className={styles.mark} />
+          <span className={styles.mark} aria-hidden="true">
+            <Icon name="sparkles" size={16} />
+          </span>
           Athena
         </div>
-        <h1 className={styles.title}>选择工作区</h1>
-        <p className={styles.subtitle}>
-          选择一个项目目录开始研究，或继续使用当前工作区。
-        </p>
-
-        {error && <div className="card card--error">{error}</div>}
-
-        <div className={styles.current}>
-          <span className={styles.label}>当前工作区</span>
-          <span className={styles.path} title={currentRoot ?? ""}>
-            <Icon name="folder" size={15} />
-            {currentRoot ?? "加载中…"}
-          </span>
-          <button
-            className="btn btn--primary"
-            onClick={onContinue}
-            disabled={!canContinue}
-          >
-            继续使用当前
-          </button>
+        <div className={styles.heading}>
+          <Heading as="h1" variant="medium">选择工作区</Heading>
+          <p className={styles.subtitle}>选择一个项目目录开始研究，或继续使用当前工作区。</p>
         </div>
 
+        {error && <Flash variant="danger">{error}</Flash>}
+
+        <section className={styles.current}>
+          <span className={styles.label}>当前工作区</span>
+          <span className={styles.path} title={currentRoot ?? ""}>
+            <FileDirectoryIcon size={16} />
+            {currentRoot ?? "加载中…"}
+          </span>
+          <Button variant="primary" onClick={onContinue} disabled={!canContinue}>
+            继续使用当前
+          </Button>
+        </section>
+
         {recentRoots.length > 0 && (
-          <div className={styles.section}>
+          <section className={styles.section}>
             <span className={styles.label}>最近使用</span>
             <ul className={styles.list}>
               {recentRoots.map((root) => (
                 <li key={root}>
-                  <button
+                  <Button
+                    variant="invisible"
+                    block
+                    alignContent="start"
+                    leadingVisual={FileDirectoryIcon}
                     className={styles.item}
                     onClick={() => onSelect(root)}
                     title={root}
                   >
-                    <Icon name="folder" size={15} />
-                    <span className={styles.itemPath}>{root}</span>
-                  </button>
+                    {root}
+                  </Button>
                 </li>
               ))}
             </ul>
-          </div>
+          </section>
         )}
 
-        <div className={styles.section}>
+        <section className={styles.section}>
           <span className={styles.label}>打开其他目录</span>
-          <button
-            className="btn btn--subtle"
-            onClick={handleBrowse}
-            disabled={browsing || browserLoading}
-          >
+          <Button onClick={handleBrowse} disabled={browsing || browserLoading}>
             {browsing || browserLoading ? "浏览中…" : "浏览目录…"}
-          </button>
+          </Button>
           <div className={styles.row}>
-            <input
-              className="input"
-              type="text"
+            <TextInput
+              block
+              aria-label="项目目录路径"
               placeholder="输入项目目录的绝对路径…"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -134,45 +133,38 @@ export function WorkspacePicker({
                 if (e.key === "Enter" && draft.trim()) submit();
               }}
             />
-            <button
-              className="btn btn--subtle"
-              onClick={submit}
-              disabled={!canSelect}
-            >
+            <Button onClick={submit} disabled={!canSelect}>
               打开
-            </button>
+            </Button>
           </div>
-        </div>
+        </section>
 
         {browserOpen && (
           <div className={styles.browser} role="dialog" aria-label="浏览工作区目录">
             <div className={styles.browserHeader}>
               <span className={styles.label}>选择工作区目录</span>
-              <button
-                className="btn btn--subtle"
-                onClick={() => setBrowserOpen(false)}
-                disabled={browserLoading}
-              >
+              <Button size="small" onClick={() => setBrowserOpen(false)} disabled={browserLoading}>
                 取消
-              </button>
+              </Button>
             </div>
-            {browserError && <div className="card card--error">{browserError}</div>}
+            {browserError && <Flash variant="danger">{browserError}</Flash>}
             {listing && (
               <>
-                <div className={styles.browserPath} title={listing.path}>
-                  <Icon name="folder" size={15} />
+                <div className={styles.path} title={listing.path}>
+                  <FileDirectoryIcon size={16} />
                   {listing.path}
                 </div>
                 <div className={styles.browserActions}>
-                  <button
-                    className="btn btn--subtle"
+                  <Button
+                    size="small"
                     onClick={() => void openBrowser(listing.parent)}
                     disabled={!listing.parent || browserLoading}
                   >
                     上一级
-                  </button>
-                  <button
-                    className="btn btn--primary"
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="primary"
                     onClick={() => {
                       setBrowserOpen(false);
                       onSelect(listing.path);
@@ -180,19 +172,22 @@ export function WorkspacePicker({
                     disabled={browserLoading}
                   >
                     选择此目录
-                  </button>
+                  </Button>
                 </div>
-                <ul className={styles.browserList}>
+                <ul className={`${styles.list} ${styles.browserList}`}>
                   {listing.directories.map((directory) => (
                     <li key={directory.path}>
-                      <button
+                      <Button
+                        variant="invisible"
+                        block
+                        alignContent="start"
+                        leadingVisual={FileDirectoryIcon}
                         className={styles.item}
                         onClick={() => void openBrowser(directory.path)}
                         disabled={browserLoading}
                       >
-                        <Icon name="folder" size={15} />
-                        <span className={styles.itemPath}>{directory.name}</span>
-                      </button>
+                        {directory.name}
+                      </Button>
                     </li>
                   ))}
                   {listing.directories.length === 0 && (

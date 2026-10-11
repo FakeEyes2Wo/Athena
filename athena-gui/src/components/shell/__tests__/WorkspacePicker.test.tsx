@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspacePicker } from "../WorkspacePicker";
 
@@ -139,5 +139,20 @@ describe("WorkspacePicker", () => {
     await waitFor(() => expect(screen.getByTitle("/home/user/project")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "选择此目录" }));
     expect(props.onSelect).toHaveBeenCalledWith("/home/user/project");
+  });
+
+  it("shows a directory listing failure inside the browser and keeps it cancellable", async () => {
+    mocks.isTauri.mockReturnValue(false);
+    mocks.listWorkspaceDirectories.mockRejectedValueOnce(new Error("permission denied"));
+    renderPicker();
+
+    fireEvent.click(screen.getByRole("button", { name: "浏览目录…" }));
+
+    const browser = await screen.findByRole("dialog", { name: "浏览工作区目录" });
+    expect(await within(browser).findByText("permission denied")).toBeInTheDocument();
+    const cancel = within(browser).getByRole("button", { name: "取消" });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(screen.queryByRole("dialog", { name: "浏览工作区目录" })).not.toBeInTheDocument();
   });
 });
