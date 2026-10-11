@@ -32,6 +32,12 @@ Athena GUI 没有统一经过进程内 MessageProcessor；只修改该处理器�
 pending 请求或 RuntimeEvents 快照顺序。另一方面 RuntimeThreadManager 被实际执行路径使用，
 不能因 RPC facade 使用较少就删除整个 app_server。独立 `athena-rust/` 也不是 Python GUI 后端。
 
+2026-10-11 GUI 产品化改动了 [gui_gateway/transport.py](../../src/gui_gateway/transport.py)：
+每个连接的请求改为各自起任务并发处理，避免等待人工回答的 `task_clarification_start`
+把同一连接上的 `human_reply` 饿死到超时；替换 runtime 的项目/会话切换方法仍彼此串行。
+该改动不经过 MessageProcessor，不涉及事件发布与快照顺序，未改变上游固定版本和下表结论；
+证据见 [GUI 产品化完成记录](../codex_docs/2026-10-11-gui-productization-completion.md)。
+
 ## 差异清单
 
 ### 本轮实施状态（优先于下方初次对照快照）
