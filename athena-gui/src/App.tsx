@@ -1,8 +1,10 @@
+import { Spinner } from "@primer/react";
 import { AppProviders } from "./components/common/AppProviders";
 import { AppShell } from "./components/shell/AppShell";
 import { WorkspacePicker } from "./components/shell/WorkspacePicker";
 import { usePipeline } from "./hooks/usePipeline";
 import { useWorkspace } from "./hooks/useWorkspace";
+import styles from "./App.module.css";
 
 type Workspace = ReturnType<typeof useWorkspace>;
 
@@ -26,7 +28,12 @@ function AppContent() {
   const workspace = useWorkspace();
 
   if (!workspace.ready) {
-    return <div className="app-loading">加载中…</div>;
+    return (
+      <div className={styles.loading}>
+        <Spinner size="small" srText={null} />
+        加载中…
+      </div>
+    );
   }
 
   if (workspace.pickerOpen) {

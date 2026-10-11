@@ -1,0 +1,12 @@
+/* 工作区设置加载前的占位。 */
+
+.loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--base-size-12);
+  background: var(--bgColor-default);
+  color: var(--fgColor-muted);
+  font-size: var(--text-body-size-medium);
+}
