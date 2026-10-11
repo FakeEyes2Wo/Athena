@@ -1,0 +1,14 @@
+.flash {
+  margin: var(--base-size-16);
+}
+
+.title {
+  margin: 0 0 var(--base-size-4);
+  font-size: var(--text-body-size-medium);
+  font-weight: var(--base-text-weight-semibold);
+}
+
+.message {
+  margin: 0;
+  font-size: var(--text-body-size-medium);
+}

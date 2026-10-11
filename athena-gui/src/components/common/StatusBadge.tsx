@@ -1,13 +1,15 @@
-/** Status → badge variant mapping (mirrors the backend experiment lifecycle). */
-const STATUS_BADGE: Record<string, string> = {
-  PENDING: "badge--info",
-  RUNNING: "badge--warning",
-  SUCCEEDED: "badge--success",
-  FAILED: "badge--danger",
-  CANCELLED: "badge--neutral",
+import { Label, type LabelColorOptions } from "@primer/react";
+
+/** 实验生命周期状态 → Primer Label 配色。 */
+const STATUS_VARIANT: Record<string, LabelColorOptions> = {
+  PENDING: "accent",
+  RUNNING: "attention",
+  SUCCEEDED: "success",
+  FAILED: "danger",
+  CANCELLED: "secondary",
 };
 
-/** Shared status badge for experiment/hypothesis lifecycle states. */
+/** 实验生命周期状态标签；未知状态显示为 secondary。 */
 export function StatusBadge({ status }: { status: string }) {
-  return <span className={`badge ${STATUS_BADGE[status] ?? "badge--neutral"}`}>{status}</span>;
+  return <Label variant={STATUS_VARIANT[status] ?? "secondary"}>{status}</Label>;
 }
