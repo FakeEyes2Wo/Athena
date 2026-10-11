@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import { experimentsList, type ExperimentDetail } from "../lib/tauri-bridge";
 import { EmptyState } from "./common/EmptyState";
+import { KeyValueList } from "./common/KeyValueList";
+import { Panel } from "./common/Panel";
+import { Section } from "./common/Section";
 
 /** Best experiment's workspace and produced artifacts. */
 export default function FileTree() {
@@ -27,42 +31,39 @@ export default function FileTree() {
   const artifacts = detail ? Object.entries(detail.experiment.artifacts) : [];
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>工作区与产物</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()}>刷新</button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+    <Panel
+      title="工作区与产物"
+      actions={
+        <Button size="small" onClick={() => void refresh()}>
+          刷新
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {!detail ? (
         <EmptyState icon="files" message="暂无实验。运行搜索后此处展示最佳实验的工作区与产物。" />
       ) : (
         <>
-          <div className="card">
-            <h4 className="card__title">工作区</h4>
-            <div className="kv"><span className="kv__label">路径</span><span className="kv__value">{detail.experiment.gitwork.path}</span></div>
-            <div className="kv"><span className="kv__label">分支</span><span className="kv__value">{detail.experiment.gitwork.branch}</span></div>
-            <div className="kv"><span className="kv__label">基线提交</span><span className="kv__value">{detail.experiment.gitwork.base_commit}</span></div>
-          </div>
+          <Section title="工作区">
+            <KeyValueList
+              items={[
+                { label: "路径", value: detail.experiment.gitwork.path, mono: true },
+                { label: "分支", value: detail.experiment.gitwork.branch, mono: true },
+                { label: "基线提交", value: detail.experiment.gitwork.base_commit, mono: true },
+              ]}
+            />
+          </Section>
 
-          <div className="card">
-            <h4 className="card__title">产物 ({artifacts.length})</h4>
+          <Section title={`产物 (${artifacts.length})`}>
             {artifacts.length === 0 ? (
-              <p className="card__body" style={{ color: "var(--text-tertiary)" }}>暂无产物引用。</p>
+              <EmptyState icon="files" message="暂无产物引用。" />
             ) : (
-              <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none" }}>
-                {artifacts.map(([kind, ref]) => (
-                  <li key={kind} className="kv">
-                    <span className="kv__label">{kind}</span>
-                    <span className="kv__value" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{ref}</span>
-                  </li>
-                ))}
-              </ul>
+              <KeyValueList items={artifacts.map(([kind, ref]) => ({ label: kind, value: ref, mono: true }))} />
             )}
-          </div>
+          </Section>
         </>
       )}
-    </div>
+    </Panel>
   );
 }

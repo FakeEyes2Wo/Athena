@@ -1,0 +1,101 @@
+/* 实验管理：GitHub 风格表格 + 详情分组 + 状态推进操作。 */
+
+.tableWrap {
+  overflow-x: auto;
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-body-size-medium);
+}
+
+.table th {
+  padding: var(--base-size-8) var(--base-size-12);
+  border-bottom: var(--borderWidth-thin) solid var(--borderColor-default);
+  background: var(--bgColor-muted);
+  text-align: left;
+  font-size: var(--text-body-size-small);
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-muted);
+}
+
+.table td {
+  padding: var(--base-size-8) var(--base-size-12);
+  border-bottom: var(--borderWidth-thin) solid var(--borderColor-muted);
+  vertical-align: middle;
+}
+
+.table tbody tr {
+  cursor: pointer;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr:hover {
+  background: var(--bgColor-muted);
+}
+
+.selected,
+.table tbody tr.selected:hover {
+  background: var(--bgColor-accent-muted);
+}
+
+.mono {
+  font-family: var(--fontStack-monospace);
+  font-size: var(--text-body-size-small);
+}
+
+.statementCell {
+  max-width: 320px;
+}
+
+.truncate {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--base-size-8);
+}
+
+.hypothesis {
+  display: flex;
+  flex-direction: column;
+  gap: var(--base-size-4);
+}
+
+.subheading {
+  font-size: var(--text-body-size-small);
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-muted);
+}
+
+.statement {
+  margin: 0;
+  font-size: var(--text-body-size-medium);
+}
+
+.muted {
+  margin: 0;
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-muted);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--base-size-8);
+  padding-top: var(--base-size-12);
+  border-top: var(--borderWidth-thin) solid var(--borderColor-muted);
+}

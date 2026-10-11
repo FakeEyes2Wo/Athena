@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash, Timeline } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import { experimentsList, type ExperimentDetail } from "../lib/tauri-bridge";
 import { EmptyState } from "./common/EmptyState";
+import { Icon } from "./common/Icon";
+import { Panel } from "./common/Panel";
 import { StatusBadge } from "./common/StatusBadge";
+import styles from "./ExperimentLog.module.css";
 
 function primaryOf(d: ExperimentDetail): string {
   return d.experiment.eval?.primary != null ? d.experiment.eval.primary.toFixed(4) : "—";
@@ -36,38 +40,41 @@ export default function ExperimentLog() {
   }, [refresh]);
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>实验日志 ({experiments.length})</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()} disabled={loading}>
+    <Panel
+      title={`实验日志 (${experiments.length})`}
+      actions={
+        <Button size="small" onClick={() => void refresh()} disabled={loading}>
           {loading ? "加载中…" : "刷新"}
-        </button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {experiments.length === 0 ? (
         <EmptyState icon="log" message="暂无实验记录。启动搜索后将在此处按序展示实验生命周期。" />
       ) : (
-        <ol className="timeline">
+        <Timeline>
           {experiments.map((d) => (
-            <li key={d.experiment.id} className="timeline__item">
-              <StatusBadge status={d.experiment.status} />
-              <div className="timeline__body">
-                <div className="timeline__head">
-                  <span className="timeline__id">
+            <Timeline.Item key={d.experiment.id} condensed>
+              <Timeline.Badge>
+                <Icon name="experiments" size={14} />
+              </Timeline.Badge>
+              <Timeline.Body>
+                <div className={styles.head}>
+                  <span className={styles.id}>
                     {d.experiment.id}
                     {d.sota ? " ★" : ""}
                   </span>
+                  <StatusBadge status={d.experiment.status} />
                   <span>primary {primaryOf(d)}</span>
                   <span>winner {winnerOf(d)}</span>
                 </div>
-                <div className="timeline__statement">{d.hypothesis.statement}</div>
-              </div>
-            </li>
+                <div className={styles.statement}>{d.hypothesis.statement}</div>
+              </Timeline.Body>
+            </Timeline.Item>
           ))}
-        </ol>
+        </Timeline>
       )}
-    </div>
+    </Panel>
   );
 }

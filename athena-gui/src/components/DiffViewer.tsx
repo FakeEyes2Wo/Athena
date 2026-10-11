@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import { experimentsList, type ExperimentDetail } from "../lib/tauri-bridge";
 import { EmptyState } from "./common/EmptyState";
+import { KeyValueList } from "./common/KeyValueList";
+import { Panel } from "./common/Panel";
+import { Section } from "./common/Section";
+import styles from "./DiffViewer.module.css";
 
 /** Best experiment's change spec: what changed, acceptance rule, and rubrics. */
 export default function DiffViewer() {
@@ -27,51 +32,52 @@ export default function DiffViewer() {
   const plan = detail?.experiment.plan;
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>变更详情</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()}>刷新</button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+    <Panel
+      title="变更详情"
+      actions={
+        <Button size="small" onClick={() => void refresh()}>
+          刷新
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {!detail || !plan ? (
         <EmptyState icon="diff" message="暂无实验。运行搜索后此处展示最佳实验的变更规格。" />
       ) : (
         <>
-          <div className="card">
-            <h4 className="card__title">实验</h4>
-            <p className="card__body" style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}>
+          <Section title="实验">
+            <p className={styles.mono}>
               {detail.experiment.id}
               {detail.sota ? " ★ SOTA" : ""}
             </p>
-
-            <h4 className="card__title">变更内容</h4>
-            <p className="card__body">{plan.change || "—"}</p>
-
-            <h4 className="card__title">验收标准</h4>
-            <p className="card__body">{plan.acceptance_rule || "—"}</p>
-
+            <h4 className={styles.subheading}>变更内容</h4>
+            <p className={styles.text}>{plan.change || "—"}</p>
+            <h4 className={styles.subheading}>验收标准</h4>
+            <p className={styles.text}>{plan.acceptance_rule || "—"}</p>
             {plan.rubrics.length > 0 && (
               <>
-                <h4 className="card__title">评价指标</h4>
-                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+                <h4 className={styles.subheading}>评价指标</h4>
+                <ul className={styles.rubrics}>
                   {plan.rubrics.map((rubric) => (
                     <li key={rubric}>{rubric}</li>
                   ))}
                 </ul>
               </>
             )}
-          </div>
+          </Section>
 
-          <div className="card">
-            <h4 className="card__title">工作区</h4>
-            <div className="kv"><span className="kv__label">路径</span><span className="kv__value">{detail.experiment.gitwork.path}</span></div>
-            <div className="kv"><span className="kv__label">分支</span><span className="kv__value">{detail.experiment.gitwork.branch}</span></div>
-            <div className="kv"><span className="kv__label">基线提交</span><span className="kv__value">{detail.experiment.gitwork.base_commit}</span></div>
-          </div>
+          <Section title="工作区">
+            <KeyValueList
+              items={[
+                { label: "路径", value: detail.experiment.gitwork.path, mono: true },
+                { label: "分支", value: detail.experiment.gitwork.branch, mono: true },
+                { label: "基线提交", value: detail.experiment.gitwork.base_commit, mono: true },
+              ]}
+            />
+          </Section>
         </>
       )}
-    </div>
+    </Panel>
   );
 }

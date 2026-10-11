@@ -1,0 +1,29 @@
+/* 变更详情：实验 ID、变更内容、验收标准与评价指标。 */
+
+.mono {
+  margin: 0;
+  font-family: var(--fontStack-monospace);
+  font-size: var(--text-body-size-medium);
+  color: var(--fgColor-default);
+}
+
+.subheading {
+  margin: 0;
+  font-size: var(--text-body-size-small);
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-muted);
+}
+
+.text {
+  margin: 0;
+  font-size: var(--text-body-size-medium);
+  color: var(--fgColor-default);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rubrics {
+  margin: 0;
+  padding-left: var(--base-size-20);
+  font-size: var(--text-body-size-medium);
+}
