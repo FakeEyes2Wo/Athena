@@ -28,15 +28,32 @@ interface AppShellProps {
 type RightPanel = "inspector" | "log" | null;
 
 const SIDEBAR_KEY = "athena.sidebar.collapsed";
+const NARROW_QUERY = "(max-width: 860px)";
 
-function initialCollapsed(): boolean {
+function storedCollapsed(): boolean {
   try {
-    const stored = localStorage.getItem(SIDEBAR_KEY);
-    if (stored !== null) return stored === "1";
+    return localStorage.getItem(SIDEBAR_KEY) === "1";
   } catch {
-    // ignore
+    return false;
   }
-  return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 860px)").matches;
+}
+
+function matchesNarrow(): boolean {
+  return typeof window.matchMedia === "function" && window.matchMedia(NARROW_QUERY).matches;
+}
+
+/** Tracks whether the viewport is narrow enough that the sidebar must not take layout space. */
+function useNarrowViewport(): boolean {
+  const [narrow, setNarrow] = useState(matchesNarrow);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(NARROW_QUERY);
+    const update = () => setNarrow(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
+  return narrow;
 }
 
 /** Unified workspace: sidebar + main view (conversation or research page) + right panel. */
@@ -49,7 +66,12 @@ export function AppShell({
   pipeline,
 }: AppShellProps) {
   const [module, setModule] = useState<ModuleKey>("session");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(initialCollapsed);
+  // Wide screens keep the user's last explicit choice. Narrow screens always start
+  // collapsed and open the sidebar as a temporary overlay that is never persisted.
+  const narrow = useNarrowViewport();
+  const [preferCollapsed, setPreferCollapsed] = useState(storedCollapsed);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const sidebarCollapsed = narrow ? !drawerOpen : preferCollapsed;
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsVersion, setSettingsVersion] = useState(0);
@@ -60,12 +82,22 @@ export function AppShell({
   const attention = (pipeline.humanRequests?.length ?? 0) > 0;
 
   useEffect(() => {
+    if (!narrow) setDrawerOpen(false);
+  }, [narrow]);
+
+  function toggleSidebar() {
+    if (narrow) {
+      setDrawerOpen((open) => !open);
+      return;
+    }
+    const next = !preferCollapsed;
+    setPreferCollapsed(next);
     try {
-      localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
+      localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0");
     } catch {
       // ignore
     }
-  }, [sidebarCollapsed]);
+  }
 
   // Panels re-fetch their snapshots whenever this fingerprint of the run changes.
   const signal = useMemo(
@@ -124,6 +156,7 @@ export function AppShell({
   const newSession = useCallback(() => {
     pipeline.newSession?.();
     setModule("session");
+    setDrawerOpen(false);
   }, [pipeline]);
 
   const togglePanel = (panel: Exclude<RightPanel, null>) =>
@@ -158,12 +191,15 @@ export function AppShell({
 
   return (
     <ResearchSignalContext.Provider value={signal}>
-      <div className={styles.shell}>
+      <div className={styles.shell} data-drawer={narrow && drawerOpen ? "" : undefined}>
         <Sidebar
           collapsed={sidebarCollapsed}
-          onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
+          onToggleCollapsed={toggleSidebar}
           module={module}
-          onSelectModule={setModule}
+          onSelectModule={(key) => {
+            setModule(key);
+            setDrawerOpen(false);
+          }}
           currentRoot={currentRoot}
           recentRoots={recentRoots}
           sessions={sessions}
@@ -174,6 +210,7 @@ export function AppShell({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={(id) => {
             setModule("session");
+            setDrawerOpen(false);
             void pipeline.switchSession?.(id);
           }}
           onNewSession={newSession}
@@ -181,6 +218,9 @@ export function AppShell({
           onRenameSession={pipeline.renameSession}
           onOpenSettings={() => setSettingsOpen(true)}
         />
+        {narrow && drawerOpen && (
+          <div className={styles.scrim} aria-hidden="true" onClick={() => setDrawerOpen(false)} />
+        )}
 
         <main className={styles.main} aria-busy={switching || undefined}>
           <ConnectionBanner status={backend} />

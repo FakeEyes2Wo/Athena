@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, screen, fireEvent, within } from "@testing-library/react";
 import { renderUi } from "../../test/render";
 import { AppShell } from "../shell/AppShell";
@@ -76,6 +76,55 @@ describe("AppShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
     expect(screen.getByText("新会话")).toBeInTheDocument();
+  });
+
+  it("remembers the sidebar state only after the user toggles it", () => {
+    renderUi(
+      <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+    );
+    expect(localStorage.getItem("athena.sidebar.collapsed")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "折叠侧栏" }));
+    expect(localStorage.getItem("athena.sidebar.collapsed")).toBe("1");
+  });
+
+  describe("on a narrow screen", () => {
+    beforeEach(() => {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: query === "(max-width: 860px)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("starts collapsed even if the sidebar was left open on a wide screen", () => {
+      localStorage.setItem("athena.sidebar.collapsed", "0");
+      renderUi(
+        <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+      );
+
+      expect(screen.getByRole("button", { name: "展开侧栏" })).toBeInTheDocument();
+      expect(screen.queryByText("新会话")).not.toBeInTheDocument();
+    });
+
+    it("opens the sidebar as a temporary overlay that closes after navigating", () => {
+      const pipeline = makePipeline();
+      renderUi(
+        <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={pipeline as never} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
+      expect(screen.getByText("新会话")).toBeInTheDocument();
+      expect(localStorage.getItem("athena.sidebar.collapsed")).toBeNull();
+
+      fireEvent.click(screen.getByText("新会话"));
+      expect(pipeline.newSession).toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "展开侧栏" })).toBeInTheDocument();
+    });
   });
 
   it("lists sessions and switches on select", () => {

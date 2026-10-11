@@ -23,3 +23,27 @@
   flex: 1;
   min-height: 0;
 }
+
+/* Narrow screens: the opened sidebar floats over the content instead of squeezing it;
+   the rail's width stays reserved so the content does not jump. */
+.shell[data-drawer] {
+  padding-left: var(--sidebar-collapsed);
+}
+
+.shell[data-drawer] > aside {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
+  max-width: calc(100% - 48px);
+  box-shadow: var(--shadow-lg);
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 29;
+  background: rgba(0, 0, 0, 0.28);
+  animation: fade-in 0.15s ease-out;
+}

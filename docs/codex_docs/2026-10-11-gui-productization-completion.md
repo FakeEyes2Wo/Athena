@@ -53,6 +53,10 @@
 - 任务理解失败时卡片列出全部「not supplied」英文字段，另有一条重复的英文错误
   气泡；`provider_failure` 现提示去「设置 → 模型连接」检查。示例提示填入后焦点
   仍在按钮上；设置分节导航点击后高亮跳到上一节；「门禁生成」等术语改为通俗说明。
+- 窄屏侧栏：AppShell 挂载即把展开状态写入 localStorage，之后窄屏打开时沿用「展开」，
+  `(max-width: 860px)` 默认折叠从不生效，390 px 下对话区被挤到约 100 px。现只在用户
+  点击时保存桌面端偏好；窄屏始终先折叠，展开时以浮层盖在内容上（带遮罩），选择
+  会话/视图后自动收起，窗口跨越断点时随之切换。
 - 开发与测试环境：Node ≥ 25 的全局 Web Storage 遮蔽 jsdom，71 个用例失败；
   Vitest 误收 `node:test` 启动器测试；Windows 保留 1399–1498 端口导致
   `npm run dev:web` 无法监听 1421，新增 `ATHENA_WEB_PORT`，启动器在前端失败时
@@ -61,7 +65,7 @@
 
 ## 验证证据
 
-- 前端：`npm test`（athena-gui）23 个文件 239 passed（已变基到含 e580a14 的 main），`node --test scripts/dev.test.cjs`
+- 前端：`npm test`（athena-gui）23 个文件 242 passed（已变基到含 e580a14 的 main），`node --test scripts/dev.test.cjs`
   1 passed；`npm run build` 通过（主包 453 KB，gzip 144 KB）。
 - Python GUI：`uv run pytest tests/test_gui_*.py tests/unit/gui -q` 91 passed，
   1 failed；失败为既有的 `test_gui_gateway_e2e.py::test_full_chat_flow`
