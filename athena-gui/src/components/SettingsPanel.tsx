@@ -8,7 +8,8 @@ import {
   type ComputeSettings,
   type GuiSettings,
 } from "../lib/tauri-bridge";
-import { Icon } from "./common/Icon";
+import { Button, Checkbox, Dialog, Flash, FormControl, Heading, IconButton, Select, TextInput } from "@primer/react";
+import { XIcon } from "@primer/octicons-react";
 import styles from "./SettingsPanel.module.css";
 
 type WritableField =
@@ -49,7 +50,7 @@ function editableSettings(settings: GuiSettings): GuiSettings {
   };
 }
 
-/** 运行设置：圆角纯白小窗，覆盖在主工作区之上。 */
+/** 运行设置弹窗（Primer Dialog）：项目目录、模型连接、运行参数、算力与开关。 */
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [settings, setSettings] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
   const [form, setForm] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
@@ -151,366 +152,314 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   }
 
   return (
-    <div
-      className={styles.overlay}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="运行设置">
-        <header className={styles.header}>
-          <div>
-            <h2>运行设置</h2>
-            <p className={styles.subtitle}>配置 Athena 运行参数与项目目录</p>
+    <Dialog
+      width="xlarge"
+      onClose={onClose}
+      renderHeader={({ dialogLabelId, dialogDescriptionId }) => (
+        <Dialog.Header className={styles.header}>
+          <div className={styles.headerText}>
+            <Dialog.Title id={dialogLabelId}>运行设置</Dialog.Title>
+            <Dialog.Subtitle id={dialogDescriptionId}>配置 Athena 运行参数与项目目录</Dialog.Subtitle>
           </div>
-          <button type="button" className={styles.close} onClick={onClose} aria-label="关闭设置">
-            <Icon name="close" size={16} />
-          </button>
-        </header>
+          <IconButton icon={XIcon} variant="invisible" aria-label="关闭设置" onClick={onClose} />
+        </Dialog.Header>
+      )}
+      footerButtons={[
+        { content: "刷新", buttonType: "default", onClick: () => void refresh() },
+        {
+          content: saving ? "保存中…" : "保存",
+          buttonType: "primary",
+          onClick: () => void save(),
+          disabled: saving,
+        },
+      ]}
+    >
+      {error && (
+        <Flash variant="danger" className={styles.flash}>
+          {error}
+        </Flash>
+      )}
+      {saved && !error && (
+        <Flash variant="success" className={styles.flash}>
+          设置已保存
+        </Flash>
+      )}
 
-        {error && <div className="card card--error" style={{ marginBottom: 12 }}>{error}</div>}
-        {saved && !error && (
-          <div style={{ marginBottom: 12 }}>
-            <span className="badge badge--success">✓ 设置已保存</span>
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">项目</Heading>
+        <div className={styles.projectRow}>
+          <TextInput
+            block
+            aria-label="项目目录"
+            placeholder="选择项目目录…"
+            value={projectRoot}
+            onChange={(e) => setProjectRootInput(e.target.value)}
+          />
+          <Button variant="primary" onClick={() => void switchProject()} disabled={switching || !projectRoot.trim()}>
+            {switching ? "切换中…" : "切换"}
+          </Button>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">模型连接</Heading>
+        <div className={styles.grid}>
+          <FormControl>
+            <FormControl.Label>PROVIDER</FormControl.Label>
+            <Select
+              block
+              value={form.model_connection.provider}
+              onChange={(e) => patchModelConnection("provider", e.target.value)}
+            >
+              <Select.Option value="deepseek">deepseek</Select.Option>
+              <Select.Option value="openai">openai</Select.Option>
+              <Select.Option value="qwen">qwen</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>MODEL_NAME</FormControl.Label>
+            <TextInput
+              block
+              placeholder="deepseek-v4-flash"
+              value={form.model_connection.model_name}
+              onChange={(e) => patchModelConnection("model_name", e.target.value)}
+            />
+          </FormControl>
+
+          <FormControl className={styles.full}>
+            <FormControl.Label>BASE_URL</FormControl.Label>
+            <TextInput
+              block
+              placeholder={
+                form.model_connection.provider === "deepseek"
+                  ? "https://api.deepseek.com"
+                  : form.model_connection.provider === "openai"
+                    ? "https://api.openai.com/v1"
+                    : "https://dashscope.aliyuncs.com/compatible-mode/v1"
+              }
+              value={form.model_connection.base_url}
+              onChange={(e) => patchModelConnection("base_url", e.target.value)}
+            />
+          </FormControl>
+
+          <FormControl className={styles.full}>
+            <FormControl.Label>LLM_API_KEY</FormControl.Label>
+            <TextInput
+              block
+              type="password"
+              autoComplete="off"
+              placeholder={
+                settings.model_connection.llm_api_key
+                  ? `已设置 · ${settings.model_connection.llm_api_key}`
+                  : "未设置"
+              }
+              value={form.model_connection.llm_api_key}
+              onChange={(e) => patchModelConnection("llm_api_key", e.target.value)}
+            />
+            <FormControl.Caption>密钥只写回 .env，界面不回显明文；留空表示不修改。</FormControl.Caption>
+          </FormControl>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">运行参数</Heading>
+        <div className={styles.grid}>
+          <FormControl>
+            <FormControl.Label>并发度</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={1}
+              value={String(form.concurrency)}
+              onChange={(e) => patchField("concurrency", Number(e.target.value))}
+            />
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>搜索上限</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={0}
+              value={String(form.search_limit)}
+              onChange={(e) => patchField("search_limit", Number(e.target.value))}
+            />
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>Ideator 机制</FormControl.Label>
+            <Select block value={form.ideation} onChange={(e) => patchField("ideation", e.target.value)}>
+              <Select.Option value="ideageneration">ideageneration · 门禁生成</Select.Option>
+              <Select.Option value="baseline">baseline · 消融对照</Select.Option>
+              <Select.Option value="debate">debate · 辩论式</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>优化方向</FormControl.Label>
+            <Select block value={form.direction} onChange={(e) => patchField("direction", e.target.value)}>
+              <Select.Option value="maximize">maximize</Select.Option>
+              <Select.Option value="minimize">minimize</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>容忍度</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={0}
+              step="0.01"
+              value={String(form.tolerance)}
+              onChange={(e) => patchField("tolerance", Number(e.target.value))}
+            />
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>实验超时（秒）</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={1}
+              value={String(form.experiment_timeout_s)}
+              onChange={(e) => patchField("experiment_timeout_s", Number(e.target.value))}
+            />
+          </FormControl>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">算力 / Compute</Heading>
+        <div className={styles.grid}>
+          <FormControl>
+            <FormControl.Label>模式</FormControl.Label>
+            <Select block value={form.compute.mode} onChange={(e) => patchCompute("mode", e.target.value)}>
+              <Select.Option value="local">local · 本机</Select.Option>
+              <Select.Option value="ssh">ssh · 远程 GPU</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>放置策略</FormControl.Label>
+            <Select block value={form.compute.placement} onChange={(e) => patchCompute("placement", e.target.value)}>
+              <Select.Option value="pack">pack</Select.Option>
+              <Select.Option value="spread">spread</Select.Option>
+              <Select.Option value="homogeneous">homogeneous</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>拿不到卡时</FormControl.Label>
+            <Select block value={form.compute.fallback} onChange={(e) => patchCompute("fallback", e.target.value)}>
+              <Select.Option value="never">never · 排队/失败</Select.Option>
+              <Select.Option value="ask">ask · 询问</Select.Option>
+            </Select>
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>每实验 GPU 数</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={1}
+              value={String(form.compute.gpus_per_experiment)}
+              onChange={(e) => patchCompute("gpus_per_experiment", Number(e.target.value))}
+            />
+          </FormControl>
+
+          <FormControl>
+            <FormControl.Label>排队超时（秒）</FormControl.Label>
+            <TextInput
+              block
+              type="number"
+              min={0}
+              value={form.compute.queue_timeout_s == null ? "" : String(form.compute.queue_timeout_s)}
+              onChange={(e) => {
+                const value = e.target.value;
+                patchCompute("queue_timeout_s", value === "" ? null : Number(value));
+              }}
+            />
+          </FormControl>
+
+          <FormControl className={styles.full}>
+            <FormControl.Label>数据集根目录</FormControl.Label>
+            <TextInput
+              block
+              placeholder="留空表示不设置"
+              value={form.data_root ?? ""}
+              onChange={(e) =>
+                setForm((prev) => ({
+                  ...prev,
+                  data_root: e.target.value.trim() || null,
+                }))
+              }
+            />
+          </FormControl>
+        </div>
+        {form.compute.hosts.length > 0 && (
+          <div className={styles.grid}>
+            {form.compute.hosts.map((host) => (
+              <ReadOnlyField
+                key={host.name}
+                label={host.name}
+                value={`${host.ssh} · ${host.gpus === "auto" ? "auto" : host.gpus.join(",")} · ${host.max_leases} leases`}
+              />
+            ))}
           </div>
         )}
-
-        <div className={styles.body}>
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>项目</h3>
-            <div className={styles.projectRow}>
-              <input
-                className="input"
-                type="text"
-                placeholder="选择项目目录…"
-                value={projectRoot}
-                onChange={(e) => setProjectRootInput(e.target.value)}
-              />
-              <button
-                className="btn btn--primary btn--sm"
-                onClick={() => void switchProject()}
-                disabled={switching || !projectRoot.trim()}
-              >
-                {switching ? "切换中…" : "切换"}
-              </button>
-            </div>
-          </section>
-
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>模型连接</h3>
-            <div className={styles.grid}>
-              <label className="field">
-                <span className="field__label">PROVIDER</span>
-                <select
-                  className="select"
-                  value={form.model_connection.provider}
-                  onChange={(e) => patchModelConnection("provider", e.target.value)}
-                >
-                  <option value="deepseek">deepseek</option>
-                  <option value="openai">openai</option>
-                  <option value="qwen">qwen</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">MODEL_NAME</span>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="deepseek-v4-flash"
-                  value={form.model_connection.model_name}
-                  onChange={(e) => patchModelConnection("model_name", e.target.value)}
-                />
-              </label>
-
-              <label className="field" style={{ gridColumn: "1 / -1" }}>
-                <span className="field__label">BASE_URL</span>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder={
-                    form.model_connection.provider === "deepseek"
-                      ? "https://api.deepseek.com"
-                      : form.model_connection.provider === "openai"
-                        ? "https://api.openai.com/v1"
-                        : "https://dashscope.aliyuncs.com/compatible-mode/v1"
-                  }
-                  value={form.model_connection.base_url}
-                  onChange={(e) => patchModelConnection("base_url", e.target.value)}
-                />
-              </label>
-
-              <label className="field" style={{ gridColumn: "1 / -1" }}>
-                <span className="field__label">LLM_API_KEY</span>
-                <input
-                  className="input"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    settings.model_connection.llm_api_key
-                      ? `已设置 · ${settings.model_connection.llm_api_key}`
-                      : "未设置"
-                  }
-                  value={form.model_connection.llm_api_key}
-                  onChange={(e) => patchModelConnection("llm_api_key", e.target.value)}
-                />
-              </label>
-            </div>
-            <p className={styles.hint}>密钥只写回 .env，界面不回显明文；留空表示不修改。</p>
-          </section>
-
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>运行参数</h3>
-            <div className={styles.grid}>
-              <label className="field">
-                <span className="field__label">并发度</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  value={form.concurrency}
-                  onChange={(e) => patchField("concurrency", Number(e.target.value))}
-                />
-              </label>
-
-              <label className="field">
-                <span className="field__label">搜索上限</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  value={form.search_limit}
-                  onChange={(e) => patchField("search_limit", Number(e.target.value))}
-                />
-              </label>
-
-              <label className="field">
-                <span className="field__label">Ideator 机制</span>
-                <select
-                  className="select"
-                  value={form.ideation}
-                  onChange={(e) => patchField("ideation", e.target.value)}
-                >
-                  <option value="ideageneration">ideageneration · 门禁生成</option>
-                  <option value="baseline">baseline · 消融对照</option>
-                  <option value="debate">debate · 辩论式</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">优化方向</span>
-                <select
-                  className="select"
-                  value={form.direction}
-                  onChange={(e) => patchField("direction", e.target.value)}
-                >
-                  <option value="maximize">maximize</option>
-                  <option value="minimize">minimize</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">容忍度</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={form.tolerance}
-                  onChange={(e) => patchField("tolerance", Number(e.target.value))}
-                />
-              </label>
-
-              <label className="field">
-                <span className="field__label">实验超时（秒）</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  value={form.experiment_timeout_s}
-                  onChange={(e) =>
-                    patchField("experiment_timeout_s", Number(e.target.value))
-                  }
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>算力 / Compute</h3>
-            <div className={styles.grid}>
-              <label className="field">
-                <span className="field__label">模式</span>
-                <select
-                  className="select"
-                  value={form.compute.mode}
-                  onChange={(e) => patchCompute("mode", e.target.value)}
-                >
-                  <option value="local">local · 本机</option>
-                  <option value="ssh">ssh · 远程 GPU</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">放置策略</span>
-                <select
-                  className="select"
-                  value={form.compute.placement}
-                  onChange={(e) => patchCompute("placement", e.target.value)}
-                >
-                  <option value="pack">pack</option>
-                  <option value="spread">spread</option>
-                  <option value="homogeneous">homogeneous</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">拿不到卡时</span>
-                <select
-                  className="select"
-                  value={form.compute.fallback}
-                  onChange={(e) => patchCompute("fallback", e.target.value)}
-                >
-                  <option value="never">never · 排队/失败</option>
-                  <option value="ask">ask · 询问</option>
-                </select>
-              </label>
-
-              <label className="field">
-                <span className="field__label">每实验 GPU 数</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  value={form.compute.gpus_per_experiment}
-                  onChange={(e) =>
-                    patchCompute("gpus_per_experiment", Number(e.target.value))
-                  }
-                />
-              </label>
-
-              <label className="field">
-                <span className="field__label">排队超时（秒）</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  value={form.compute.queue_timeout_s ?? ""}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    patchCompute(
-                      "queue_timeout_s",
-                      value === "" ? null : Number(value),
-                    );
-                  }}
-                />
-              </label>
-
-              <label className="field" style={{ gridColumn: "1 / -1" }}>
-                <span className="field__label">数据集根目录</span>
-                <input
-                  className="input"
-                  type="text"
-                  placeholder="留空表示不设置"
-                  value={form.data_root ?? ""}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      data_root: e.target.value.trim() || null,
-                    }))
-                  }
-                />
-              </label>
-            </div>
-            {form.compute.hosts.length > 0 && (
-              <div className={styles.grid}>
-                {form.compute.hosts.map((host) => (
-                  <div key={host.name} className="field">
-                    <span className="field__label">{host.name}</span>
-                    <div className="input input--readonly">
-                      {host.ssh} · {host.gpus === "auto" ? "auto" : host.gpus.join(",")} · {host.max_leases} leases
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>开关</h3>
-            <div className={styles.switches}>
-              <label
-                className={form.skip_validate ? `switch ${styles.switchDisabled}` : "switch"}
-              >
-                <input
-                  type="checkbox"
-                  checked={form.auto_validate}
-                  disabled={form.skip_validate}
-                  onChange={(e) => patchField("auto_validate", e.target.checked)}
-                />
-                <span className="switch__track" />
-                自动验证
-              </label>
-
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={form.skip_validate}
-                  onChange={(e) => patchField("skip_validate", e.target.checked)}
-                  aria-describedby="skip-validate-help"
-                />
-                <span className="switch__track" />
-                跳过 VALIDATE
-              </label>
-
-              <p
-                id="skip-validate-help"
-                className={`${styles.hint} ${styles.skipValidateHelp}`}
-              >
-                SEARCH 完成后将直接生成 Final，不会运行独立最终评估，也不会产生最终测试或泛化指标。
-              </p>
-
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={form.manual_mode}
-                  onChange={(e) => patchField("manual_mode", e.target.checked)}
-                />
-                <span className="switch__track" />
-                手动选假设
-              </label>
-            </div>
-          </section>
-
-          <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>只读状态</h3>
-            <div className={styles.grid}>
-              <ReadOnlyField label="模型" value={settings.model ?? "—"} />
-              <ReadOnlyField label="阶段" value={settings.phase} />
-              <ReadOnlyField label="状态" value={settings.status} />
-            </div>
-          </section>
-        </div>
-
-        <footer className={styles.footer}>
-          <div className={styles.actions} style={{ marginLeft: "auto" }}>
-            <button className="btn btn--ghost btn--sm" onClick={() => void refresh()}>刷新</button>
-            <button className="btn btn--primary btn--sm" onClick={() => void save()} disabled={saving}>
-              {saving ? "保存中…" : "保存"}
-            </button>
-          </div>
-        </footer>
       </section>
-    </div>
+
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">开关</Heading>
+        <div className={styles.switches}>
+          <FormControl disabled={form.skip_validate}>
+            <Checkbox
+              checked={form.auto_validate}
+              onChange={(e) => patchField("auto_validate", e.target.checked)}
+            />
+            <FormControl.Label>自动验证</FormControl.Label>
+          </FormControl>
+
+          <FormControl id="skip-validate">
+            <Checkbox
+              checked={form.skip_validate}
+              onChange={(e) => patchField("skip_validate", e.target.checked)}
+            />
+            <FormControl.Label>跳过 VALIDATE</FormControl.Label>
+            <FormControl.Caption>
+              SEARCH 完成后将直接生成 Final，不会运行独立最终评估，也不会产生最终测试或泛化指标。
+            </FormControl.Caption>
+          </FormControl>
+
+          <FormControl>
+            <Checkbox
+              checked={form.manual_mode}
+              onChange={(e) => patchField("manual_mode", e.target.checked)}
+            />
+            <FormControl.Label>手动选假设</FormControl.Label>
+          </FormControl>
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <Heading as="h3" variant="small">只读状态</Heading>
+        <div className={styles.grid}>
+          <ReadOnlyField label="模型" value={settings.model ?? "—"} />
+          <ReadOnlyField label="阶段" value={settings.phase} />
+          <ReadOnlyField label="状态" value={settings.status} />
+        </div>
+      </section>
+    </Dialog>
   );
 }
 
 function ReadOnlyField({ label, value }: { label: string; value: string }) {
   return (
-    <div className="field">
-      <span className="field__label">{label}</span>
-      <div className="input input--readonly">{value}</div>
-    </div>
+    <FormControl>
+      <FormControl.Label>{label}</FormControl.Label>
+      <TextInput block readOnly value={value} />
+    </FormControl>
   );
 }
 

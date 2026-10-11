@@ -46,11 +46,9 @@ describe("SettingsPanel validation controls", () => {
     expect(automatic).toBeDisabled();
     expect(automatic).toBeChecked();
     const help = screen.getByText(/SEARCH.*Final/);
-    expect(skip).toHaveAttribute("aria-describedby", "skip-validate-help");
-    expect(help.id).toBe("skip-validate-help");
+    expect(skip).toHaveAccessibleDescription(/不会运行独立最终评估/);
+    expect(skip).toHaveAccessibleDescription(/不会产生最终测试或泛化指标/);
     expect(help).toBeVisible();
-    expect(help).toHaveTextContent("不会运行独立最终评估");
-    expect(help).toHaveTextContent("不会产生最终测试或泛化指标");
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
@@ -108,9 +106,10 @@ describe("SettingsPanel validation controls", () => {
     }));
     bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
 
-    const { container } = render(<SettingsPanel onClose={vi.fn()} />);
+    render(<SettingsPanel onClose={vi.fn()} />);
     await screen.findByDisplayValue("C:/project");
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
+    // 弹窗经 Portal 渲染，不在 render() 返回的 container 内。
+    const input = document.querySelector('input[type="password"]') as HTMLInputElement;
     fireEvent.change(input, { target: { value: "new-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
@@ -118,5 +117,31 @@ describe("SettingsPanel validation controls", () => {
     const calls = bridgeMocks.settingsSet.mock.calls;
     const patch = calls[calls.length - 1]?.[0];
     expect(patch.model_connection).toMatchObject({ llm_api_key: "new-secret" });
+  });
+
+  it("closes on Escape", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+    const onClose = vi.fn();
+
+    render(<SettingsPanel onClose={onClose} />);
+    const dialog = await screen.findByRole("dialog", { name: "运行设置" });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open and shows the error when saving fails", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+    bridgeMocks.settingsSet.mockRejectedValue(new Error("settings write failed"));
+    const onClose = vi.fn();
+
+    render(<SettingsPanel onClose={onClose} />);
+    await screen.findByDisplayValue("C:/project");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("settings write failed")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "运行设置" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
