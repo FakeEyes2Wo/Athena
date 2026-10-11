@@ -1,3 +1,4 @@
+import { AppProviders } from "./components/common/AppProviders";
 import { AppShell } from "./components/shell/AppShell";
 import { WorkspacePicker } from "./components/shell/WorkspacePicker";
 import { usePipeline } from "./hooks/usePipeline";
@@ -20,8 +21,8 @@ function WorkspaceSession({ workspace }: { workspace: Workspace }) {
   );
 }
 
-/** 根应用：工作区选择门 + 统一研究工作区。 */
-function App() {
+/** 工作区选择门 + 统一研究工作区。 */
+function AppContent() {
   const workspace = useWorkspace();
 
   if (!workspace.ready) {
@@ -44,6 +45,15 @@ function App() {
   }
 
   return <WorkspaceSession key={workspace.currentRoot ?? "default"} workspace={workspace} />;
+}
+
+/** 根应用：主题 Provider + 工作区选择门 + 统一研究工作区。 */
+function App() {
+  return (
+    <AppProviders>
+      <AppContent />
+    </AppProviders>
+  );
 }
 
 export default App;

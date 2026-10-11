@@ -1,153 +1,88 @@
-/* ============================================================
-   Athena GUI — design system
-   Tokens (light + dark) · typography · spacing · components
-   ============================================================ */
+/* Athena GUI 全局样式。颜色、尺寸、字体全部来自 GitHub Primer（@primer/primitives）。 */
 
 :root {
-  color-scheme: light;
-
-  /* background */
-  --bg: #F6F7F9;
-  --surface: #FFFFFF;
-  --surface-elevated: #F1F3F6;
-  --surface-muted: #F0F2F5;
-
-  /* border */
-  --border: rgba(15, 23, 42, 0.08);
-  --border-strong: rgba(15, 23, 42, 0.14);
-  --border-hover: rgba(37, 99, 235, 0.22);
-  --border-focus: rgba(37, 99, 235, 0.4);
-
-  /* accent */
-  --accent: #2563EB;
-  --accent-hover: #1D4ED8;
-  --accent-subtle: rgba(37, 99, 235, 0.07);
-  --accent-soft: rgba(37, 99, 235, 0.14);
-
-  /* text */
-  --text-primary: #0F172A;
-  --text-secondary: #5B6472;
-  --text-tertiary: #9AA3B2;
-
-  /* semantic */
-  --success: #059669;
-  --success-subtle: rgba(5, 150, 105, 0.1);
-  --warning: #D97706;
-  --warning-subtle: rgba(217, 119, 6, 0.12);
-  --danger: #DC2626;
-  --danger-subtle: rgba(220, 38, 38, 0.09);
-  --info: #0891B2;
-  --info-subtle: rgba(8, 145, 178, 0.1);
-
-  /* shadow (layered, softer) */
-  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
-  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.12), 0 4px 8px rgba(15, 23, 42, 0.06);
-
-  /* font */
-  --font-sans: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "Geist Mono", "JetBrains Mono", "Fira Code", monospace;
-
-  /* radius */
-  --radius-xs: 6px;
-  --radius-sm: 8px;
-  --radius-md: 10px;
-  --radius-card: 12px;
-  --radius-panel: 14px;
-  --radius-bubble: 14px;
-  --radius-btn: 9px;
-
-  /* spacing */
-  --space-xs: 4px;
-  --space-sm: 8px;
-  --space-md: 12px;
-  --space-lg: 16px;
-  --space-xl: 20px;
-  --space-2xl: 28px;
-
-  /* transition */
-  --ease: cubic-bezier(0.4, 0, 0.2, 1);
-  --dur: 160ms;
-
-  /* chart palette */
-  --chart-1: #2563EB;
-  --chart-2: #059669;
-  --chart-3: #D97706;
-  --chart-4: #7C3AED;
-  --chart-5: #DB2777;
-  --chart-6: #0891B2;
-
-  /* hypothesis status (ResearchTreeViz / HypothesisGraphViz node coloring) */
-  --status-supported-bg: #DCFCE7;
-  --status-supported-border: #22C55E;
-  --status-supported-text: #166534;
-  --status-refuted-bg: #FEE2E2;
-  --status-refuted-border: #EF4444;
-  --status-refuted-text: #991B1B;
-  --status-rejected-bg: #F3F4F6;
-  --status-rejected-border: #9CA3AF;
-  --status-rejected-text: #374151;
-  --status-proposed-bg: #EFF6FF;
-  --status-proposed-border: #3B82F6;
-  --status-proposed-text: #1E40AF;
+  /* fontsource 注册的族名是 "Mona Sans Variable"，Primer 字体栈第一项是 "Mona Sans VF"，此处前置补齐。 */
+  --fontStack-sansSerif: "Mona Sans Variable", "Mona Sans VF", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans Backtick Fix", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --BaseStyles-fontFamily: var(--fontStack-sansSerif);
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --bg: #0B0E14;
-  --surface: #12161F;
-  --surface-elevated: #1A1F2B;
-  --surface-muted: #161B26;
-
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --border-hover: rgba(96, 165, 250, 0.32);
-  --border-focus: rgba(96, 165, 250, 0.5);
-
-  --accent: #3B82F6;
-  --accent-hover: #60A5FA;
-  --accent-subtle: rgba(59, 130, 246, 0.12);
-  --accent-soft: rgba(59, 130, 246, 0.2);
-
-  --text-primary: #E7EAF1;
-  --text-secondary: #9AA3B2;
-  --text-tertiary: #6B7280;
-
-  --success: #34D399;
-  --success-subtle: rgba(52, 211, 153, 0.12);
-  --warning: #FBBF24;
-  --warning-subtle: rgba(251, 191, 36, 0.12);
-  --danger: #F87171;
-  --danger-subtle: rgba(248, 113, 113, 0.12);
-  --info: #22D3EE;
-  --info-subtle: rgba(34, 211, 238, 0.12);
-
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.35);
-
-  --chart-1: #60A5FA;
-  --chart-2: #34D399;
-  --chart-3: #FBBF24;
-  --chart-4: #A78BFA;
-  --chart-5: #F472B6;
-  --chart-6: #22D3EE;
-
-  --status-supported-bg: rgba(52, 211, 153, 0.14);
-  --status-supported-border: #34D399;
-  --status-supported-text: #6EE7B7;
-  --status-refuted-bg: rgba(248, 113, 113, 0.14);
-  --status-refuted-border: #F87171;
-  --status-refuted-text: #FCA5A5;
-  --status-rejected-bg: #1A1F2B;
-  --status-rejected-border: #6B7280;
-  --status-rejected-text: #9AA3B2;
-  --status-proposed-bg: rgba(59, 130, 246, 0.16);
-  --status-proposed-border: #60A5FA;
-  --status-proposed-text: #93C5FD;
+/* 迁移期兼容层：旧 token 指向 Primer 变量，尚未迁移的旧样式自动跟随亮/暗主题。
+   各界面迁移完成后由 Task 11 整体删除。 */
+:root {
+  --bg: var(--bgColor-default);
+  --surface: var(--bgColor-default);
+  --surface-elevated: var(--bgColor-muted);
+  --surface-muted: var(--bgColor-muted);
+  --border: var(--borderColor-muted);
+  --border-strong: var(--borderColor-default);
+  --border-hover: var(--borderColor-accent-muted);
+  --border-focus: var(--borderColor-accent-emphasis);
+  --border-input: var(--control-borderColor-rest);
+  --accent: var(--fgColor-accent);
+  --accent-hover: var(--fgColor-accent);
+  --accent-subtle: var(--bgColor-accent-muted);
+  --accent-soft: var(--borderColor-accent-muted);
+  --accent-subtle-hover: var(--bgColor-accent-muted);
+  --on-accent: var(--fgColor-onEmphasis);
+  --text-primary: var(--fgColor-default);
+  --text-secondary: var(--fgColor-muted);
+  --text-tertiary: var(--fgColor-muted);
+  --text-placeholder: var(--control-fgColor-placeholder);
+  --success: var(--fgColor-success);
+  --success-subtle: var(--bgColor-success-muted);
+  --warning: var(--fgColor-attention);
+  --warning-subtle: var(--bgColor-attention-muted);
+  --danger: var(--fgColor-danger);
+  --danger-subtle: var(--bgColor-danger-muted);
+  --danger-border: var(--borderColor-danger-muted);
+  --info: var(--fgColor-accent);
+  --info-subtle: var(--bgColor-accent-muted);
+  --selection: var(--selection-bgColor);
+  --overlay: var(--overlay-backdrop-bgColor);
+  --code-bg: var(--bgColor-muted);
+  --switch-thumb: var(--bgColor-default);
+  --scrollbar-thumb: var(--borderColor-default);
+  --scrollbar-thumb-hover: var(--fgColor-muted);
+  --shadow-xs: var(--shadow-resting-xsmall);
+  --shadow-sm: var(--shadow-resting-small);
+  --shadow-md: var(--shadow-floating-small);
+  --shadow-lg: var(--shadow-floating-large);
+  --font-sans: var(--fontStack-sansSerif);
+  --font-mono: var(--fontStack-monospace);
+  --radius-xs: var(--borderRadius-small);
+  --radius-sm: var(--borderRadius-medium);
+  --radius-md: var(--borderRadius-medium);
+  --radius-card: var(--borderRadius-medium);
+  --radius-panel: var(--borderRadius-large);
+  --radius-bubble: var(--borderRadius-medium);
+  --radius-btn: var(--borderRadius-medium);
+  --radius-dialog: var(--borderRadius-large);
+  --space-xs: var(--base-size-4);
+  --space-sm: var(--base-size-8);
+  --space-md: var(--base-size-12);
+  --space-lg: var(--base-size-16);
+  --space-xl: var(--base-size-20);
+  --space-2xl: var(--base-size-28);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur: 160ms;
+  --chart-1: var(--data-blue-color-emphasis);
+  --chart-2: var(--data-green-color-emphasis);
+  --chart-3: var(--data-orange-color-emphasis);
+  --chart-4: var(--data-purple-color-emphasis);
+  --chart-5: var(--data-pink-color-emphasis);
+  --chart-6: var(--data-teal-color-emphasis);
+  --status-supported-bg: var(--bgColor-success-muted);
+  --status-supported-border: var(--borderColor-success-emphasis);
+  --status-supported-text: var(--fgColor-success);
+  --status-refuted-bg: var(--bgColor-danger-muted);
+  --status-refuted-border: var(--borderColor-danger-emphasis);
+  --status-refuted-text: var(--fgColor-danger);
+  --status-rejected-bg: var(--bgColor-neutral-muted);
+  --status-rejected-border: var(--borderColor-emphasis);
+  --status-rejected-text: var(--fgColor-muted);
+  --status-proposed-bg: var(--bgColor-accent-muted);
+  --status-proposed-border: var(--borderColor-accent-emphasis);
+  --status-proposed-text: var(--fgColor-accent);
 }
 
 * {

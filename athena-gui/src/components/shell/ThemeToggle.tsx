@@ -1,24 +1,17 @@
+import { IconButton } from "@primer/react";
+import { MoonIcon, SunIcon } from "@primer/octicons-react";
 import { useTheme } from "../../hooks/useTheme";
-import { Icon, type IconName } from "../common/Icon";
 
-const META: Record<string, { icon: IconName; label: string }> = {
-  light: { icon: "moon", label: "深色" },
-  dark: { icon: "sun", label: "浅色" },
-};
-
-/** Two-state theme toggle (light ↔ dark) shown in the top bar. */
+/** 顶栏亮/暗主题切换按钮。 */
 export function ThemeToggle() {
   const { mode, cycleMode } = useTheme();
-  const meta = META[mode];
-
+  const toDark = mode === "light";
   return (
-    <button
-      className="icon-btn"
+    <IconButton
+      icon={toDark ? MoonIcon : SunIcon}
+      variant="invisible"
+      aria-label={toDark ? "主题：深色" : "主题：浅色"}
       onClick={cycleMode}
-      aria-label={`主题：${meta.label}`}
-      title={`切换到${meta.label}`}
-    >
-      <Icon name={meta.icon} size={17} />
-    </button>
+    />
   );
 }

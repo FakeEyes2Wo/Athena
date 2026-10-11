@@ -20,16 +20,14 @@ describe("shared component contracts", () => {
     expect(screen.getByText("panel unavailable")).toBeInTheDocument();
   });
 
-  it("uses the shared icon style and persists both theme transitions", () => {
+  it("toggles the theme from the shared icon button and persists both transitions", () => {
     localStorage.setItem("athena-theme", "light");
     renderUi(<ThemeToggle />);
-    const button = screen.getByRole("button", { name: "主题：深色" });
-    expect(button).toHaveClass("icon-btn");
-    fireEvent.click(button);
-    expect(document.documentElement.dataset.theme).toBe("dark");
+    fireEvent.click(screen.getByRole("button", { name: "主题：深色" }));
+    expect(document.documentElement.getAttribute("data-color-mode")).toBe("dark");
     expect(localStorage.getItem("athena-theme")).toBe("dark");
     fireEvent.click(screen.getByRole("button", { name: "主题：浅色" }));
-    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.getAttribute("data-color-mode")).toBe("light");
     expect(localStorage.getItem("athena-theme")).toBe("light");
   });
 });
