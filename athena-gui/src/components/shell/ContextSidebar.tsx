@@ -163,6 +163,7 @@ function SessionContext({
                   <ActionList.Item
                     key={session.id}
                     active={group.isCurrent && session.id === currentSessionId}
+                    aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
                     title={`${group.name} · ${session.title}`}
                     onSelect={() =>
                       group.isCurrent ? onSelectSession(session.id) : onSelectWorkspace(group.root, session.id)

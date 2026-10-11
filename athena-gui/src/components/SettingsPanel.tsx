@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../lib/errors";
 import {
   DEFAULT_GUI_SETTINGS,
@@ -59,6 +59,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [saved, setSaved] = useState(false);
   const [projectRoot, setProjectRootInput] = useState("");
   const [switching, setSwitching] = useState(false);
+  const projectRootRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -155,6 +156,8 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     <Dialog
       width="xlarge"
       onClose={onClose}
+      // 初始焦点放在项目目录输入框：落在关闭按钮上会触发其 tooltip，首次 Esc 只会关掉 tooltip。
+      initialFocusRef={projectRootRef}
       renderHeader={({ dialogLabelId, dialogDescriptionId }) => (
         <Dialog.Header className={styles.header}>
           <div className={styles.headerText}>
@@ -189,6 +192,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         <Heading as="h3" variant="small">项目</Heading>
         <div className={styles.projectRow}>
           <TextInput
+            ref={projectRootRef}
             block
             aria-label="项目目录"
             placeholder="选择项目目录…"

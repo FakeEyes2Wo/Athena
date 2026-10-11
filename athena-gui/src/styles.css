@@ -7,6 +7,15 @@
   --BaseStyles-fontFamily: var(--fontStack-sansSerif);
 }
 
+/* Primer 主题 CSS 不设置 color-scheme，深色模式下原生滚动条与 select 弹层仍是浅色，此处按主题补齐。 */
+[data-color-mode="light"] {
+  color-scheme: light;
+}
+
+[data-color-mode="dark"] {
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }

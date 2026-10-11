@@ -34,6 +34,7 @@
   border: var(--borderWidth-thin) solid var(--borderColor-muted);
   border-radius: var(--borderRadius-medium);
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .bubbleHead {

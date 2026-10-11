@@ -25,12 +25,23 @@ export function HumanRequestDialog({
   const firstOptionRef = useRef<HTMLElement | null>(null);
   const textRef = useRef<HTMLInputElement>(null);
   const skipRef = useRef<HTMLButtonElement>(null);
+  const escapeSkipRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     setAnswer("");
     setErrorVisible(null);
     submittingRef.current = false;
   }, [request?.request_id]);
+
+  // Primer Dialog 的背景遮罩点击也会回调 onClose("escape")，所以不用 onClose 判断 Esc；
+  // 改在捕获阶段监听 Esc 键，先于 Primer 的处理器（它会 preventDefault 并中断后续处理器）。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") escapeSkipRef.current?.();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const submitReply = async (reply: HumanReply) => {
     if (!request || settling || submittingRef.current) return;
@@ -47,7 +58,10 @@ export function HumanRequestDialog({
     }
   };
 
-  if (!request) return null;
+  if (!request) {
+    escapeSkipRef.current = null;
+    return null;
+  }
 
   const choices = request.choices ?? [];
   const showText = request.allow_custom !== false;
@@ -70,16 +84,14 @@ export function HumanRequestDialog({
     void submitReply({ kind: "skip" });
   };
 
-  // 弹窗只能通过回答关闭（不渲染关闭按钮）；Esc 仅在允许跳过时等同 Skip。
-  const handleClose = (gesture: "close-button" | "escape") => {
-    if (gesture === "escape" && showSkip && !allDisabled) skip();
-  };
+  // 弹窗只能通过回答关闭：不渲染关闭按钮，点击背景遮罩无效；Esc 仅在允许跳过时等同 Skip。
+  escapeSkipRef.current = showSkip && !allDisabled ? skip : null;
 
   return (
     <Dialog
       key={request.request_id}
       width="large"
-      onClose={handleClose}
+      onClose={() => undefined}
       initialFocusRef={initialFocusRef}
       renderHeader={({ dialogLabelId }) => (
         <Dialog.Header>

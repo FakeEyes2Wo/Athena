@@ -313,6 +313,28 @@ describe("AppShell", () => {
     expect(switchSession).toHaveBeenCalledWith("s-current");
   });
 
+  it("marks only the current session as aria-current=page", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={["C:/beta"]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [
+            { id: "s-current", title: "Current" },
+            { id: "s-other", title: "Other" },
+          ],
+          currentSessionId: "s-current",
+        }) as never}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Current" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Other" })).not.toHaveAttribute("aria-current");
+  });
+
   it("keeps the workspace switch action in a footer outside the scroll region", () => {
     renderUi(
       <AppShell

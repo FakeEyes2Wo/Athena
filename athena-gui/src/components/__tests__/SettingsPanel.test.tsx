@@ -119,6 +119,13 @@ describe("SettingsPanel validation controls", () => {
     expect(patch.model_connection).toMatchObject({ llm_api_key: "new-secret" });
   });
 
+  it("focuses the project directory input on open so the first Escape closes the dialog", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+
+    render(<SettingsPanel onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "项目目录" })).toHaveFocus());
+  });
+
   it("closes on Escape", async () => {
     bridgeMocks.settingsGet.mockResolvedValue(settings());
     const onClose = vi.fn();

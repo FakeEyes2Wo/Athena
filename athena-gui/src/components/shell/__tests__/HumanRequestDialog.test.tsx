@@ -62,7 +62,19 @@ describe("HumanRequestDialog", () => {
     render(<HumanRequestDialog request={requestOne} onReply={reply} />);
 
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(reply).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenCalledWith({ kind: "skip" });
+  });
+
+  it("ignores a backdrop click even when skipping is allowed", () => {
+    const reply = vi.fn(async (_reply: HumanReply) => undefined);
+    render(<HumanRequestDialog request={requestOne} onReply={reply} />);
+
+    const backdrop = screen.getByRole("dialog").parentElement as HTMLElement;
+    fireEvent.mouseDown(backdrop);
+    fireEvent.click(backdrop);
+    expect(reply).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "需要你的确认" })).toBeInTheDocument();
   });
 
   it("does not skip on Escape when skipping is disallowed", () => {
