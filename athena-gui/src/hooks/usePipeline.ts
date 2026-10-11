@@ -497,6 +497,8 @@ export function usePipeline(
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
+  const messagesRef = useRef(viewModel.messages);
+  messagesRef.current = viewModel.messages;
   const pendingOutputEventsRef = useRef<PendingOutputEvent[]>([]);
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
@@ -1151,6 +1153,18 @@ export function usePipeline(
     }
   }, [currentSessionId, latestUnderstanding, renameSession]);
 
+  // Sessions restored from disk (or opened on another machine) have no local
+  // title yet; name them after their first task message instead of "新会话".
+  const firstUserMessage = useMemo(
+    () => viewModel.messages.find((message) => message.role === "user" && message.content.trim())?.content,
+    [viewModel.messages],
+  );
+  const currentTitle = sessions.find((session) => session.id === currentSessionId)?.title;
+  useEffect(() => {
+    if (currentTitle !== "新会话" || !firstUserMessage) return;
+    renameSession(currentSessionId, firstUserMessage.trim().replace(/\s+/g, " ").slice(0, 40));
+  }, [currentSessionId, currentTitle, firstUserMessage, renameSession]);
+
   // User actions.
 
   const continueCurrentRun = useCallback(async (): Promise<void> => {
@@ -1319,7 +1333,33 @@ export function usePipeline(
     }
   }, [appendError, applyDraftToPreview, latestPreview, nextId, applySessions]);
 
-  /** Send a revision instruction and return the draft to CLARIFYING. */
+  /**
+   * Revise/retry only move the persisted draft back to CLARIFYING; the backend
+   * runs the clarification loop inside ``task_clarification_start`` (start or
+   * resume the same task). Drive it again so the draft reaches READY/FAILED
+   * instead of waiting forever.
+   */
+  const resumeClarification = useCallback(async (
+    draft: ClarificationDraftDto | { draft_id?: string; revision: number; status: string },
+    draftId: string,
+  ) => {
+    applyDraftToPreview(draft, draftId);
+    const status = normalizeClarificationStatus(draft.status) ?? "CLARIFYING";
+    setClarificationStatus(status);
+    if (status !== "CLARIFYING") return;
+    const originalTask =
+      (draft as Partial<ClarificationDraftDto>).original_task ??
+      messagesRef.current.find((message) => {
+        const preview = message.preview as Partial<ClarificationPreview> | undefined;
+        return message.kind === "intent-preview" && preview?.draftId === draftId;
+      })?.task;
+    if (!originalTask?.trim()) return;
+    const result = await bridge.taskClarificationStart(originalTask);
+    applyDraftToPreview(result, draftIdOf(result) ?? draftId);
+    setClarificationStatus(normalizeClarificationStatus(result.status) ?? "CLARIFYING");
+  }, [applyDraftToPreview]);
+
+  /** Send a revision instruction; the task is understood again with it. */
   const reviseDraft = useCallback(async (instruction: string) => {
     const preview = latestPreview;
     if (!preview || !preview.draftId) return;
@@ -1329,13 +1369,13 @@ export function usePipeline(
     setClarificationStatus("CLARIFYING");
     try {
       const draft = await bridge.taskClarificationRevise(preview.draftId, preview.revision, text);
-      applyDraftToPreview(draft, preview.draftId);
-      setClarificationStatus(normalizeClarificationStatus(draft.status) ?? "CLARIFYING");
+      await resumeClarification(draft, preview.draftId);
     } catch (err) {
       setClarificationStatus("FAILED");
+      appendError(errorMessage(err));
       throw err;
     }
-  }, [applyDraftToPreview, latestPreview]);
+  }, [appendError, latestPreview, resumeClarification]);
 
   /** Retry a retryable FAILED draft. */
   const retryDraft = useCallback(async () => {
@@ -1345,13 +1385,13 @@ export function usePipeline(
     setClarificationStatus("CLARIFYING");
     try {
       const draft = await bridge.taskClarificationRetry(preview.draftId, preview.revision);
-      applyDraftToPreview(draft, preview.draftId);
-      setClarificationStatus(normalizeClarificationStatus(draft.status) ?? "CLARIFYING");
+      await resumeClarification(draft, preview.draftId);
     } catch (err) {
       setClarificationStatus("FAILED");
+      appendError(errorMessage(err));
       throw err;
     }
-  }, [applyDraftToPreview, latestPreview]);
+  }, [appendError, latestPreview, resumeClarification]);
 
   /** Cancel the current draft; backend settles any pending request and returns to IDLE. */
   const cancelDraft = useCallback(async () => {
@@ -1376,9 +1416,10 @@ export function usePipeline(
       }));
     } catch (err) {
       setClarificationStatus("FAILED");
+      appendError(errorMessage(err));
       throw err;
     }
-  }, [latestPreview, setClarificationIdentity]);
+  }, [appendError, latestPreview, setClarificationIdentity]);
 
   /** Unified human reply dispatch with double-submit protection. */
   const replyToHumanRequest = useCallback(async (requestId: string, reply: HumanReply) => {
@@ -1691,6 +1732,7 @@ export function usePipeline(
   return useMemo(() => ({
     viewModel,
     status,
+    activeDraft: latestPreview,
     runActive,
     sessions,
     currentSessionId,
@@ -1714,11 +1756,12 @@ export function usePipeline(
     newSession,
     switchSession,
     deleteSession,
+    renameSession,
     selectHypothesis,
     answerHuman,
     chooseHumanAnswer,
     skipHumanAnswer,
-  }), [answerHuman, cancelDraft, chooseHumanAnswer, clarificationStatus, clearLogs, confirmDraft, currentSessionId, deleteSession, humanPendingError, humanRequests, logs, pauseRun, replyToHumanRequest, resumeRun, retryDraft, reviseDraft, runActive, sendPrompt, sessions, settlingRequestId, skipHumanAnswer, startClarification, startRun, status, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+  }), [answerHuman, cancelDraft, chooseHumanAnswer, clarificationStatus, clearLogs, confirmDraft, currentSessionId, deleteSession, humanPendingError, humanRequests, latestPreview, logs, pauseRun, renameSession, replyToHumanRequest, resumeRun, retryDraft, reviseDraft, runActive, sendPrompt, sessions, settlingRequestId, skipHumanAnswer, startClarification, startRun, status, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
 }
 
 // Re-export convenience wrappers used by tests and components.

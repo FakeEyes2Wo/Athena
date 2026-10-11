@@ -90,7 +90,7 @@ describe("SettingsPanel validation controls", () => {
     bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
 
     render(<SettingsPanel onClose={vi.fn()} />);
-    await screen.findByDisplayValue("C:/project");
+    await screen.findByText("C:/project");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
 
@@ -108,9 +108,11 @@ describe("SettingsPanel validation controls", () => {
     }));
     bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
 
-    const { container } = render(<SettingsPanel onClose={vi.fn()} />);
-    await screen.findByDisplayValue("C:/project");
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
+    render(<SettingsPanel onClose={vi.fn()} />);
+    await screen.findByText("C:/project");
+    const input = screen.getByLabelText("API Key") as HTMLInputElement;
+    expect(input).toHaveAttribute("type", "password");
+    expect(input).toHaveValue("");
     fireEvent.change(input, { target: { value: "new-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
@@ -118,5 +120,43 @@ describe("SettingsPanel validation controls", () => {
     const calls = bridgeMocks.settingsSet.mock.calls;
     const patch = calls[calls.length - 1]?.[0];
     expect(patch.model_connection).toMatchObject({ llm_api_key: "new-secret" });
+  });
+
+  it("keeps spaces inside the dataset path and trims it on save", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+    bridgeMocks.settingsSet.mockImplementation(async (patch) => settings(patch));
+
+    render(<SettingsPanel onClose={vi.fn()} />);
+    await screen.findByText("C:/project");
+    const dataRoot = screen.getByRole("textbox", { name: /数据集根目录/ });
+    fireEvent.change(dataRoot, { target: { value: "D:/My Data " } });
+    expect(dataRoot).toHaveValue("D:/My Data ");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
+    expect(bridgeMocks.settingsSet.mock.calls[0][0]).toMatchObject({ data_root: "D:/My Data" });
+  });
+
+  it("blocks saving invalid numbers and explains why", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+
+    render(<SettingsPanel onClose={vi.fn()} />);
+    await screen.findByText("C:/project");
+    fireEvent.change(screen.getByRole("spinbutton", { name: /并发数/ }), { target: { value: "0" } });
+
+    expect(screen.getByText("请输入不小于 1 的整数")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  });
+
+  it("switches projects through the workspace picker instead of a raw path field", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings());
+    const onSwitchWorkspace = vi.fn();
+
+    render(<SettingsPanel onClose={vi.fn()} onSwitchWorkspace={onSwitchWorkspace} />);
+    await screen.findByText("C:/project");
+    fireEvent.click(screen.getByRole("button", { name: "切换工作区" }));
+
+    expect(onSwitchWorkspace).toHaveBeenCalledOnce();
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
   });
 });

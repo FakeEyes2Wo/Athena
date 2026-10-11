@@ -38,13 +38,23 @@ backend.on("exit", (code) => {
 });
 
 if (!backendOnly) {
-  console.error("[dev] frontend: npm run dev");
-  monitor("frontend", spawn("npm", ["run", "dev"], {
+  const webPort = process.env.ATHENA_WEB_PORT || "1421";
+  console.error(`[dev] frontend: npm run dev (http://localhost:${webPort})`);
+  const frontend = monitor("frontend", spawn("npm", ["run", "dev"], {
     cwd: guiDir,
-    env: { ...process.env, VITE_GUI_PORT: port },
+    env: { ...process.env, VITE_GUI_PORT: port, ATHENA_WEB_PORT: webPort },
     stdio: "inherit",
     shell: process.platform === "win32",
   }));
+  frontend.on("exit", (code) => {
+    if (shuttingDown) return;
+    console.error(
+      `[dev] frontend is unavailable; stopping the backend. If port ${webPort} is reserved ` +
+        "(Windows: netsh interface ipv4 show excludedportrange protocol=tcp), " +
+        "set ATHENA_WEB_PORT to a free port and retry.",
+    );
+    shutdown(code || 1);
+  });
 }
 
 function shutdown(code = 0) {

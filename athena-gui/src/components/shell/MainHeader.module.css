@@ -1,0 +1,64 @@
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  min-height: var(--header-height);
+  padding: 8px 14px 8px 20px;
+  background: var(--bg);
+  position: relative;
+  z-index: 2;
+}
+
+.titleBlock {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  max-width: min(46%, 520px);
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.middle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+@media (max-width: 900px) {
+  .titleBlock {
+    max-width: 100%;
+  }
+  .subtitle {
+    display: none;
+  }
+}

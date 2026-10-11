@@ -1,68 +1,238 @@
-.trace-layout {
+.layout {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: var(--space-md);
-  flex: 1;
-  min-height: 320px;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  height: 100%;
+  min-height: 420px;
 }
-.trace-list {
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.sidebarHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: var(--surface-muted);
+  color: var(--text-tertiary);
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 4px;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
 }
-.trace-list__item {
-  display: block;
+
+.item {
   width: 100%;
-  text-align: left;
-  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
   border: none;
-  border-bottom: 1px solid var(--border);
+  border-radius: 8px;
   background: transparent;
   cursor: pointer;
-  font-size: 13px;
+  text-align: left;
   color: var(--text-primary);
-  transition: background var(--dur) var(--ease);
 }
-.trace-list__item:last-child { border-bottom: none; }
-.trace-list__item:hover { background: var(--surface-elevated); }
-.trace-list__item--active { background: var(--accent-subtle); }
-.trace-list__item-title {
-  display: block;
-  font-weight: 600;
-  font-size: 12px;
+
+.item:hover {
+  background: var(--hover);
+}
+
+.item[aria-current="true"] {
+  background: var(--accent-subtle);
+}
+
+.itemTitle {
   font-family: var(--font-mono);
-}
-.trace-list__item-meta {
-  display: block;
-  color: var(--text-secondary);
-  font-size: 11px;
-  margin-top: 2px;
-}
-.trace-pane {
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-md);
-  background: var(--surface);
-}
-.trace-bubble {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-  margin-bottom: 8px;
   font-size: 12px;
-  background: var(--surface);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.trace-bubble:last-child { margin-bottom: 0; }
-.trace-bubble__head {
+
+.itemMeta {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.none {
+  padding: 12px;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+}
+
+.timeline {
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 4px;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
 }
-.trace-bubble__seq { color: var(--text-tertiary); font-size: 11px; }
-.trace-bubble__body { white-space: pre-wrap; word-break: break-word; color: var(--text-primary); }
+
+/* Bubbles clip (overflow: hidden), which lets flex shrink them to slivers in a
+   height-bounded column; the timeline scrolls instead. */
+.timeline > * {
+  flex-shrink: 0;
+}
+
+.timelineHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 2px 6px;
+}
+
+.timelineTitle {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bubble {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.bubble[data-role="assistant"] {
+  border-left: 3px solid var(--accent);
+}
+
+.bubble[data-role="tool"] {
+  border-left: 3px solid var(--warning);
+}
+
+.bubble > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.bubble > summary::-webkit-details-marker {
+  display: none;
+}
+
+.bubble > summary:hover {
+  background: var(--hover);
+}
+
+.chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur) var(--ease);
+}
+
+details[open] > summary .chevron {
+  transform: rotate(90deg);
+}
+
+.staticHead {
+  padding: 8px 12px 0;
+}
+
+.head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolName {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.seq {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.body {
+  margin: 0;
+  padding: 8px 12px 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.bubble :global(.code-block) {
+  margin: 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    max-height: 240px;
+  }
+}

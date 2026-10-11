@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { Icon } from "./Icon";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -19,9 +20,20 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   render() {
     if (this.state.error) {
       return (
-        <div className="card card--error" style={{ margin: "var(--space-lg)" }}>
-          <h3 className="card__title">面板加载失败</h3>
-          <p className="card__body">{this.state.error.message}</p>
+        <div className="callout callout--error" role="alert" style={{ margin: "var(--space-lg)" }}>
+          <Icon name="alert" size={16} />
+          <div className="callout__body">
+            <h3 className="callout__title" style={{ fontSize: 13 }}>面板加载失败</h3>
+            <p style={{ margin: 0 }}>{this.state.error.message}</p>
+            <button
+              type="button"
+              className="btn btn--sm"
+              style={{ marginTop: 8 }}
+              onClick={() => this.setState({ error: null })}
+            >
+              重试
+            </button>
+          </div>
         </div>
       );
     }

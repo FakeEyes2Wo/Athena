@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage } from "../lib/errors";
 import ReactFlow, {
   Background,
@@ -23,7 +23,12 @@ import {
   type ResearchTreeData,
 } from "../lib/tauri-bridge";
 import { layoutLineage } from "../lib/graphLayout";
+import { formatMetric } from "../lib/labels";
+import { useResearchSignal } from "../hooks/useResearchSignal";
+import { useInitialViewport } from "../hooks/useInitialViewport";
 import { EmptyState } from "./common/EmptyState";
+import { Icon } from "./common/Icon";
+import { EXPERIMENT_STATUS, HYPOTHESIS_STATUS, StatusBadge } from "./common/StatusBadge";
 
 const AUTO_SAVE_MS = 30_000;
 const NODE_W = 220;
@@ -33,6 +38,11 @@ const NODE_H = 92;
 export const STATUS_COLORS: Record<string, { bg: string; border: string; text: string }> = {
   SUPPORTED: { bg: "var(--status-supported-bg)", border: "var(--status-supported-border)", text: "var(--status-supported-text)" },
   REFUTED: { bg: "var(--status-refuted-bg)", border: "var(--status-refuted-border)", text: "var(--status-refuted-text)" },
+  INCONCLUSIVE: {
+    bg: "var(--status-inconclusive-bg)",
+    border: "var(--status-inconclusive-border)",
+    text: "var(--status-inconclusive-text)",
+  },
   REJECTED: { bg: "var(--status-rejected-bg)", border: "var(--status-rejected-border)", text: "var(--status-rejected-text)" },
   PROPOSED: { bg: "var(--status-proposed-bg)", border: "var(--status-proposed-border)", text: "var(--status-proposed-text)" },
 };
@@ -41,34 +51,49 @@ export function statusColor(status: string) {
   return STATUS_COLORS[status] ?? STATUS_COLORS.PROPOSED;
 }
 
+/** Status legend shared by both graph views. */
+export function StatusLegend({ children }: { children?: ReactNode }) {
+  return (
+    <div className="legend">
+      <span className="legend__title">假设状态</span>
+      <span className="legend__swatches">
+        {Object.entries(STATUS_COLORS).map(([status, colors]) => (
+          <span key={status} className="badge" style={{ background: colors.bg, color: colors.text }}>
+            {HYPOTHESIS_STATUS[status]?.label ?? status}
+          </span>
+        ))}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 /** Custom React Flow node rendering a research experiment with hypothesis status. */
 interface ResearchNodeData {
   id: string;
   experiment: ResearchExperimentData;
   hypothesis: HypothesisData;
+  sota: boolean;
 }
 
 function ResearchNode({ data }: { data: ResearchNodeData }) {
   const colors = statusColor(data.hypothesis.status);
-  const result = data.experiment.eval
-    ? data.experiment.eval.primary.toFixed(4)
-    : "无指标";
+  const result = data.experiment.eval ? data.experiment.eval.primary.toFixed(4) : "无指标";
 
   return (
-    <div className="flow-node" style={{ borderColor: colors.border }}>
+    <div className={`flow-node${data.sota ? " flow-node--sota" : ""}`} style={{ borderLeftColor: colors.border }}>
       <Handle type="target" position={Position.Top} />
-      <div className="flow-node__title">
-        {data.hypothesis.statement.slice(0, 48)}
-        {data.hypothesis.statement.length > 48 ? "…" : ""}
+      <div className="flow-node__title" title={data.hypothesis.statement}>
+        {data.hypothesis.statement}
       </div>
       <div className="flow-node__meta">
-        Primary: <strong>{result}</strong>
-      </div>
-      <div
-        className="flow-node__badge"
-        style={{ background: colors.bg, borderColor: colors.border, color: colors.text }}
-      >
-        {data.experiment.status}
+        <span>
+          {data.sota && <span style={{ color: "var(--gold)" }}>★ </span>}
+          <strong>{result}</strong>
+        </span>
+        <span className="flow-node__badge" style={{ background: colors.bg, color: colors.text }}>
+          {EXPERIMENT_STATUS[data.experiment.status]?.label ?? data.experiment.status}
+        </span>
       </div>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -101,7 +126,7 @@ function buildGraph(tree: ResearchTreeData): { nodes: Node[]; edges: Edge[] } {
       id,
       type: "researchNode",
       position: pos,
-      data: { id, experiment, hypothesis },
+      data: { id, experiment, hypothesis, sota: tree.sota_id === id },
     };
   });
 
@@ -110,17 +135,18 @@ function buildGraph(tree: ResearchTreeData): { nodes: Node[]; edges: Edge[] } {
     source: edge.source,
     target: edge.target,
     markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "var(--text-tertiary)" },
-    style: { stroke: "var(--text-tertiary)", strokeWidth: 1.75 },
+    style: { stroke: "var(--text-tertiary)", strokeWidth: 1.5 },
   }));
 
   return { nodes, edges };
 }
 
-/** Toolbar with save, refresh, and auto-save toggle for the research tree. */
+/** Toolbar with stats, refresh, save and auto-save toggle for the research tree. */
 function ControlsBar({
   saving,
   autoSave,
   nodeCount,
+  sotaId,
   onRefresh,
   onSave,
   onToggleAutoSave,
@@ -128,24 +154,71 @@ function ControlsBar({
   saving: boolean;
   autoSave: boolean;
   nodeCount: number;
+  sotaId: string | null;
   onRefresh: () => void;
   onSave: () => void;
   onToggleAutoSave: () => void;
 }) {
   return (
     <div className="panel-toolbar">
-      <h3>研究树 ({nodeCount} 个实验)</h3>
+      <h3>
+        {nodeCount} 个实验
+        {sotaId && (
+          <span className="badge badge--gold" title={sotaId}>
+            <Icon name="star" size={11} /> SOTA {sotaId}
+          </span>
+        )}
+      </h3>
       <div className="panel-toolbar__actions">
-        <button className="btn btn--subtle btn--sm" onClick={onRefresh}>刷新</button>
-        <button className="btn btn--subtle btn--sm" onClick={onSave} disabled={saving}>
-          {saving ? "保存中…" : "保存"}
+        <button type="button" className="btn btn--ghost btn--sm" onClick={onRefresh}>
+          <Icon name="refresh" size={13} /> 刷新
         </button>
-        <label className="switch">
+        <button type="button" className="btn btn--ghost btn--sm" onClick={onSave} disabled={saving} title="将内存中的研究树写入磁盘">
+          <Icon name="download" size={13} /> {saving ? "保存中…" : "保存"}
+        </button>
+        <label className="switch" title="每 30 秒自动保存研究树">
           <input type="checkbox" checked={autoSave} onChange={onToggleAutoSave} />
           <span className="switch__track" />
           自动保存
         </label>
       </div>
+    </div>
+  );
+}
+
+function NodeDetail({ data, onClose }: { data: ResearchNodeData; onClose(): void }) {
+  return (
+    <div className="graph-detail" role="region" aria-label="节点详情">
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+          {data.id}
+        </span>
+        <button type="button" className="icon-btn icon-btn--sm" onClick={onClose} aria-label="关闭节点详情">
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <StatusBadge status={data.experiment.status} />
+        <StatusBadge status={data.hypothesis.status} kind="hypothesis" />
+        {data.sota && <span className="badge badge--gold">★ SOTA</span>}
+      </div>
+      <p style={{ margin: 0, lineHeight: 1.6 }}>{data.hypothesis.statement}</p>
+      <div className="kv">
+        <span className="kv__label">主指标</span>
+        <span className="kv__value kv__value--mono">{formatMetric(data.experiment.eval?.primary)}</span>
+      </div>
+      {data.experiment.plan.change && (
+        <div className="kv">
+          <span className="kv__label">变更</span>
+          <span className="kv__value">{data.experiment.plan.change}</span>
+        </div>
+      )}
+      {data.experiment.error && (
+        <div className="kv">
+          <span className="kv__label">错误</span>
+          <span className="kv__value" style={{ color: "var(--danger)" }}>{data.experiment.error}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -156,10 +229,12 @@ function ControlsBar({
  * by d3-dag, and supports manual drag, save/refresh, and auto-save.
  */
 export default function ResearchTreeViz() {
+  const { token } = useResearchSignal();
   const [tree, setTree] = useState<ResearchTreeData | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [autoSave, setAutoSave] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -178,6 +253,8 @@ export default function ResearchTreeViz() {
     try {
       await treeSave();
       await refresh();
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -185,7 +262,7 @@ export default function ResearchTreeViz() {
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, token]);
 
   useEffect(() => {
     if (autoSave) {
@@ -212,14 +289,17 @@ export default function ResearchTreeViz() {
   const [nodes, setNodes, applyNodesChange] = useNodesState(graph.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(graph.edges);
 
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    for (const change of changes) {
-      if (change.type === "position" && change.position) {
-        positionedNodeIdsRef.current.add(change.id);
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      for (const change of changes) {
+        if (change.type === "position" && change.position) {
+          positionedNodeIdsRef.current.add(change.id);
+        }
       }
-    }
-    applyNodesChange(changes);
-  }, [applyNodesChange]);
+      applyNodesChange(changes);
+    },
+    [applyNodesChange],
+  );
 
   useEffect(() => {
     setNodes((currentNodes) => {
@@ -242,47 +322,78 @@ export default function ResearchTreeViz() {
     setEdges(graph.edges);
   }, [graph.edges, graph.nodes, setEdges, setNodes]);
 
+  const viewport = useInitialViewport(graph.nodes, { nodeWidth: NODE_W, nodeHeight: NODE_H });
+
+  const selectedData = selected ? (graph.nodes.find((node) => node.id === selected)?.data as ResearchNodeData | undefined) : undefined;
+
   if (!tree || nodeCount === 0) {
     return (
       <div className="detail-panel">
         <ControlsBar
-          saving={saving} autoSave={autoSave} nodeCount={0}
-          onRefresh={refresh} onSave={save} onToggleAutoSave={toggleAutoSave}
+          saving={saving}
+          autoSave={autoSave}
+          nodeCount={0}
+          sotaId={null}
+          onRefresh={refresh}
+          onSave={save}
+          onToggleAutoSave={toggleAutoSave}
         />
-        {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
-        <EmptyState icon="tree" message="暂无实验数据。启动搜索后研究树将自动构建。" />
+        {error && (
+          <div className="callout callout--error" role="alert">
+            <Icon name="alert" size={15} />
+            <div className="callout__body">{error}</div>
+          </div>
+        )}
+        <EmptyState
+          icon="tree"
+          title="研究树还是空的"
+          message="研究开始后，基线实验会成为根节点，每次搜索尝试都作为子节点挂在它的父实验下。"
+        />
       </div>
     );
   }
 
   return (
-    <div className="detail-panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div className="detail-panel detail-panel--fill">
       <ControlsBar
-        saving={saving} autoSave={autoSave} nodeCount={nodeCount}
-        onRefresh={refresh} onSave={save} onToggleAutoSave={toggleAutoSave}
+        saving={saving}
+        autoSave={autoSave}
+        nodeCount={nodeCount}
+        sotaId={tree.sota_id}
+        onRefresh={refresh}
+        onSave={save}
+        onToggleAutoSave={toggleAutoSave}
       />
-      <div className="graph-container" role="region" aria-label="研究树可视化">
+      {error && (
+        <div className="callout callout--error" role="alert">
+          <Icon name="alert" size={15} />
+          <div className="callout__body">{error}</div>
+        </div>
+      )}
+      <div className="graph-container" role="region" aria-label="研究树可视化" ref={viewport.containerRef}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onNodeClick={(_event, node) => setSelected(node.id)}
+          onPaneClick={() => setSelected(null)}
           nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.3 }}
-          minZoom={0.3}
+          onInit={viewport.onInit}
+          minZoom={0.2}
           maxZoom={2}
         >
-          <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--border-strong)" />
-          <Controls />
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="var(--border-strong)" />
+          <Controls showInteractive={false} fitViewOptions={{ padding: 0.08 }} />
           <MiniMap
-            nodeColor={(n) => {
-              const d = n.data as ResearchNodeData;
-              return statusColor(d.hypothesis.status).border;
-            }}
-            style={{ borderRadius: 8 }}
+            pannable
+            zoomable
+            nodeColor={(n) => statusColor((n.data as ResearchNodeData).hypothesis.status).border}
+            maskColor="rgba(0,0,0,0.06)"
           />
         </ReactFlow>
+        <StatusLegend />
+        {selectedData && <NodeDetail data={selectedData} onClose={() => setSelected(null)} />}
       </div>
     </div>
   );

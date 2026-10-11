@@ -1,0 +1,24 @@
+.banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 16px 0;
+  padding: 8px 10px 8px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+  background: var(--warning-subtle);
+  color: var(--text-primary);
+  font-size: 13px;
+  animation: fade-in-up var(--dur-slow) var(--ease) both;
+}
+
+.banner > svg {
+  color: var(--warning);
+  flex-shrink: 0;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+}

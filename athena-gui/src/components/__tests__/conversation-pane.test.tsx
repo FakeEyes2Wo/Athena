@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, screen, fireEvent, within } from "@testing-library/react";
+import { composerModeOf } from "../conversation/ConversationPane";
 import { renderUi } from "../../test/render";
 import { ConversationPane } from "../conversation/ConversationPane";
 import {
@@ -110,8 +111,8 @@ describe("ConversationPane", () => {
 
     expect(screen.getByText("analyze this CSV")).toBeInTheDocument();
     expect(screen.getByText("任务类型")).toBeInTheDocument();
-    expect(screen.getByText("classification")).toBeInTheDocument();
-    expect(screen.getByText("f1_macro · maximize")).toBeInTheDocument();
+    expect(screen.getByText("分类")).toBeInTheDocument();
+    expect(screen.getByText("f1_macro · 越大越好")).toBeInTheDocument();
   });
 
   it("calls startRun when the confirm button is clicked on an intent preview card", async () => {
@@ -147,7 +148,7 @@ describe("ConversationPane", () => {
     renderUi(<ConversationPane pipeline={pipeline as never} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /确认并启动/i }));
+      fireEvent.click(screen.getByRole("button", { name: "确认并开始研究" }));
     });
     expect(startRun).toHaveBeenCalledTimes(1);
   });
@@ -244,7 +245,7 @@ describe("ConversationPane", () => {
     renderUi(<ConversationPane pipeline={pipeline as never} />);
 
     expect(screen.getByText(/已启动/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /确认并启动/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认并开始研究" })).not.toBeInTheDocument();
   });
 
   it("shows backend output inside the live task-understanding activity while clarifying", () => {
@@ -646,4 +647,208 @@ describe("ConversationPane", () => {
       expect(screen.getByText("开始搜索候选方案")).toBeInTheDocument();
     },
   );
+});
+
+const pendingRequest = {
+  request_id: "req-1",
+  session_id: "default",
+  scope_id: "draft-1",
+  scope_kind: "clarification",
+  prompt: "目标列是哪一个？",
+  choices: [
+    { label: "churned", value: "churned" },
+    { label: "label", value: "label" },
+  ],
+  allow_custom: true,
+  allow_skip: true,
+  created_at: "2026-10-10T10:00:00Z",
+  expires_at: "2099-01-01T00:00:00Z",
+};
+
+function routedPipeline(overrides: Record<string, unknown> = {}) {
+  return {
+    viewModel: {
+      ...createEmptyPipelineViewModel(),
+      messages: [{ id: "user-1", role: "user" as const, kind: "text" as const, content: "predict churn" }],
+    },
+    status: "IDLE",
+    runActive: false,
+    humanRequests: [],
+    sendPrompt: vi.fn().mockResolvedValue(undefined),
+    startRun: vi.fn(),
+    confirmDraft: vi.fn().mockResolvedValue(undefined),
+    reviseDraft: vi.fn().mockResolvedValue(undefined),
+    retryDraft: vi.fn().mockResolvedValue(undefined),
+    cancelDraft: vi.fn().mockResolvedValue(undefined),
+    replyToHumanRequest: vi.fn().mockResolvedValue(undefined),
+    stopRun: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+function typeAndSend(text: string) {
+  const box = screen.getByRole("textbox", { name: "消息" });
+  fireEvent.change(box, { target: { value: text } });
+  fireEvent.keyDown(box, { key: "Enter" });
+  return box;
+}
+
+describe("ConversationPane composer routing", () => {
+  it("derives the composer mode from the session state", () => {
+    const base = routedPipeline();
+    expect(composerModeOf(base as never)).toBe("task");
+    expect(composerModeOf({ ...base, humanRequests: [pendingRequest] } as never)).toBe("answer");
+    expect(
+      composerModeOf({ ...base, humanRequests: [{ ...pendingRequest, allow_custom: false }] } as never),
+    ).toBe("choice-only");
+    expect(composerModeOf({ ...base, status: "READY_FOR_CONFIRMATION" } as never)).toBe("revise");
+    expect(composerModeOf({ ...base, status: "CLARIFYING" } as never)).toBe("busy");
+    expect(
+      composerModeOf({ ...base, runActive: true, viewModel: { ...base.viewModel, status: "running" } } as never),
+    ).toBe("guide");
+    expect(
+      composerModeOf({ ...base, runActive: true, viewModel: { ...base.viewModel, status: "completed" } } as never),
+    ).toBe("ended");
+  });
+
+  it("answers a pending question with the composer text", async () => {
+    const pipeline = routedPipeline({ humanRequests: [pendingRequest], status: "CLARIFYING" });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    expect(screen.getByRole("region", { name: "需要你的确认" })).toHaveTextContent("目标列是哪一个？");
+    await act(async () => {
+      typeAndSend("churned 列");
+    });
+    expect(pipeline.replyToHumanRequest).toHaveBeenCalledWith("req-1", { kind: "text", text: "churned 列" });
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("answers with a choice from the question panel", async () => {
+    const pipeline = routedPipeline({ humanRequests: [pendingRequest], status: "CLARIFYING" });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "label" }));
+    });
+    expect(pipeline.replyToHumanRequest).toHaveBeenCalledWith("req-1", { kind: "choice", value: "label" });
+  });
+
+  it("turns composer input into a revision while the draft awaits confirmation", async () => {
+    const pipeline = routedPipeline({ status: "READY_FOR_CONFIRMATION" });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    await act(async () => {
+      typeAndSend("主指标改为 AUC");
+    });
+    expect(pipeline.reviseDraft).toHaveBeenCalledWith("主指标改为 AUC");
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("locks the composer while Athena is understanding the task", () => {
+    renderUi(<ConversationPane pipeline={routedPipeline({ status: "CLARIFYING" }) as never} />);
+    expect(screen.getByRole("textbox", { name: "消息" })).toBeDisabled();
+  });
+
+  it("offers a new session once this session's research has ended", () => {
+    const onNewSession = vi.fn();
+    const pipeline = routedPipeline({
+      runActive: true,
+      viewModel: { ...routedPipeline().viewModel, status: "completed", phase: "COMPLETED" },
+    });
+    renderUi(<ConversationPane pipeline={pipeline as never} onNewSession={onNewSession} />);
+
+    expect(screen.getByRole("textbox", { name: "消息" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(onNewSession).toHaveBeenCalledOnce();
+  });
+
+  it("sends a new task without blocking the composer on the long clarification call", async () => {
+    let finish!: () => void;
+    const sendPrompt = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pipeline = routedPipeline({ sendPrompt });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    let box!: HTMLElement;
+    await act(async () => {
+      box = typeAndSend("predict churn with macro F1");
+    });
+    expect(sendPrompt).toHaveBeenCalledWith("predict churn with macro F1");
+    expect(box).toHaveValue("");
+    // The send button is not stuck in a pending state while clarification runs.
+    fireEvent.change(box, { target: { value: "next" } });
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+    await act(async () => finish());
+  });
+
+  it("keeps Shift+Enter as a newline and ignores Enter during IME composition", () => {
+    const pipeline = routedPipeline();
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+    const box = screen.getByRole("textbox", { name: "消息" });
+
+    fireEvent.change(box, { target: { value: "第一行" } });
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("routes /stop through the confirming stop handler", async () => {
+    const onStopRun = vi.fn();
+    const pipeline = routedPipeline({
+      runActive: true,
+      viewModel: { ...routedPipeline().viewModel, status: "running", phase: "SEARCH" },
+    });
+    renderUi(<ConversationPane pipeline={pipeline as never} onStopRun={onStopRun} />);
+
+    await act(async () => {
+      typeAndSend("/stop");
+    });
+    expect(onStopRun).toHaveBeenCalledOnce();
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("suggests slash commands and completes the highlighted one", () => {
+    const pipeline = routedPipeline({
+      runActive: true,
+      viewModel: { ...routedPipeline().viewModel, status: "running", phase: "SEARCH" },
+    });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+    const box = screen.getByRole("textbox", { name: "消息" });
+
+    fireEvent.change(box, { target: { value: "/se" } });
+    expect(screen.getByRole("listbox", { name: "命令" })).toHaveTextContent("/select");
+    fireEvent.keyDown(box, { key: "Tab" });
+    expect(box).toHaveValue("/select ");
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("fills the composer from an example prompt instead of sending it", () => {
+    const pipeline = routedPipeline({ viewModel: createEmptyPipelineViewModel() });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /回归预测/ }));
+    expect((screen.getByRole("textbox", { name: "描述你的研究任务" }) as HTMLTextAreaElement).value).toContain(
+      "RMSE",
+    );
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConversationPane welcome", () => {
+  it("fills the composer from an example and moves focus into it", async () => {
+    const pipeline = routedPipeline({ viewModel: createEmptyPipelineViewModel() });
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "表格二分类" }));
+
+    const box = screen.getByRole("textbox", { name: "描述你的研究任务" }) as HTMLTextAreaElement;
+    expect(box.value).toContain("二分类");
+    expect(box).toHaveFocus();
+    expect(box.selectionStart).toBe(box.value.length);
+    expect(pipeline.sendPrompt).not.toHaveBeenCalled();
+  });
 });

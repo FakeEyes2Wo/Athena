@@ -56,6 +56,19 @@ npm run dev:web
 然后打开 <http://localhost:1421>。该命令同时启动 Python WebSocket gateway；默认
 gateway 地址是本机 `127.0.0.1:17601`，通常不需要手动设置。
 
+Windows 可能把 1421 划入系统保留的 TCP 端口段（可用
+`netsh interface ipv4 show excludedportrange protocol=tcp` 查看），此时前端无法监听，
+启动器会给出提示并退出。换一个端口即可：
+
+```bash
+ATHENA_WEB_PORT=5173 npm run dev:web          # PowerShell: $env:ATHENA_WEB_PORT=5173; npm run dev:web
+```
+
+界面左侧是新会话、视图导航和按工作区分组的会话列表；中间是对话：描述任务后，
+Athena 先给出任务理解卡片供你确认或修改，确认后自动研究，过程中的提问会出现在
+输入框上方。研究树、实验、数据分析、模型轨迹和报告可从侧栏进入，右上角可打开
+研究概览和运行日志。
+
 ### 运行一次 TESS SEARCH 演示
 
 项目工作区和数据目录必须分开。工作区可以使用一个新的空目录，例如：

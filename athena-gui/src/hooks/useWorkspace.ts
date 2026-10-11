@@ -30,6 +30,8 @@ export interface WorkspaceState {
 
 export interface WorkspaceActions {
   switchTo(path: string, sessionId?: string): Promise<void>;
+  /** Re-read the backend's active root (e.g. after the gateway became reachable). */
+  reload(): Promise<void>;
   browse(): Promise<void>;
   openPicker(): void;
   closePicker(): void;
@@ -61,31 +63,41 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const browsingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let mounted = true;
-    mountedRef.current = true;
+  const loadActiveRoot = useCallback((isCurrent: () => boolean) => {
     const rememberedRoots = loadRecentRoots();
     setRecentRoots(rememberedRoots);
-    settingsGet()
+    return settingsGet()
       .then((settings) => {
-        if (!mounted || !mountedRef.current) return;
+        if (!isCurrent()) return;
         const root = settings.project_root || null;
         setCurrentRoot(root);
+        setError(null);
         // 后端已恢复上次项目目录时直接进入主界面，不再弹选择页。
         setPickerOpen(!root || !rememberedRoots.includes(root));
         setReady(true);
       })
       .catch((err: unknown) => {
-        if (!mounted || !mountedRef.current) return;
+        if (!isCurrent()) return;
         setError(errorMessage(err));
         setReady(true);
       });
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    mountedRef.current = true;
+    void loadActiveRoot(() => mounted && mountedRef.current);
     return () => {
       mounted = false;
       mountedRef.current = false;
       queuedIntentRef.current = null;
     };
-  }, []);
+  }, [loadActiveRoot]);
+
+  const reload = useCallback(
+    () => loadActiveRoot(() => mountedRef.current),
+    [loadActiveRoot],
+  );
 
   const switchTo = useCallback((path: string, sessionId?: string): Promise<void> => {
     if (!mountedRef.current) return Promise.resolve();
@@ -165,10 +177,11 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
       browsing,
       error,
       switchTo,
+      reload,
       browse,
       openPicker,
       closePicker,
     }),
-    [currentRoot, recentRoots, requestedSessionId, ready, pickerOpen, switching, browsing, error, switchTo, browse, openPicker, closePicker],
+    [currentRoot, recentRoots, requestedSessionId, ready, pickerOpen, switching, browsing, error, switchTo, reload, browse, openPicker, closePicker],
   );
 }

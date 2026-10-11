@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { screen, fireEvent, within } from "@testing-library/react";
+import { act, screen, fireEvent, within } from "@testing-library/react";
 import { renderUi } from "../../test/render";
 import { AppShell } from "../shell/AppShell";
 import { createEmptyPipelineViewModel } from "../../types/ui";
@@ -120,7 +120,7 @@ describe("AppShell", () => {
     expect(screen.getAllByText("新会话")).toHaveLength(1);
   });
 
-  it("offers deletion for the default session too", () => {
+  it("offers deletion for the default session too", async () => {
     const deleteSession = vi.fn();
 
     renderUi(
@@ -138,8 +138,42 @@ describe("AppShell", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "删除会话 默认会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多操作 默认会话" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    // Deleting is destructive: nothing happens until the confirmation is accepted.
+    expect(deleteSession).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", { name: "删除会话？" });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+    });
     expect(deleteSession).toHaveBeenCalledWith("default");
+  });
+
+  it("keeps the session when deletion is cancelled", async () => {
+    const deleteSession = vi.fn();
+
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [{ id: "s-1", title: "流失预测" }],
+          currentSessionId: "s-1",
+          deleteSession,
+        }) as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作 流失预测" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "取消" }));
+    });
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("renders cached sessions synchronously in stable workspace order without an RPC", () => {
@@ -296,5 +330,149 @@ describe("AppShell", () => {
     expect(footer).not.toBeNull();
     expect(scrollRegion).not.toContainElement(switchButton);
     expect(within(footer as HTMLElement).getByRole("button", { name: "切换工作区" })).toBe(switchButton);
+  });
+
+  it("navigates between views without rebuilding the session runtime", () => {
+    const switchSession = vi.fn().mockResolvedValue(undefined);
+
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({ switchSession }) as never}
+      />,
+    );
+
+    const research = screen.getByRole("button", { name: "研究树" });
+    fireEvent.click(research);
+    expect(research).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "研究树" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "对话" }));
+    expect(screen.getByRole("button", { name: "对话" })).toHaveAttribute("aria-current", "page");
+    // Returning to the conversation must not call session_switch: that rebuilds the
+    // runtime and cancels any clarification question that is still pending.
+    expect(switchSession).not.toHaveBeenCalled();
+  });
+
+  it("opens settings as a dialog over the current view", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline() as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeInTheDocument();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "设置" })).not.toBeInTheDocument();
+  });
+
+  it("asks for confirmation before stopping a run", async () => {
+    const stopRun = vi.fn().mockResolvedValue(undefined);
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          stopRun,
+          runActive: true,
+          viewModel: { ...createEmptyPipelineViewModel(), phase: "SEARCH", status: "running" },
+        }) as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(stopRun).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("dialog", { name: "停止当前研究？" })).getByRole("button", { name: "停止研究" }));
+    });
+    expect(stopRun).toHaveBeenCalledOnce();
+  });
+
+  it("toggles the research inspector from the conversation header", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline() as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "研究概览" }));
+    expect(screen.getByRole("complementary", { name: "研究概览" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭研究概览" }));
+    expect(screen.queryByRole("complementary", { name: "研究概览" })).not.toBeInTheDocument();
+  });
+
+  it("renames a session from its menu", () => {
+    const renameSession = vi.fn();
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [{ id: "s-1", title: "旧标题" }],
+          currentSessionId: "s-1",
+          renameSession,
+        }) as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作 旧标题" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
+    const input = screen.getByRole("textbox", { name: "会话名称" });
+    fireEvent.change(input, { target: { value: "新标题" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(renameSession).toHaveBeenCalledWith("s-1", "新标题");
+  });
+
+  it("flags a pending question on the conversation entry while another view is open", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          humanRequests: [
+            {
+              request_id: "req-1",
+              session_id: "default",
+              scope_id: "draft-1",
+              scope_kind: "clarification",
+              prompt: "目标列？",
+              allow_custom: true,
+              allow_skip: true,
+              created_at: "2026-10-10T10:00:00Z",
+              expires_at: "2099-10-10T10:02:00Z",
+            },
+          ],
+        }) as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "实验" }));
+    expect(screen.getByText("Athena 有一个问题正在等待你回答。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "前往对话" }));
+    expect(screen.getByRole("region", { name: "需要你的确认" })).toBeInTheDocument();
   });
 });
