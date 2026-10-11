@@ -37,9 +37,20 @@ def list_traces(rollout_dir: Path) -> list[dict[str, Any]]:
     return traces
 
 
+def _tool_args(args: Any) -> Any:
+    """PydanticAI stores tool-call args as a JSON string; show them as an object."""
+    if isinstance(args, str):
+        try:
+            return json.loads(args)
+        except json.JSONDecodeError:
+            return args
+    return args if args is not None else {}
+
+
 def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
     """Normalize one PydanticAI message part into a display message."""
-    kind = part.get("kind") or part.get("type") or "text"
+    # ModelMessagesTypeAdapter dumps ``part_kind``; ``kind``/``type`` cover older shapes.
+    kind = part.get("part_kind") or part.get("kind") or part.get("type") or "text"
     if kind in (
         "text",
         "output_text",
@@ -57,7 +68,8 @@ def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
             display_role = "user"
         elif kind == "tool-return":
             display_role, display_kind = "tool", "tool_return"
-            content = str(content)
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
         return {
             "role": display_role,
             "kind": display_kind,
@@ -68,7 +80,7 @@ def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
             "role": "assistant",
             "kind": "tool_call",
             "content": part.get("tool_name", ""),
-            "args": part.get("args", {}),
+            "args": _tool_args(part.get("args")),
         }
     if kind == "image":
         return {"role": role, "kind": "image", "content": part.get("url", "")}
@@ -81,11 +93,12 @@ def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_msg(msg: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize one PydanticAI message dict into a list of display messages."""
-    role = msg.get("role")
     parts = msg.get("parts", [])
     if not isinstance(parts, list):
         parts = []
-    base_role = "assistant" if role == "model" else "user"
+    # PydanticAI marks messages ``kind: request|response``; ``role`` is an older shape.
+    from_model = msg.get("kind") == "response" or msg.get("role") == "model"
+    base_role = "assistant" if from_model else "user"
     normalized: list[dict[str, Any]] = []
     for part in parts:
         if not isinstance(part, dict):

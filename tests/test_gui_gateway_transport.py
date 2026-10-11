@@ -347,3 +347,42 @@ async def test_dispatch_error_preserves_resume_unavailable_metadata() -> None:
 
     assert err["data"]["code"] == "resume_unavailable"
     assert err["data"]["retryable"] is False
+
+
+class _BlockingHandler:
+    """Handler double: ``ask`` waits like ``task_clarification_start`` on the broker."""
+
+    def __init__(self) -> None:
+        self.runtime = _FakeRuntime("/root")
+        self.answered = asyncio.Event()
+
+    async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "ask":
+            await self.answered.wait()
+            return {"done": True}
+        if method == "reply":
+            self.answered.set()
+            return {"replied": True}
+        return {}
+
+
+async def test_blocking_request_does_not_starve_later_requests() -> None:
+    """A pending clarification must not block the human reply on the same socket."""
+    from gui_gateway.transport import WebSocketTransport
+
+    handler = _BlockingHandler()
+    server = await WebSocketTransport(handler).serve(port=0)
+    port = next(iter(server.sockets)).getsockname()[1]
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps({"request_id": 1, "method": "ask", "params": {}}))
+            await ws.send(json.dumps({"request_id": 2, "method": "reply", "params": {}}))
+            first = await asyncio.wait_for(_recv_response(ws), 3)
+            second = await asyncio.wait_for(_recv_response(ws), 3)
+    finally:
+        handler.answered.set()  # release a starved ``ask`` so shutdown never hangs
+        server.close()
+        await server.wait_closed()
+
+    assert first == {"request_id": 2, "result": {"replied": True}, "error": None}
+    assert second == {"request_id": 1, "result": {"done": True}, "error": None}
