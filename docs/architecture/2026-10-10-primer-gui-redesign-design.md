@@ -1,6 +1,6 @@
 # Athena GUI 迁移到 GitHub Primer 设计系统
 
-> 状态：设计已确认，待实施计划
+> 状态：已实施（见 docs/codex_docs/2026-10-10-primer-gui-redesign-completion.md）
 > 日期：2026-10-10
 > 范围：`athena-gui/`（Web GUI 与 Tauri 桌面壳共用的前端）；不涉及 Python、Rust、网关协议
 

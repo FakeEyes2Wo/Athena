@@ -1,8 +1,11 @@
 ﻿# Current Athena Work
 
-Active plan (awaiting user review before execution):
-- `docs/codex_docs/2026-10-10-primer-gui-redesign-plan.md`
+Completed Primer GUI redesign:
+- `docs/codex_docs/2026-10-10-primer-gui-redesign-completion.md`
 - Spec: `docs/architecture/2026-10-10-primer-gui-redesign-design.md`
+
+Deferred follow-ups (keyboard access in ExperimentManager rows, remark-gfm tables,
+drawer layout, module counters) are listed in the completion report.
 
 Completed source commit, independent review and push:
 - `docs/codex_docs/2026-10-11-source-repair-review-completion.md`
