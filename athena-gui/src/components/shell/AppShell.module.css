@@ -1,104 +1,75 @@
-/* 统一 App Shell：顶栏(52px) + 功能轨(48px) + 上下文侧栏(232px) + 主工作区 + 抽屉。 */
+/* GitHub 仓库页式外壳：顶栏 + 模块标签栏 + 左侧栏 / 主区 / 右侧非模态详情。 */
 
 .shell {
   height: 100vh;
   display: grid;
-  grid-template-rows: 52px 1fr;
-  background: var(--bg);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background: var(--bgColor-default);
+  color: var(--fgColor-default);
   overflow: hidden;
 }
 
-/* ===== 顶栏 ===== */
 .topbar {
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: 0 var(--space-lg);
-  border-bottom: 1px solid var(--border);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--surface) 96%, transparent), var(--surface)),
-    var(--surface);
-  backdrop-filter: saturate(1.1);
+  gap: var(--base-size-8);
+  min-width: 0;
+  padding: var(--base-size-12) var(--base-size-16) var(--base-size-8);
+  background: var(--bgColor-muted);
 }
 
-.topbar__collapse {
+.mark {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  width: var(--base-size-32);
+  height: var(--base-size-32);
+  flex-shrink: 0;
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-default);
+  color: var(--fgColor-default);
 }
 
-.topbar__collapse:hover {
-  background: var(--surface-muted);
-  color: var(--text-primary);
-}
-
-.topbar__brand {
+.breadcrumb {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
+  gap: var(--base-size-4);
+  min-width: 0;
+  font-size: var(--text-title-size-small);
 }
 
-.topbar__mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  background: linear-gradient(135deg, var(--accent), var(--chart-4));
-  box-shadow: 0 2px 8px var(--accent-soft);
+.wordmark {
+  flex-shrink: 0;
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-default);
 }
 
-.topbar__status {
+.separator {
+  flex-shrink: 0;
+  color: var(--fgColor-muted);
+}
+
+.crumb,
+.crumbCurrent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fgColor-default);
+}
+
+.crumbCurrent {
+  font-weight: var(--base-text-weight-semibold);
+}
+
+.topbarActions {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-muted);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-tertiary);
+  gap: var(--base-size-4);
   flex-shrink: 0;
 }
 
-.status-dot[data-status="running"] {
-  background: var(--success);
-  box-shadow: 0 0 0 3px var(--success-subtle);
-}
-
-.status-dot[data-status="paused"] {
-  background: var(--warning);
-  box-shadow: 0 0 0 3px var(--warning-subtle);
-}
-
-.status-dot[data-status="completed"] {
-  background: var(--info);
-  box-shadow: 0 0 0 3px var(--info-subtle);
-}
-
-.status-dot[data-status="error"] {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px var(--danger-subtle);
-}
-
-/* ===== 主体 ===== */
 .body {
   min-height: 0;
   display: flex;
@@ -111,21 +82,16 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--surface);
+  background: var(--bgColor-default);
   overflow: hidden;
-  position: relative;
 }
 
-/* 面板内容撑满主区（图/表类面板需要确定高度）。 */
 .main > * {
   flex: 1;
   min-height: 0;
 }
 
-/* 详情面板容器：与左侧工作区保持呼吸感，标题不被挤压。 */
-.main-panel {
-  flex: 1;
-  min-height: 0;
+.mainPanel {
   overflow-y: auto;
-  padding: 20px 28px;
+  padding: var(--base-size-16) var(--base-size-24);
 }

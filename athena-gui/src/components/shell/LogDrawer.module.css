@@ -1,19 +1,17 @@
-/* 右侧运行日志抽屉：覆盖在主工作区上，按需开合。 */
+/* 右侧运行日志侧栏：非模态，浮在主工作区右侧。 */
 
 .drawer {
   position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
-  width: 420px;
+  width: 440px;
   max-width: 92%;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
-  animation: log-drawer-in var(--dur) var(--ease);
-  z-index: 20;
+  border-left: var(--borderWidth-thin) solid var(--borderColor-default);
+  background: var(--bgColor-default);
+  box-shadow: var(--shadow-floating-large);
 }
 
 .header {
@@ -21,69 +19,30 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-md);
-  padding: var(--space-md) var(--space-lg);
-  border-bottom: 1px solid var(--border);
-}
-
-.header h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+  gap: var(--base-size-8);
+  padding: var(--base-size-8) var(--base-size-8) var(--base-size-8) var(--base-size-16);
+  border-bottom: var(--borderWidth-thin) solid var(--borderColor-default);
+  background: var(--bgColor-muted);
 }
 
 .headerActions {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-}
-
-.clear {
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-
-.clear:hover {
-  background: var(--surface-muted);
-  color: var(--text-primary);
-}
-
-.close {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-
-.close:hover {
-  background: var(--surface-muted);
-  color: var(--text-primary);
+  gap: var(--base-size-4);
 }
 
 .body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-md);
+  padding: var(--base-size-12);
 }
 
 .empty {
-  margin: var(--space-lg) 0;
+  margin: var(--base-size-16) 0;
   text-align: center;
-  color: var(--text-tertiary);
-  font-size: 13px;
+  font-size: var(--text-body-size-medium);
+  color: var(--fgColor-muted);
 }
 
 .list {
@@ -92,69 +51,44 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: var(--base-size-8);
 }
 
 .item {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-sm) var(--space-md);
-  background: var(--surface-elevated);
+  padding: var(--base-size-8) var(--base-size-12);
+  border: var(--borderWidth-thin) solid var(--borderColor-muted);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-default);
 }
 
 .itemHead {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  font-size: 11px;
-  color: var(--text-tertiary);
-}
-
-.kind {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 700;
-  color: var(--text-secondary);
-}
-
-.kindState {
-  color: var(--accent);
+  gap: var(--base-size-8);
+  min-width: 0;
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-muted);
 }
 
 .time {
-  font-family: var(--font-mono);
+  flex-shrink: 0;
+  font-family: var(--fontStack-monospace);
 }
 
 .meta {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .text {
-  margin: var(--space-sm) 0 0;
+  margin: var(--base-size-8) 0 0;
   padding: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  font-family: var(--fontStack-monospace);
+  font-size: var(--text-body-size-small);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text-primary);
-}
-
-@keyframes log-drawer-in {
-  from {
-    opacity: 0;
-    transform: translateX(16px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .drawer {
-    animation: none;
-  }
+  color: var(--fgColor-default);
 }

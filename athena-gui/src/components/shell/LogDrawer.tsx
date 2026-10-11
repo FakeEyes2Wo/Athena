@@ -1,5 +1,6 @@
+import { Button, Heading, IconButton, Label } from "@primer/react";
+import { XIcon } from "@primer/octicons-react";
 import type { LogEntry } from "../../hooks/usePipeline";
-import { Icon } from "../common/Icon";
 import styles from "./LogDrawer.module.css";
 
 interface LogDrawerProps {
@@ -23,21 +24,19 @@ function meta(entry: LogEntry): string {
   return parts.length ? parts.join(" · ") : "";
 }
 
-/** 右侧运行日志抽屉：按时间倒序展示后端推送的 state/output 原始事件。 */
+/** 右侧运行日志侧栏：按时间倒序展示后端推送的 state/output 原始事件。 */
 export function LogDrawer({ entries, onClose, onClear }: LogDrawerProps) {
   const ordered = [...entries].reverse();
 
   return (
     <aside className={styles.drawer} role="complementary" aria-label="运行日志">
       <header className={styles.header}>
-        <h2>运行日志</h2>
+        <Heading as="h2" variant="small">运行日志</Heading>
         <div className={styles.headerActions}>
-          <button type="button" className={styles.clear} onClick={onClear} title="清空日志">
+          <Button size="small" variant="invisible" onClick={onClear}>
             清空
-          </button>
-          <button type="button" className={styles.close} onClick={onClose} aria-label="关闭日志">
-            <Icon name="close" size={16} />
-          </button>
+          </Button>
+          <IconButton icon={XIcon} variant="invisible" size="small" aria-label="关闭日志" onClick={onClose} />
         </div>
       </header>
       <div className={styles.body}>
@@ -48,9 +47,9 @@ export function LogDrawer({ entries, onClose, onClear }: LogDrawerProps) {
             {ordered.map((entry) => (
               <li key={entry.id} className={styles.item}>
                 <div className={styles.itemHead}>
-                  <span className={`${styles.kind} ${entry.kind === "state" ? styles.kindState : ""}`}>
+                  <Label variant={entry.kind === "state" ? "accent" : "secondary"} size="small">
                     {entry.kind}
-                  </span>
+                  </Label>
                   <span className={styles.time}>{formatTime(entry.at)}</span>
                   <span className={styles.meta}>{meta(entry)}</span>
                 </div>

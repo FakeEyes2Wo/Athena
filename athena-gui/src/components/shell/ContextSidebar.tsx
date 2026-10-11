@@ -1,4 +1,6 @@
 import { useMemo } from "react";
+import { ActionList, Button, NavList } from "@primer/react";
+import { FileDirectoryIcon, PlusIcon, TrashIcon } from "@primer/octicons-react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import { RELATED_PANELS } from "./navigation";
@@ -50,7 +52,7 @@ export function ContextSidebar({
   const related = RELATED_PANELS[module];
 
   return (
-    <aside className={styles.sidebar}>
+    <aside className={styles.sidebar} aria-label="上下文侧栏">
       {module === "session" ? (
         <SessionContext
           currentRoot={currentRoot}
@@ -66,23 +68,18 @@ export function ContextSidebar({
       ) : related.length === 0 ? (
         <p className={styles.hint}>无关联详情视图</p>
       ) : (
-        <nav aria-label="详情视图">
-          <div className={styles.sectionLabel}>详情视图</div>
-          <ul className={styles.list}>
+        <NavList aria-label="详情视图" className={styles.related}>
+          <NavList.Group title="详情视图">
             {related.map((item) => (
-              <li key={item.key}>
-                <button
-                  type="button"
-                  className={styles.item}
-                  onClick={() => onOpenDrawer(item.key)}
-                >
-                  <Icon name={item.icon} size={15} />
-                  <span>{item.label}</span>
-                </button>
-              </li>
+              <NavList.Item key={item.key} as="button" onClick={() => onOpenDrawer(item.key)}>
+                <NavList.LeadingVisual>
+                  <Icon name={item.icon} size={16} />
+                </NavList.LeadingVisual>
+                {item.label}
+              </NavList.Item>
             ))}
-          </ul>
-        </nav>
+          </NavList.Group>
+        </NavList>
       )}
     </aside>
   );
@@ -135,15 +132,20 @@ function SessionContext({
 
   return (
     <div className={styles.sessionContext}>
-      <button className={styles.newSession} onClick={onNewSession}>
-        <Icon name="sparkles" size={14} />
-        新会话
-      </button>
+      <div className={styles.newSession}>
+        <Button block leadingVisual={PlusIcon} onClick={onNewSession}>
+          新会话
+        </Button>
+      </div>
       <div className={styles.workspaceScroll} data-testid="workspace-scroll">
         {groups.map((group) => (
-          <nav key={group.root} aria-label={`${group.name} 会话`} className={styles.workspaceGroup}>
-            <button
-              type="button"
+          <section key={group.root} className={styles.workspaceGroup}>
+            <Button
+              variant="invisible"
+              size="small"
+              alignContent="start"
+              block
+              leadingVisual={FileDirectoryIcon}
               className={styles.workspaceHeader}
               onClick={() => {
                 if (!group.isCurrent) onSelectWorkspace(group.root);
@@ -151,45 +153,40 @@ function SessionContext({
               disabled={group.isCurrent}
               title={group.isCurrent ? "当前工作区" : `切换到 ${group.root}`}
             >
-              <Icon name="folder" size={14} />
-              <span>{group.name}</span>
-            </button>
-            {group.sessions.length === 0 && <p className={styles.hint}>暂无会话</p>}
-            <ul className={styles.list}>
-              {group.sessions.map((session) => (
-                <li key={session.id} className={styles.sessionRow}>
-                  <button
-                    type="button"
-                    className={`${styles.item}${group.isCurrent && session.id === currentSessionId ? ` ${styles["item--active"]}` : ""}`}
-                    onClick={() =>
+              {group.name}
+            </Button>
+            {group.sessions.length === 0 ? (
+              <p className={styles.hint}>暂无会话</p>
+            ) : (
+              <ActionList aria-label={`${group.name} 会话`}>
+                {group.sessions.map((session) => (
+                  <ActionList.Item
+                    key={session.id}
+                    active={group.isCurrent && session.id === currentSessionId}
+                    title={`${group.name} · ${session.title}`}
+                    onSelect={() =>
                       group.isCurrent ? onSelectSession(session.id) : onSelectWorkspace(group.root, session.id)
                     }
-                    aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
-                    title={`${group.name} · ${session.title}`}
                   >
-                    <span className={styles.sessionTitle}>{session.title}</span>
-                  </button>
-                  {group.isCurrent && (
-                    <button
-                      type="button"
-                      className={styles.delete}
-                      onClick={() => onDeleteSession(session.id)}
-                      aria-label={`删除会话 ${session.title}`}
-                      title="删除会话"
-                    >
-                      <Icon name="trash" size={14} />
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </nav>
+                    {session.title}
+                    {group.isCurrent && (
+                      <ActionList.TrailingAction
+                        label={`删除会话 ${session.title}`}
+                        icon={TrashIcon}
+                        onClick={() => onDeleteSession(session.id)}
+                      />
+                    )}
+                  </ActionList.Item>
+                ))}
+              </ActionList>
+            )}
+          </section>
         ))}
       </div>
       <footer className={styles.sidebarFooter}>
-        <button className={styles.switchWorkspace} onClick={onSwitchWorkspace}>
+        <Button block variant="invisible" onClick={onSwitchWorkspace}>
           切换工作区
-        </button>
+        </Button>
       </footer>
     </div>
   );

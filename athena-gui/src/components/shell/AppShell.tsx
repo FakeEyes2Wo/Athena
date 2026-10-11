@@ -1,16 +1,18 @@
 import { Suspense, useEffect, useRef, useState } from "react";
-import type { ContextPanelKey, ModuleKey } from "../../types/ui";
+import { IconButton, Label, type LabelColorOptions } from "@primer/react";
+import { GearIcon, LogIcon, SidebarCollapseIcon, SidebarExpandIcon } from "@primer/octicons-react";
+import type { ContextPanelKey, ModuleKey, PipelineStatus } from "../../types/ui";
 import { usePipeline } from "../../hooks/usePipeline";
+import { basename } from "../../lib/path";
 import { ConversationPane } from "../conversation/ConversationPane";
 import { Icon } from "../common/Icon";
 import { EmptyState } from "../common/EmptyState";
 import { ErrorBoundary } from "../common/ErrorBoundary";
-import { FunctionRail } from "./FunctionRail";
+import { ModuleNav } from "./ModuleNav";
 import { ContextSidebar } from "./ContextSidebar";
 import { ContextDrawer } from "./ContextDrawer";
 import { LogDrawer } from "./LogDrawer";
 import { ThemeToggle } from "./ThemeToggle";
-import { AthenaWordmark } from "./AthenaWordmark";
 import { HumanRequestDialog } from "./HumanRequestDialog";
 import { PANELS } from "../context/panels";
 import { SettingsPanel } from "../SettingsPanel";
@@ -28,15 +30,27 @@ interface AppShellProps {
   pipeline: Pipeline;
 }
 
-/** 统一研究工作区：顶栏 + 功能轨 + 上下文侧栏 + 主工作区 + 详情抽屉。 */
+/** 运行状态 → 顶栏状态标签配色。 */
+const STATUS_VARIANT: Record<PipelineStatus, LabelColorOptions> = {
+  idle: "secondary",
+  running: "success",
+  paused: "attention",
+  completed: "accent",
+  error: "danger",
+};
+
+/** 统一研究工作区：GitHub 仓库页式顶栏 + 模块标签栏 + 左侧栏 / 主区 / 右侧详情。 */
 export function AppShell({ currentRoot, recentRoots, switching, onSwitchWorkspace, onSelectWorkspace, pipeline }: AppShellProps) {
   const [module, setModule] = useState<ModuleKey>("session");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [drawerPanel, setDrawerPanel] = useState<ContextPanelKey | null>(null);
   const [logOpen, setLogOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const def = MODULE_BY_KEY[module];
   const { viewModel } = pipeline;
+  const workspaceName = currentRoot ? basename(currentRoot) : "未选择工作区";
+  const sessionTitle = pipeline.sessions.find((session) => session.id === pipeline.currentSessionId)?.title;
 
   // 切回「会话」模块时，重新拉取当前会话的 transcript，让右侧工作区恢复历史对话；
   // 运行中跳过（此时消息由实时事件驱动，避免重放打断进行中的执行）。
@@ -56,41 +70,50 @@ export function AppShell({ currentRoot, recentRoots, switching, onSwitchWorkspac
   return (
     <div className={styles.shell}>
       <header className={styles.topbar}>
-        <button
-          type="button"
-          className={styles["topbar__collapse"]}
-          onClick={() => setSidebarCollapsed((v) => !v)}
+        <IconButton
+          icon={sidebarCollapsed ? SidebarExpandIcon : SidebarCollapseIcon}
+          variant="invisible"
           aria-label={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"}
-          title={sidebarCollapsed ? "展开侧栏" : "折叠侧栏"}
-        >
-          <Icon name={sidebarCollapsed ? "panelLeft" : "panelLeftClose"} size={17} />
-        </button>
-        <div className={styles["topbar__brand"]}>
-          <span className={styles["topbar__mark"]} aria-hidden>
-            <Icon name="sparkles" size={15} />
+          onClick={() => setSidebarCollapsed((v) => !v)}
+        />
+        <span className={styles.mark} aria-hidden="true">
+          <Icon name="sparkles" size={16} />
+        </span>
+        <nav className={styles.breadcrumb} aria-label="当前位置">
+          <span className={styles.wordmark}>Athena</span>
+          <span className={styles.separator} aria-hidden="true">/</span>
+          <span className={styles.crumb} title={currentRoot ?? undefined}>{workspaceName}</span>
+          {sessionTitle && (
+            <>
+              <span className={styles.separator} aria-hidden="true">/</span>
+              <span className={styles.crumbCurrent} title={sessionTitle}>{sessionTitle}</span>
+            </>
+          )}
+        </nav>
+        <div className={styles.topbarActions}>
+          <span data-status={viewModel.status}>
+            <Label variant={STATUS_VARIANT[viewModel.status] ?? "secondary"}>
+              {viewModel.phase || "idle"} · {viewModel.status}
+            </Label>
           </span>
-          <AthenaWordmark />
+          <IconButton
+            icon={LogIcon}
+            variant="invisible"
+            aria-label={logOpen ? "关闭日志" : "打开日志"}
+            onClick={() => setLogOpen((v) => !v)}
+          />
+          <ThemeToggle />
+          <IconButton icon={GearIcon} variant="invisible" aria-label="设置" onClick={() => setSettingsOpen(true)} />
         </div>
-        <div className={styles["topbar__status"]}>
-          <span className={styles["status-dot"]} data-status={viewModel.status} />
-          <span>
-            {viewModel.phase || "idle"} · {viewModel.status}
-          </span>
-        </div>
-        <button
-          type="button"
-          className={styles["topbar__collapse"]}
-          onClick={() => setLogOpen((v) => !v)}
-          aria-label={logOpen ? "关闭日志" : "打开日志"}
-          title="运行日志"
-        >
-          <Icon name="log" size={17} />
-        </button>
-        <ThemeToggle />
       </header>
 
+      <ModuleNav
+        module={module}
+        counts={{ experiments: viewModel.rightRail.searchAttempts }}
+        onSelect={setModule}
+      />
+
       <div className={styles.body}>
-        <FunctionRail module={module} onSelect={setModule} />
         {!sidebarCollapsed && (
           <ContextSidebar
             module={module}
@@ -110,10 +133,8 @@ export function AppShell({ currentRoot, recentRoots, switching, onSwitchWorkspac
         <main className={styles.main}>
           {module === "session" ? (
             <ConversationPane key={pipeline.currentSessionId} pipeline={pipeline} />
-          ) : module === "settings" ? (
-            <SettingsPanel onClose={() => setModule("session")} />
           ) : (
-            <div className={styles["main-panel"]}>
+            <div className={styles.mainPanel}>
               <PanelView panel={def.panel} />
             </div>
           )}
@@ -129,6 +150,8 @@ export function AppShell({ currentRoot, recentRoots, switching, onSwitchWorkspac
           />
         )}
       </div>
+
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
 
       <HumanRequestDialog
         request={pipeline.humanRequests?.[0] ?? null}

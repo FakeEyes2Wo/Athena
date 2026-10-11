@@ -64,6 +64,41 @@ describe("AppShell", () => {
     }
   });
 
+  it("shows the workspace and session as a breadcrumb with full text in the title", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/a-very-long-workspace-name-that-will-be-truncated"
+        recentRoots={[]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [{ id: "s-1", title: "分类 · f1_macro" }],
+          currentSessionId: "s-1",
+        }) as never}
+      />,
+    );
+
+    const breadcrumb = screen.getByRole("navigation", { name: "当前位置" });
+    expect(within(breadcrumb).getByText("a-very-long-workspace-name-that-will-be-truncated")).toHaveAttribute(
+      "title",
+      "C:/projects/a-very-long-workspace-name-that-will-be-truncated",
+    );
+    expect(within(breadcrumb).getByText("分类 · f1_macro")).toHaveAttribute("title", "分类 · f1_macro");
+  });
+
+  it("opens the settings dialog from the top-bar gear and closes it", () => {
+    renderUi(
+      <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+    );
+
+    expect(screen.queryByRole("dialog", { name: "运行设置" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog", { name: "运行设置" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
+    expect(screen.queryByRole("dialog", { name: "运行设置" })).not.toBeInTheDocument();
+  });
+
   it("toggles the context sidebar via the top-bar control", () => {
     renderUi(
       <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,

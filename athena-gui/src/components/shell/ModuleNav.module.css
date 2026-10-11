@@ -1,0 +1,4 @@
+.nav {
+  background: var(--bgColor-muted);
+  padding-inline: var(--base-size-8);
+}
