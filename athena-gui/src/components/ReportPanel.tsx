@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import { experimentsList, generateReport, type ExperimentDetail } from "../lib/tauri-bridge";
+import { CodeBlock } from "./common/CodeBlock";
 import { EmptyState } from "./common/EmptyState";
+import { Panel } from "./common/Panel";
 import styles from "./ReportPanel.module.css";
 
 interface Summary {
@@ -49,9 +52,9 @@ function summarize(experiments: ExperimentDetail[]): Summary {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className={styles["report-stat"]}>
-      <div className={styles["report-stat__label"]}>{label}</div>
-      <div className={styles["report-stat__value"]}>{value}</div>
+    <div className={styles.stat}>
+      <div className={styles.statLabel}>{label}</div>
+      <div className={styles.statValue}>{value}</div>
     </div>
   );
 }
@@ -86,21 +89,21 @@ export default function ReportPanel() {
   }
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>研究摘要</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void handleGenerate()}>
+    <Panel
+      title="研究摘要"
+      actions={
+        <Button size="small" onClick={() => void handleGenerate()}>
           生成报告
-        </button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
-      {report && <pre className="code-block" style={{ marginBottom: 12 }}>{report}</pre>}
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
+      {report && <CodeBlock>{report}</CodeBlock>}
 
       {!summary || summary.total === 0 ? (
         <EmptyState icon="report" message="暂无实验数据。完成实验后此处汇总 SOTA、最佳指标与状态分布。" />
       ) : (
-        <div className={styles["report-grid"]}>
+        <div className={styles.grid}>
           <Stat label="最佳 primary" value={summary.bestPrimary != null ? summary.bestPrimary.toFixed(4) : "—"} />
           <Stat label="SOTA 实验" value={summary.sotaId ?? "—"} />
           <Stat label="SOTA 指标" value={summary.sotaPrimary != null ? summary.sotaPrimary.toFixed(4) : "—"} />
@@ -109,6 +112,6 @@ export default function ReportPanel() {
           <Stat label="进行中 / 待定" value={`${summary.running} / ${summary.pending}`} />
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

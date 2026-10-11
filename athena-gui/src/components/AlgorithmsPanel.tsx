@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash, FormControl, Select, TextInput } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import {
   graphAlgorithm,
   graphAlgorithms,
   type GraphAlgorithmInfo,
 } from "../lib/tauri-bridge";
+import { CodeBlock } from "./common/CodeBlock";
 import { EmptyState } from "./common/EmptyState";
+import { Panel } from "./common/Panel";
+import styles from "./AlgorithmsPanel.module.css";
 
 /** Dropdown + parameter form + JSON result runner for graph algorithms. */
 export default function AlgorithmsPanel() {
@@ -70,13 +74,10 @@ export default function AlgorithmsPanel() {
   }
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>图算法</h3>
-      </div>
-      <p style={{ marginBottom: 12 }}>选择算法、填写参数后运行，结果以 JSON 展示。</p>
+    <Panel title="图算法">
+      <p className={styles.intro}>选择算法、填写参数后运行，结果以 JSON 展示。</p>
 
-      {error && <div className="card card--error" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {loading ? (
         <EmptyState icon="loader" message="加载算法清单…" />
@@ -84,44 +85,41 @@ export default function AlgorithmsPanel() {
         <EmptyState icon="algorithms" message="暂无可用算法。" />
       ) : (
         <>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              className="select"
-              style={{ width: "auto", minWidth: 220 }}
-              value={selectedName}
-              onChange={(e) => handleSelect(e.target.value)}
-            >
-              {algorithms.map((algo) => (
-                <option key={algo.name} value={algo.name}>
-                  {algo.label}
-                </option>
-              ))}
-            </select>
-            <button className="btn btn--primary btn--sm" onClick={() => void run()} disabled={running || !selected}>
+          <div className={styles.runRow}>
+            <FormControl>
+              <FormControl.Label>算法</FormControl.Label>
+              <Select value={selectedName} onChange={(e) => handleSelect(e.target.value)}>
+                {algorithms.map((algo) => (
+                  <Select.Option key={algo.name} value={algo.name}>
+                    {algo.label}
+                  </Select.Option>
+                ))}
+              </Select>
+            </FormControl>
+            <Button variant="primary" onClick={() => void run()} disabled={running || !selected}>
               {running ? "运行中…" : "运行"}
-            </button>
+            </Button>
           </div>
 
           {selected && selected.params.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            <div className={styles.params}>
               {selected.params.map((p) => (
-                <label key={p.name} className="field" style={{ flexDirection: "row", alignItems: "center" }}>
-                  <span className="field__label" style={{ minWidth: 180 }}>{p.name}</span>
-                  <input
-                    className="input"
-                    type="text"
+                <FormControl key={p.name} required={p.required}>
+                  <FormControl.Label>{p.name}</FormControl.Label>
+                  <TextInput
+                    block
                     value={paramValues[p.name] ?? ""}
                     onChange={(e) => handleParamChange(p.name, e.target.value)}
                     placeholder={p.required ? "必填" : "可选"}
                   />
-                </label>
+                </FormControl>
               ))}
             </div>
           )}
         </>
       )}
 
-      {result != null && <pre className="code-block">{JSON.stringify(result, null, 2)}</pre>}
-    </div>
+      {result != null && <CodeBlock>{JSON.stringify(result, null, 2)}</CodeBlock>}
+    </Panel>
   );
 }

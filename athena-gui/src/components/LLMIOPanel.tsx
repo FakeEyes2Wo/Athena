@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ActionList, Button, Flash, Label, type LabelColorOptions } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import {
   traceGet,
@@ -8,15 +9,17 @@ import {
   type TraceRole,
   type TraceSummary,
 } from "../lib/tauri-bridge";
+import { CodeBlock } from "./common/CodeBlock";
 import { EmptyState } from "./common/EmptyState";
+import { Panel } from "./common/Panel";
 import styles from "./LLMIOPanel.module.css";
 
-/** Role → badge variant + label mapping for the trace timeline. */
-const ROLE_META: Record<TraceRole, { badge: string; label: string }> = {
-  system: { badge: "badge--neutral", label: "system" },
-  user: { badge: "badge--info", label: "user" },
-  assistant: { badge: "badge--success", label: "assistant" },
-  tool: { badge: "badge--warning", label: "tool" },
+/** 消息角色 → Primer Label 配色。 */
+const ROLE_VARIANT: Record<TraceRole, LabelColorOptions> = {
+  system: "secondary",
+  user: "accent",
+  assistant: "success",
+  tool: "attention",
 };
 
 function formatUpdatedAt(mtime: number): string {
@@ -25,30 +28,29 @@ function formatUpdatedAt(mtime: number): string {
 }
 
 function TraceBubble({ message }: { message: TraceMessage }) {
-  const meta = ROLE_META[message.role] ?? ROLE_META.system;
   const isToolCall = message.kind === "tool_call";
   const isToolReturn = message.kind === "tool_return";
   const argsJson = message.args ? JSON.stringify(message.args, null, 2) : null;
 
   return (
-    <div className={styles["trace-bubble"]}>
-      <div className={styles["trace-bubble__head"]}>
-        <span className={`badge ${meta.badge}`}>{meta.label}</span>
-        <span className={styles["trace-bubble__seq"]}>seq {message.seq}</span>
+    <div className={styles.bubble}>
+      <div className={styles.bubbleHead}>
+        <Label variant={ROLE_VARIANT[message.role] ?? "secondary"}>{message.role}</Label>
+        <span className={styles.seq}>seq {message.seq}</span>
       </div>
 
       {isToolCall ? (
-        <details style={{ cursor: "pointer" }}>
-          <summary style={{ color: "var(--text-primary)", fontWeight: 500 }}>{message.content}</summary>
-          {argsJson && <pre className="code-block">{argsJson}</pre>}
+        <details className={styles.details}>
+          <summary>{message.content}</summary>
+          {argsJson && <CodeBlock>{argsJson}</CodeBlock>}
         </details>
       ) : isToolReturn ? (
-        <details style={{ cursor: "pointer" }}>
-          <summary style={{ color: "var(--text-primary)", fontWeight: 500 }}>工具返回</summary>
-          <pre className="code-block">{message.content}</pre>
+        <details className={styles.details}>
+          <summary>工具返回</summary>
+          <CodeBlock>{message.content}</CodeBlock>
         </details>
       ) : (
-        <div className={styles["trace-bubble__body"]}>{message.content}</div>
+        <div className={styles.bubbleBody}>{message.content}</div>
       )}
     </div>
   );
@@ -99,46 +101,48 @@ export default function LLMIOPanel() {
   }, [selectedId]);
 
   return (
-    <div className="detail-panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <div className="panel-toolbar">
-        <h3>LLM 输入 / 输出轨迹 ({traces.length})</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()}>刷新</button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 10 }}>{error}</div>}
+    <Panel
+      fill
+      title={`LLM 输入 / 输出轨迹 (${traces.length})`}
+      actions={
+        <Button size="small" onClick={() => void refresh()}>
+          刷新
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {traces.length === 0 ? (
         <EmptyState icon="llm" message="暂无 agent 轨迹。运行搜索产生 rollout 后此处可回放 LLM I/O。" />
       ) : (
-        <div className={styles["trace-layout"]}>
-          <ul className={styles["trace-list"]}>
-            {traces.map((trace) => (
-              <li key={trace.agent_id}>
-                <button
-                  className={`${styles["trace-list__item"]}${trace.agent_id === selectedId ? ` ${styles["trace-list__item--active"]}` : ""}`}
-                  onClick={() => setSelectedId(trace.agent_id)}
+        <div className={styles.layout}>
+          <div className={styles.list}>
+            <ActionList aria-label="Agent 轨迹">
+              {traces.map((trace) => (
+                <ActionList.Item
+                  key={trace.agent_id}
+                  active={trace.agent_id === selectedId}
+                  onSelect={() => setSelectedId(trace.agent_id)}
                 >
-                  <span className={styles["trace-list__item-title"]}>{trace.agent_id}</span>
-                  <span className={styles["trace-list__item-meta"]}>
+                  <span className={styles.agentId}>{trace.agent_id}</span>
+                  <ActionList.Description variant="block">
                     {trace.messages} 条 · {formatUpdatedAt(trace.updated_at)}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
+                  </ActionList.Description>
+                </ActionList.Item>
+              ))}
+            </ActionList>
+          </div>
 
-          <div className={styles["trace-pane"]}>
-            {loading && <p style={{ color: "var(--text-secondary)" }}>加载中…</p>}
-            {!loading && !detail && <p style={{ color: "var(--text-secondary)" }}>选择一个 agent 查看轨迹。</p>}
-            {detail && detail.messages.length === 0 && (
-              <p style={{ color: "var(--text-secondary)" }}>该 agent 暂无消息。</p>
-            )}
+          <div className={styles.pane}>
+            {loading && <p className={styles.muted}>加载中…</p>}
+            {!loading && !detail && <p className={styles.muted}>选择一个 agent 查看轨迹。</p>}
+            {detail && detail.messages.length === 0 && <p className={styles.muted}>该 agent 暂无消息。</p>}
             {detail?.messages.map((message, index) => (
               <TraceBubble key={`${message.seq}-${index}`} message={message} />
             ))}
           </div>
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

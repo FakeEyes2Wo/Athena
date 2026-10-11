@@ -1,0 +1,20 @@
+/* 图算法：算法选择、参数表单与 JSON 结果。 */
+
+.intro {
+  margin: 0;
+  font-size: var(--text-body-size-medium);
+  color: var(--fgColor-muted);
+}
+
+.runRow {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--base-size-8);
+}
+
+.params {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--base-size-12) var(--base-size-16);
+}

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { Button, Flash } from "@primer/react";
 import { errorMessage } from "../lib/errors";
 import ReactMarkdown from "react-markdown";
 import { edaReport, type EdaReport } from "../lib/tauri-bridge";
 import { EmptyState } from "./common/EmptyState";
+import { Panel } from "./common/Panel";
+import { Section } from "./common/Section";
 import styles from "./EDAPreview.module.css";
 
 /** EDA (探索性数据分析) 报告预览：Markdown 正文 + 图表。 */
@@ -24,15 +27,15 @@ export default function EDAPreview() {
   }, [refresh]);
 
   return (
-    <div className="detail-panel">
-      <div className="panel-toolbar">
-        <h3>EDA 报告</h3>
-        <button className="btn btn--subtle btn--sm" onClick={() => void refresh()}>
+    <Panel
+      title="EDA 报告"
+      actions={
+        <Button size="small" onClick={() => void refresh()}>
           刷新
-        </button>
-      </div>
-
-      {error && <div className="card card--error" style={{ marginBottom: 12 }}>{error}</div>}
+        </Button>
+      }
+    >
+      {error && <Flash variant="danger">{error}</Flash>}
 
       {!data || !data.eda_dir ? (
         <EmptyState icon="files" message="暂无 EDA 报告。运行 PREPARE 阶段后将在此预览数据探索结果。" />
@@ -47,8 +50,7 @@ export default function EDAPreview() {
           )}
 
           {data.figures.length > 0 && (
-            <section className={styles.figures}>
-              <h4 className="card__title">图表 ({data.figures.length})</h4>
+            <Section title={`图表 (${data.figures.length})`}>
               {data.figures.map((figure) => (
                 <figure key={figure.name} className={styles.figure}>
                   <img
@@ -59,10 +61,10 @@ export default function EDAPreview() {
                   <figcaption className={styles.figureCaption}>{figure.name}</figcaption>
                 </figure>
               ))}
-            </section>
+            </Section>
           )}
         </div>
       )}
-    </div>
+    </Panel>
   );
 }

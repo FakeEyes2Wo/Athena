@@ -1,25 +1,29 @@
-.report-grid {
+/* 研究摘要：统计卡网格。 */
+
+.grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--space-md);
+  gap: var(--base-size-12);
 }
-.report-stat {
-  padding: var(--space-md) 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface);
+
+.stat {
+  padding: var(--base-size-12) var(--base-size-16);
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-default);
 }
-.report-stat__label {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+
+.statLabel {
+  font-size: var(--text-body-size-small);
+  font-weight: var(--base-text-weight-semibold);
+  color: var(--fgColor-muted);
 }
-.report-stat__value {
-  font-size: 20px;
-  font-weight: 700;
-  margin-top: 4px;
-  font-family: var(--font-mono);
+
+.statValue {
+  margin-top: var(--base-size-4);
+  font-family: var(--fontStack-monospace);
+  font-size: var(--text-title-size-medium);
+  font-weight: var(--base-text-weight-semibold);
   word-break: break-all;
+  color: var(--fgColor-default);
 }

@@ -1,111 +1,135 @@
-/* EDA report preview (CSS module). */
+/* EDA 报告：GitHub 渲染 Markdown 的排版 + 图表列表。 */
 
 .body {
   display: flex;
   flex-direction: column;
-  gap: var(--space-lg);
+  gap: var(--base-size-16);
 }
 
 .markdown {
-  line-height: 1.7;
-  font-size: 14px;
-  color: var(--text-primary);
+  font-size: var(--text-body-size-large);
+  line-height: 1.5;
+  color: var(--fgColor-default);
   word-break: break-word;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
 }
 
 .markdown h1,
 .markdown h2,
 .markdown h3,
 .markdown h4 {
-  margin: 1.2em 0 0.5em;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  margin: var(--base-size-24) 0 var(--base-size-16);
+  font-weight: var(--base-text-weight-semibold);
+  line-height: 1.25;
+}
+
+.markdown h1,
+.markdown h2 {
+  padding-bottom: 0.3em;
+  border-bottom: var(--borderWidth-thin) solid var(--borderColor-muted);
 }
 
 .markdown h1 {
-  font-size: 22px;
+  font-size: 2em;
 }
 
 .markdown h2 {
-  font-size: 18px;
+  font-size: 1.5em;
 }
 
 .markdown h3 {
-  font-size: 15px;
+  font-size: 1.25em;
 }
 
-.markdown p {
-  margin: 0 0 0.8em;
+.markdown h4 {
+  font-size: 1em;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown table,
+.markdown pre,
+.markdown blockquote {
+  margin: 0 0 var(--base-size-16);
 }
 
 .markdown ul,
 .markdown ol {
-  margin: 0 0 0.8em;
-  padding-left: 1.5em;
+  padding-left: 2em;
 }
 
 .markdown code {
-  font-family: var(--font-mono);
-  font-size: 0.9em;
-  background: var(--surface-muted);
-  padding: 2px 5px;
-  border-radius: 4px;
+  padding: 0.2em 0.4em;
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-neutral-muted);
+  font-family: var(--fontStack-monospace);
+  font-size: 85%;
 }
 
 .markdown pre {
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-md);
-  overflow-x: auto;
+  padding: var(--base-size-16);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-muted);
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
 }
 
 .markdown pre code {
-  background: transparent;
   padding: 0;
+  background: transparent;
+  font-size: 100%;
+}
+
+.markdown blockquote {
+  padding: 0 1em;
+  border-left: 0.25em solid var(--borderColor-default);
+  color: var(--fgColor-muted);
 }
 
 .markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
   border-collapse: collapse;
-  margin: 0 0 1em;
-  font-size: 13px;
 }
 
 .markdown th,
 .markdown td {
-  border: 1px solid var(--border);
-  padding: 6px 10px;
-  text-align: left;
+  padding: 6px 13px;
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
 }
 
 .markdown th {
-  background: var(--surface-elevated);
-  font-weight: 600;
+  font-weight: var(--base-text-weight-semibold);
 }
 
-.figures {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
+.markdown tr:nth-child(2n) {
+  background: var(--bgColor-muted);
 }
 
 .figure {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--base-size-4);
 }
 
 .figureImg {
   width: 100%;
   max-width: 720px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface-muted);
+  border: var(--borderWidth-thin) solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-muted);
 }
 
 .figureCaption {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--fontStack-monospace);
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-muted);
 }
