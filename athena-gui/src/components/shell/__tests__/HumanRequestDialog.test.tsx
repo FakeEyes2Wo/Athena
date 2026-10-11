@@ -66,6 +66,14 @@ describe("HumanRequestDialog", () => {
     expect(reply).toHaveBeenCalledWith({ kind: "skip" });
   });
 
+  it("ignores Escape while an IME composition is active", () => {
+    const reply = vi.fn(async (_reply: HumanReply) => undefined);
+    render(<HumanRequestDialog request={requestOne} onReply={reply} />);
+
+    fireEvent.keyDown(document, { key: "Escape", isComposing: true });
+    expect(reply).not.toHaveBeenCalled();
+  });
+
   it("ignores a backdrop click even when skipping is allowed", () => {
     const reply = vi.fn(async (_reply: HumanReply) => undefined);
     render(<HumanRequestDialog request={requestOne} onReply={reply} />);

@@ -37,6 +37,7 @@ export function HumanRequestDialog({
   // 改在捕获阶段监听 Esc 键，先于 Primer 的处理器（它会 preventDefault 并中断后续处理器）。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
       if (event.key === "Escape") escapeSkipRef.current?.();
     };
     document.addEventListener("keydown", onKeyDown, true);

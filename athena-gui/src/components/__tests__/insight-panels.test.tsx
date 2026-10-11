@@ -47,6 +47,22 @@ describe("LLMIOPanel", () => {
     expect(screen.getByText("工具返回")).toBeInTheDocument();
   });
 
+  it("marks only the selected agent with aria-current", async () => {
+    bridgeMocks.tracesList.mockResolvedValue({
+      traces: [
+        { agent_id: "ideator-1", file: "a.jsonl", size_bytes: 10, messages: 2, updated_at: 0 },
+        { agent_id: "coder-2", file: "b.jsonl", size_bytes: 10, messages: 1, updated_at: 0 },
+      ],
+    });
+    bridgeMocks.traceGet.mockResolvedValue({ agent_id: "ideator-1", messages: [] });
+
+    renderUi(<LLMIOPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /ideator-1/ }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /ideator-1/ })).toHaveAttribute("aria-current", "true"));
+    expect(screen.getByRole("button", { name: /coder-2/ })).not.toHaveAttribute("aria-current");
+  });
+
   it("shows the error when loading a trace fails", async () => {
     bridgeMocks.tracesList.mockResolvedValue({
       traces: [{ agent_id: "ideator-1", file: "a.jsonl", size_bytes: 10, messages: 2, updated_at: 0 }],

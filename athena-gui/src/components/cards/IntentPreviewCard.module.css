@@ -134,3 +134,12 @@
   font-size: var(--text-body-size-small);
   color: var(--fgColor-muted);
 }
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--base-size-8);
+  font-size: var(--text-body-size-small);
+  color: var(--fgColor-muted);
+}

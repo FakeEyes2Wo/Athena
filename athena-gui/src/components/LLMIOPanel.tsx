@@ -122,6 +122,7 @@ export default function LLMIOPanel() {
                 <ActionList.Item
                   key={trace.agent_id}
                   active={trace.agent_id === selectedId}
+                  aria-current={trace.agent_id === selectedId ? "true" : undefined}
                   onSelect={() => setSelectedId(trace.agent_id)}
                 >
                   <span className={styles.agentId}>{trace.agent_id}</span>

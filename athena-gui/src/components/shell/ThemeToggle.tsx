@@ -10,7 +10,7 @@ export function ThemeToggle() {
     <IconButton
       icon={toDark ? MoonIcon : SunIcon}
       variant="invisible"
-      aria-label={toDark ? "主题：深色" : "主题：浅色"}
+      aria-label={toDark ? "切换到深色主题" : "切换到浅色主题"}
       onClick={cycleMode}
     />
   );

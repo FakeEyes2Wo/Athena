@@ -1,4 +1,5 @@
 import { Button, CounterLabel, Label } from "@primer/react";
+import { hypothesisVariant } from "../common/hypothesisStatus";
 import styles from "./PendingHypotheses.module.css";
 
 interface PendingHypothesesProps {
@@ -18,7 +19,7 @@ export function PendingHypotheses({ pending, onSelect }: PendingHypothesesProps)
       <ul className={styles.list}>
         {pending.map((h) => (
           <li key={h.id} className={styles.item}>
-            <Label variant="accent">PROPOSED</Label>
+            <Label variant={hypothesisVariant("PROPOSED")}>PROPOSED</Label>
             <span className={styles.statement}>{h.statement}</span>
             <Button size="small" onClick={() => onSelect(h.id)}>
               选择

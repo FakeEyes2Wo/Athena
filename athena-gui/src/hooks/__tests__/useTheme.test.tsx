@@ -34,12 +34,12 @@ describe("useTheme", () => {
     expect(root.getAttribute("data-light-theme")).toBe("light");
     expect(root.getAttribute("data-dark-theme")).toBe("dark");
 
-    fireEvent.click(screen.getByRole("button", { name: "主题：深色" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换到深色主题" }));
 
     expect(root.getAttribute("data-color-mode")).toBe("dark");
     expect(localStorage.getItem("athena-theme")).toBe("dark");
     expect(document.querySelector('[data-component="ThemeProvider"]')).toHaveAttribute("data-color-mode", "dark");
-    expect(screen.getByRole("button", { name: "主题：浅色" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换到浅色主题" })).toBeInTheDocument();
   });
 
   it("falls back to the system preference when the stored value is missing or invalid", () => {

@@ -23,10 +23,10 @@ describe("shared component contracts", () => {
   it("toggles the theme from the shared icon button and persists both transitions", () => {
     localStorage.setItem("athena-theme", "light");
     renderUi(<ThemeToggle />);
-    fireEvent.click(screen.getByRole("button", { name: "主题：深色" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换到深色主题" }));
     expect(document.documentElement.getAttribute("data-color-mode")).toBe("dark");
     expect(localStorage.getItem("athena-theme")).toBe("dark");
-    fireEvent.click(screen.getByRole("button", { name: "主题：浅色" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换到浅色主题" }));
     expect(document.documentElement.getAttribute("data-color-mode")).toBe("light");
     expect(localStorage.getItem("athena-theme")).toBe("light");
   });
