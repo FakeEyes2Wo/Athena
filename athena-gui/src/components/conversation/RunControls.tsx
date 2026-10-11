@@ -1,3 +1,4 @@
+import { Button, SegmentedControl, Spinner } from "@primer/react";
 import type { PipelineViewModel } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import styles from "./RunControls.module.css";
@@ -32,34 +33,34 @@ export function RunControls({ viewModel, active, onPause, onResume, onStop, onTo
   return (
     <div className={styles.bar}>
       <div className={styles.status}>
-        {running ? (
-          <Icon name="loader" size={14} className="icon--spin" />
-        ) : (
-          <Icon name="sparkles" size={14} />
-        )}
+        {running ? <Spinner size="small" srText={null} /> : <Icon name="sparkles" size={14} />}
         <strong className={styles.phase}>{phase || "idle"}</strong>
         <span className={styles.muted}>· {STATUS_LABEL[status] ?? status} ·</span>
-        <button
-          className={`${styles.mode}${manual ? ` ${styles.modeActive}` : ""}`}
-          onClick={onToggleMode}
-          title="切换自动/手动假设选择"
+        <SegmentedControl
+          aria-label="假设选择模式"
+          size="small"
+          onChange={(index) => {
+            // 只在切到另一种模式时通知，重复点击当前模式不触发切换。
+            if ((index === 1) !== manual) onToggleMode();
+          }}
         >
-          {manual ? "手动" : "自动"}
-        </button>
+          <SegmentedControl.Button selected={!manual}>自动</SegmentedControl.Button>
+          <SegmentedControl.Button selected={manual}>手动</SegmentedControl.Button>
+        </SegmentedControl>
         <span className={styles.muted}>
           预算 {rightRail.budgetRemaining} · 最佳 {best}
         </span>
       </div>
       <div className={styles.actions}>
-        <button className="btn btn--sm" onClick={onPause} disabled={!running} title="暂停搜索">
+        <Button size="small" onClick={onPause} disabled={!running}>
           暂停
-        </button>
-        <button className="btn btn--sm" onClick={onResume} disabled={!resumable} title="继续搜索">
+        </Button>
+        <Button size="small" onClick={onResume} disabled={!resumable}>
           继续
-        </button>
-        <button className="btn btn--sm btn--ghost" onClick={onStop} disabled={terminal} title="停止研究">
+        </Button>
+        <Button size="small" variant="danger" onClick={onStop} disabled={terminal}>
           停止
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -1,6 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
+import { Flash } from "@primer/react";
 import type { ClarificationPreview, UIMessage, UIMessagePreview } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
+import { CodeBlock } from "../common/CodeBlock";
 import { Icon } from "../common/Icon";
 import styles from "./MessageList.module.css";
 
@@ -166,10 +168,10 @@ const TrajectoryItem = memo(function TrajectoryItem({ msg, onConfirmPreview, onR
   }
   if (msg.kind === "error") {
     return (
-      <section className="card card--error">
-        <h3 className="card__title">错误</h3>
-        <p className="card__body">{msg.content}</p>
-      </section>
+      <Flash variant="danger" className={styles.error}>
+        <h3 className={styles.errorTitle}>错误</h3>
+        <p className={styles.errorBody}>{msg.content}</p>
+      </Flash>
     );
   }
   if (msg.role === "user") {
@@ -186,7 +188,7 @@ const TrajectoryItem = memo(function TrajectoryItem({ msg, onConfirmPreview, onR
         <summary>
           {label} · {msg.channel ?? "output"}
         </summary>
-        <pre className="code-block">{msg.content}</pre>
+        <CodeBlock className={styles.flush}>{msg.content}</CodeBlock>
       </details>
     );
   }
@@ -196,7 +198,7 @@ const TrajectoryItem = memo(function TrajectoryItem({ msg, onConfirmPreview, onR
         <div className={styles["tool-call__head"]}>
           <Icon name="wrench" size={13} /> {msg.tool}
         </div>
-        <pre className="code-block">{msg.content}</pre>
+        <CodeBlock className={styles.flush}>{msg.content}</CodeBlock>
       </article>
     );
   }

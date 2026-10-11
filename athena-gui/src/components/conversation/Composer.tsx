@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
-import { Icon } from "../common/Icon";
+import { Button, Textarea } from "@primer/react";
+import { PaperAirplaneIcon } from "@primer/octicons-react";
 import styles from "./Composer.module.css";
 
 interface ComposerProps {
@@ -20,20 +21,21 @@ export function Composer({ onSend, disabled }: ComposerProps) {
   }
 
   return (
-    <form className={styles["composer"]} onSubmit={(event) => void handleSubmit(event)}>
-      <textarea
-        className={styles["composer__input"]}
+    <form className={styles.composer} onSubmit={(event) => void handleSubmit(event)}>
+      <Textarea
+        block
+        resize="vertical"
+        rows={3}
         value={value}
         onChange={(event) => setValue(event.target.value)}
         placeholder="描述你的 ML 任务..."
         aria-label="描述你的 ML 任务"
-        rows={3}
       />
-      <button className={styles["composer__send"]} type="submit" disabled={disabled}>
-        发送 <Icon name="send" size={14} />
-      </button>
-      <div className={styles["composer__hint"]}>
-        支持命令：/pause /resume /stop /manual /auto /select &lt;id&gt; /help
+      <div className={styles.footer}>
+        <span className={styles.hint}>支持命令：/pause /resume /stop /manual /auto /select &lt;id&gt; /help</span>
+        <Button type="submit" variant="primary" trailingVisual={PaperAirplaneIcon} disabled={disabled}>
+          发送
+        </Button>
       </div>
     </form>
   );

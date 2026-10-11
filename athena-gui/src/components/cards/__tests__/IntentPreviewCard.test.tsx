@@ -114,4 +114,27 @@ describe("IntentPreviewCard", () => {
     });
     expect(revise).toHaveBeenCalledWith("add target");
   });
+
+  it("shows the draft status and critical unresolved items as Primer labels", () => {
+    render(
+      <IntentPreviewCard preview={readyPreview({ status: "FAILED" })} onConfirm={noop} onRevise={noop} onRetry={noop} onCancel={noop} />,
+    );
+
+    expect(screen.getByText("FAILED")).toHaveAttribute("data-variant", "danger");
+    expect(screen.getByText(/target/, { selector: "[data-variant]" })).toHaveAttribute("data-variant", "danger");
+  });
+
+  it("renders an unexpected draft status as a secondary label", () => {
+    render(
+      <IntentPreviewCard
+        preview={readyPreview({ status: "ARCHIVED" as ClarificationPreview["status"] })}
+        onConfirm={noop}
+        onRevise={noop}
+        onRetry={noop}
+        onCancel={noop}
+      />,
+    );
+
+    expect(screen.getByText("ARCHIVED")).toHaveAttribute("data-variant", "secondary");
+  });
 });

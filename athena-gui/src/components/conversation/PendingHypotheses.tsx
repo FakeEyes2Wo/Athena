@@ -1,3 +1,4 @@
+import { Button, CounterLabel, Label } from "@primer/react";
 import styles from "./PendingHypotheses.module.css";
 
 interface PendingHypothesesProps {
@@ -10,18 +11,21 @@ export function PendingHypotheses({ pending, onSelect }: PendingHypothesesProps)
   if (pending.length === 0) return null;
 
   return (
-    <div className={styles["pending-hypotheses"]}>
-      <div className={styles["pending-hypotheses__title"]}>待选假设 ({pending.length})</div>
-      <ul className={styles["pending-hypotheses__list"]}>
+    <section className={styles.panel} aria-label="待选假设">
+      <div className={styles.title}>
+        待选假设 <CounterLabel>{pending.length}</CounterLabel>
+      </div>
+      <ul className={styles.list}>
         {pending.map((h) => (
-          <li key={h.id} className={styles["pending-hypotheses__item"]}>
-            <span className={styles["pending-hypotheses__statement"]}>{h.statement}</span>
-            <button className="btn btn--subtle btn--sm" onClick={() => onSelect(h.id)}>
+          <li key={h.id} className={styles.item}>
+            <Label variant="accent">PROPOSED</Label>
+            <span className={styles.statement}>{h.statement}</span>
+            <Button size="small" onClick={() => onSelect(h.id)}>
               选择
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
-    </div>
+    </section>
   );
 }

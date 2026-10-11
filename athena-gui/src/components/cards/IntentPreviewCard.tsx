@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Button, Checkbox, FormControl, Label, Spinner, Textarea, type LabelColorOptions } from "@primer/react";
 import type { ClarificationPreview } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import styles from "./IntentPreviewCard.module.css";
@@ -26,8 +27,18 @@ function Field({ label, value }: { label: string; value: string | null }) {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  return <span className={`${styles.badge} ${styles[`badge--${status.toLowerCase()}`] ?? ""}`}>{status.replace(/_/g, " ")}</span>;
+/** 澄清草稿状态 → Primer Label 配色。 */
+const STATUS_VARIANT: Record<string, LabelColorOptions> = {
+  IDLE: "secondary",
+  CLARIFYING: "attention",
+  READY_FOR_CONFIRMATION: "accent",
+  CONFIRMING: "accent",
+  RUNNING: "success",
+  FAILED: "danger",
+};
+
+function StatusLabel({ status }: { status: string }) {
+  return <Label variant={STATUS_VARIANT[status] ?? "secondary"}>{status.replace(/_/g, " ")}</Label>;
 }
 
 /** Supervisor-style task understanding card; the decision gate before PREPARE. */
@@ -95,7 +106,7 @@ export function IntentPreviewCard({
       <header className={styles.header}>
         <Icon name="sparkles" size={15} />
         <span className={styles.title}>{preview.understanding.title?.trim() || "任务理解"}</span>
-        <StatusBadge status={preview.status} />
+        <StatusLabel status={preview.status} />
       </header>
 
       <div className={styles.grid}>
@@ -138,9 +149,10 @@ export function IntentPreviewCard({
           <div className={styles.unresolvedTitle}>未解决项</div>
           {preview.unresolved.map((item) => (
             <div key={`${item.field}-${item.reason}`} className={styles.unresolvedRow}>
-              <span className={`${styles.unresolvedBadge}${item.critical ? ` ${styles.unresolvedBadgeCritical}` : ""}`}>
-                {item.field} {item.critical ? "· 关键" : ""}
-              </span>
+              <Label variant={item.critical ? "danger" : "attention"}>
+                {item.field}
+                {item.critical ? " · 关键" : ""}
+              </Label>
               <span className={styles.unresolvedReason}>{item.reason}</span>
             </div>
           ))}
@@ -155,88 +167,60 @@ export function IntentPreviewCard({
 
         {isRunning ? (
           <span className={styles.running}>
-            <Icon name="loader" size={13} className="icon--spin" /> 任务运行中…
-            <span className={styles.badge}>已启动</span>
+            <Spinner size="small" srText={null} /> 任务运行中…
+            <Label variant="success">已启动</Label>
           </span>
         ) : isConfirming || (isReady && pending) ? (
           <span className={styles.running}>
-            <Icon name="loader" size={13} className="icon--spin" /> 正在处理…
+            <Spinner size="small" srText={null} /> 正在处理…
           </span>
         ) : null}
       </footer>
 
       {isFailed && (
         <div className={styles.actions}>
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={handleRetry}
-            disabled={pending}
-          >
+          <Button variant="primary" onClick={handleRetry} disabled={pending}>
             Retry
-          </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={handleCancel}
-            disabled={pending}
-          >
+          </Button>
+          <Button onClick={handleCancel} disabled={pending}>
             Cancel
-          </button>
+          </Button>
         </div>
       )}
 
       {isReady && (
         <div className={styles.actions}>
           <div className={styles.revise}>
-            <label className={styles.reviseLabel} htmlFor={`revise-${preview.draftId || "preview"}`}>
-              Revise with instruction
-            </label>
-            <textarea
-              id={`revise-${preview.draftId || "preview"}`}
-              className={styles.reviseInput}
-              value={revisionText}
-              onChange={(event) => setRevisionText(event.target.value)}
-              maxLength={MAX_REVISION_LENGTH}
-              rows={2}
-              placeholder="Optional revision instruction"
-            />
+            <FormControl id={`revise-${preview.draftId || "preview"}`}>
+              <FormControl.Label>Revise with instruction</FormControl.Label>
+              <Textarea
+                block
+                value={revisionText}
+                onChange={(event) => setRevisionText(event.target.value)}
+                maxLength={MAX_REVISION_LENGTH}
+                rows={2}
+                placeholder="Optional revision instruction"
+              />
+            </FormControl>
             <div className={styles.reviseActions}>
               {hasCriticalUnresolved && (
-                <label className={styles.acknowledge}>
-                  <input
-                    type="checkbox"
+                <FormControl disabled={pending}>
+                  <Checkbox
                     checked={acknowledgeUnresolved}
                     onChange={(event) => setAcknowledgeUnresolved(event.target.checked)}
-                    disabled={pending}
                   />
-                  <span className={styles.acknowledgeText}>Acknowledge unresolved items</span>
-                </label>
+                  <FormControl.Label>Acknowledge unresolved items</FormControl.Label>
+                </FormControl>
               )}
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={handleConfirm}
-                disabled={confirmationDisabled}
-              >
+              <Button variant="primary" onClick={handleConfirm} disabled={confirmationDisabled}>
                 {isConfirming ? "Confirming…" : "确认并启动 (Confirm and start)"}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={handleRevise}
-                disabled={pending || revisionTextInvalid}
-              >
+              </Button>
+              <Button onClick={handleRevise} disabled={pending || revisionTextInvalid}>
                 Revise
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={handleCancel}
-                disabled={pending}
-              >
+              </Button>
+              <Button variant="invisible" onClick={handleCancel} disabled={pending}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         </div>

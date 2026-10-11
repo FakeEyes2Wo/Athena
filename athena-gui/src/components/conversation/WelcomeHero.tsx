@@ -1,3 +1,4 @@
+import { Button, Heading } from "@primer/react";
 import { Icon } from "../common/Icon";
 import styles from "./WelcomeHero.module.css";
 
@@ -14,21 +15,17 @@ interface WelcomeHeroProps {
 /** Empty-conversation landing with brand, tagline, and clickable example prompts. */
 export function WelcomeHero({ onPrompt }: WelcomeHeroProps) {
   return (
-    <div className={styles["welcome-hero"]}>
-      <div className={styles["welcome-hero__mark"]} aria-hidden>
-        <Icon name="sparkles" size={26} />
-      </div>
-      <h2 className={styles["welcome-hero__title"]}>Athena</h2>
-      <p className={styles["welcome-hero__subtitle"]}>对话式 ML 研究编排 · 从假设到实验全自动</p>
-      <div className={styles["welcome-hero__prompts"]}>
+    <div className={styles.hero}>
+      <span className={styles.mark} aria-hidden="true">
+        <Icon name="sparkles" size={24} />
+      </span>
+      <Heading as="h2" variant="medium">Athena</Heading>
+      <p className={styles.subtitle}>对话式 ML 研究编排 · 从假设到实验全自动</p>
+      <div className={styles.prompts}>
         {EXAMPLE_PROMPTS.map((prompt) => (
-          <button
-            key={prompt}
-            className={styles["welcome-hero__prompt"]}
-            onClick={() => onPrompt(prompt)}
-          >
+          <Button key={prompt} size="small" onClick={() => onPrompt(prompt)}>
             {prompt}
-          </button>
+          </Button>
         ))}
       </div>
     </div>

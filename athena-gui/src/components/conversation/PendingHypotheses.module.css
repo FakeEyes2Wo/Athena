@@ -1,34 +1,43 @@
-.pending-hypotheses {
-  margin: 0 24px var(--space-md);
-  padding: var(--space-md);
-  border: 1px solid var(--border-hover);
-  border-radius: var(--radius-card);
-  background: var(--accent-subtle);
+/* 手动模式下的待选假设列表。 */
+
+.panel {
+  flex-shrink: 0;
+  margin: var(--base-size-12) var(--base-size-24) 0;
+  border: var(--borderWidth-thin) solid var(--borderColor-accent-muted);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-default);
+  overflow: hidden;
 }
-.pending-hypotheses__title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent);
-  letter-spacing: 0.04em;
-  margin-bottom: 8px;
-}
-.pending-hypotheses__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.pending-hypotheses__item {
+
+.title {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 13px;
+  gap: var(--base-size-8);
+  padding: var(--base-size-8) var(--base-size-16);
+  border-bottom: var(--borderWidth-thin) solid var(--borderColor-accent-muted);
+  background: var(--bgColor-accent-muted);
+  font-size: var(--text-body-size-medium);
+  font-weight: var(--base-text-weight-semibold);
 }
-.pending-hypotheses__statement {
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: var(--base-size-8) var(--base-size-16);
+  display: flex;
+  flex-direction: column;
+  gap: var(--base-size-8);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--base-size-12);
+  font-size: var(--text-body-size-medium);
+}
+
+.statement {
   flex: 1;
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--fgColor-default);
 }
