@@ -37,6 +37,28 @@ _PHASE_CLASS = {
 _MAX_IDEATOR_LANES = 3
 _MIN_IDEATOR_LANE_WIDTH = 24
 
+# 猫头鹰 logo：取自 athena-gui/public/athena-logo-*.png 网格中的猫头鹰（不含研究树）。
+# 每两行像素合成一行半块字符，"." 为透明。身体用终端默认前景色——深色终端里是白的、
+# 浅色终端里是黑的，正好对应 logo 的明暗两版；眼睛固定为金色。
+_OWL_PIXELS = (
+    "W.......W",
+    "WW.....WW",
+    "WWWWWWWWW",
+    "W.YWWWY.W",
+    "WWWW.WWWW",
+    "WWWWWWWWW",
+    ".WWWWWWW.",
+    "..W...W..",
+)
+_OWL_COLORS = {"W": "", "Y": "#d29922"}
+_WELCOME_INDENT = " "
+_WELCOME_GAP = "   "
+_WELCOME_CAPTIONS = (
+    ("class:header.brand", "Athena"),
+    ("class:status.secondary", "自动研究工作台"),
+    ("class:status.secondary", "描述研究任务开始 · ? 帮助"),
+)
+
 
 def _cell_width(text: str) -> int:
     return sum(max(0, get_cwidth(char)) for char in text)
@@ -215,7 +237,8 @@ def _render_entry_lines(
     return tuple(lines)
 
 
-def _pad_line(line: StyleAndTextTuples, width: int) -> StyleAndTextTuples:
+def pad_line(line: StyleAndTextTuples, width: int) -> StyleAndTextTuples:
+    """Right-pad a visual line with spaces to exactly ``width`` cells."""
     missing = max(0, width - _cell_width(_plain(line)))
     return [*line, *(([("", " " * missing)]) if missing else [])]
 
@@ -260,13 +283,57 @@ def _render_ideator_board(
             if index:
                 combined.append(("class:history.ideator.separator", "│"))
             line = lines[row] if row < len(lines) else []
-            combined.extend(_pad_line(line, lane_width))
+            combined.extend(pad_line(line, lane_width))
         output.append(combined)
     return tuple(output)
 
 
+def _owl_fg(symbol: str) -> str:
+    color = _OWL_COLORS[symbol]
+    return f"fg:{color}" if color else ""
+
+
+def _owl_cell(top: str, bottom: str) -> Fragment:
+    if top == bottom:
+        return ("", " ") if top == "." else (_owl_fg(top), "█")
+    if bottom == ".":
+        return (_owl_fg(top), "▀")
+    if top == ".":
+        return (_owl_fg(bottom), "▄")
+    # 上下异色：默认前景色没法写成背景色，借 reverse 让默认前景铺底、彩色画另半格。
+    if _OWL_COLORS[top] == "":
+        return (f"reverse bg:{_OWL_COLORS[bottom]}", "▄")
+    return (f"reverse bg:{_OWL_COLORS[top]}", "▀")
+
+
+def _owl_rows() -> tuple[Fragments, ...]:
+    pairs = zip(_OWL_PIXELS[::2], _OWL_PIXELS[1::2])
+    return tuple(
+        [_owl_cell(top, bottom) for top, bottom in zip(upper, lower)]
+        for upper, lower in pairs
+    )
+
+
+def render_welcome_lines(width: int) -> tuple[StyleAndTextTuples, ...]:
+    """Render the empty-history welcome: owl logo beside the product name."""
+    owl_width = _cell_width(_WELCOME_INDENT) + len(_OWL_PIXELS[0])
+    if 0 < width < owl_width:
+        # 放不下 logo 时只留品牌名，不输出被截断的半只猫头鹰。
+        return ([], _fit_one_line([_WELCOME_CAPTIONS[0]], width))
+    lines: list[StyleAndTextTuples] = [[]]
+    for index, row in enumerate(_owl_rows()):
+        line: Fragments = [("", _WELCOME_INDENT), *row]
+        if index < len(_WELCOME_CAPTIONS):
+            caption = _WELCOME_CAPTIONS[index]
+            line = _fit_one_line([*line, ("", _WELCOME_GAP), caption], width)
+        lines.append(line)
+    return tuple(lines)
+
+
 def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuples, ...]:
     """Project entries to immutable visual lines used by scrolling."""
+    if not state.history:
+        return render_welcome_lines(width)
     output: list[StyleAndTextTuples] = []
     ordinary: list[HistoryEntry] = []
     ideators: dict[int, list[HistoryEntry]] = {}

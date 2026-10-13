@@ -306,6 +306,39 @@ def test_separate_debate_rounds_render_as_separate_boards() -> None:
     assert output.index("between") < output.index("round two")
 
 
+def test_empty_history_shows_owl_logo_beside_product_name() -> None:
+    lines = render_history_lines(TuiState(), 80)
+    owl_rows = [plain(line)[1:10] for line in lines[1:]]
+    body_styles = {style for line in lines for style, text in line if text == "█"}
+    eye_styles = {style for line in lines for style, text in line if "reverse" in style}
+
+    assert owl_rows == ["█▄     ▄█", "█▀▄███▄▀█", "████▄████", " ▀█▀▀▀█▀ "]
+    assert plain(lines[1]).endswith("Athena")
+    assert "? 帮助" in plain(lines[3])
+    # 身体沿用终端默认前景色以适配明暗终端，只有眼睛带固定金色。
+    assert body_styles == {""}
+    assert eye_styles == {"reverse bg:#d29922"}
+    assert all(get_cwidth(plain(line)) <= 80 for line in lines)
+
+
+def test_welcome_drops_logo_when_terminal_is_too_narrow() -> None:
+    lines = render_history_lines(TuiState(), 8)
+    output = "\n".join(plain(line) for line in lines)
+
+    assert "█" not in output
+    assert "Athena" in output
+    assert all(get_cwidth(plain(line)) <= 8 for line in lines)
+
+
+def test_welcome_disappears_once_history_has_entries() -> None:
+    state = TuiState(history=(HistoryEntry(kind="user", text="go"),))
+
+    output = plain(join_lines(render_history_lines(state, 80)))
+
+    assert "█" not in output
+    assert "› go" in output
+
+
 def test_status_prioritizes_error_waiting_and_unseen_output() -> None:
     assert "boom" in plain(render_status(TuiState(last_error="boom"), 50))
     assert "需要指导" in plain(
