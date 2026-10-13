@@ -294,6 +294,23 @@ a {
   border: 0;
 }
 
+/* ===== Brand logo ===== */
+/* BrandMark renders both variants; the active theme decides which one shows. */
+.brand-logo {
+  display: block;
+  flex: none;
+  image-rendering: pixelated;
+  box-shadow: 0 0 0 1px var(--border);
+  user-select: none;
+}
+.brand-logo--dark,
+:root[data-theme="dark"] .brand-logo--light {
+  display: none;
+}
+:root[data-theme="dark"] .brand-logo--dark {
+  display: block;
+}
+
 /* ===== Buttons ===== */
 .btn {
   display: inline-flex;

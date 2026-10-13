@@ -5,25 +5,30 @@ interface BrandMarkProps {
   className?: string;
 }
 
-/** Athena logo: an "A" whose crossbar is a point of insight. */
+/** Athena logo: a pixel-art cat; the light/dark variant follows the active theme. */
 export function BrandMark({ size = 24, withName = false, className }: BrandMarkProps) {
+  const imageStyle = { width: size, height: size, borderRadius: Math.round(size * 0.28) };
   return (
     <span
       className={className}
       style={{ display: "inline-flex", alignItems: "center", gap: 9 }}
     >
-      <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden focusable="false">
-        <rect width="32" height="32" rx="9" fill="var(--accent)" />
-        <path
-          d="M9.5 23 16 8.5 22.5 23"
-          fill="none"
-          stroke="var(--on-accent)"
-          strokeWidth="2.9"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <circle cx="16" cy="18" r="2.1" fill="var(--on-accent)" />
-      </svg>
+      <img
+        className="brand-logo brand-logo--light"
+        src="/athena-logo-light.png"
+        alt=""
+        aria-hidden
+        draggable={false}
+        style={imageStyle}
+      />
+      <img
+        className="brand-logo brand-logo--dark"
+        src="/athena-logo-dark.png"
+        alt=""
+        aria-hidden
+        draggable={false}
+        style={imageStyle}
+      />
       {withName && (
         <span
           style={{
