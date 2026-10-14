@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -51,6 +52,8 @@ from athena.research.supervisor.validation_contracts import (
 _MAX_REVIEW_DIFF_CHARS = 12_000
 # 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
 _MAX_VALIDATION_REPAIR_ATTEMPTS = 16
+
+logger = logging.getLogger(__name__)
 
 
 def validation_key(
@@ -271,6 +274,7 @@ async def _execute_predictions(
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
     version: str | None = None,
+    keep_paths: tuple[str, ...] = (),
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
 
@@ -284,6 +288,13 @@ async def _execute_predictions(
     With the Task B execution API, the held-out target travels on
     ``ExecutionContext.predict_features`` and is materialised onto each
     ``CommandRequest`` by ``ExecutionRuntime.run`` before the backend runs it.
+
+    ``keep_paths`` names the paths the independent review approved.  Everything
+    else the run touched is run-artifact churn: the frozen command rewrites its
+    own report and any side files it writes, and VALIDATE refuses to proceed
+    while the worktree differs from the reviewed state.  Restoring declared
+    outputs alone is not enough for a candidate whose command also writes
+    undeclared files, so the whole delta beyond ``keep_paths`` is restored.
     """
     workdir = Path(workspace.path)
     manifest = read_experiment_manifest(workdir)
@@ -321,7 +332,10 @@ async def _execute_predictions(
         ref = await pack_directory(store, predictions_dir)
         return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
-        await git.restore_paths(workspace, tuple(manifest.outputs.values()))
+        # Put the worktree back to the reviewed state: the approved paths keep
+        # the content the review accepted, and every other path the run rewrote
+        # — including undeclared side files the command writes — is discarded.
+        await git.discard_to_baseline(workspace, keep_paths=keep_paths)
 
 
 def _row_ids(path: Path) -> tuple[list[str], set[str]]:
@@ -549,8 +563,40 @@ class ValidationSession:
         input = self.input
         options = self.options
         repair = await _decode_repair(deps.agents, deps.store, input=input)
+        previous_paths: tuple[str, ...] | None = None
         for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await deps.git.diff(deps.workspace)
+            if not diff.paths:
+                # Nothing is being proposed, so there is no repair to approve:
+                # run the frozen SOTA command exactly as committed.
+                reviewed_diff = diff
+                prediction_run = await _execute_predictions(
+                    execution=deps.execution,
+                    git=deps.git,
+                    workspace=deps.workspace,
+                    store=deps.store,
+                    publish=deps.publish,
+                    timeout_s=options.timeout_s,
+                    predict_features=options.predict_features,
+                    version=f"validate-{input.validation_key}",
+                    keep_paths=(),
+                )
+                break
+            if previous_paths is not None and diff.paths == previous_paths:
+                # The identical diff came back after the review rejected it.
+                # The Agent is not proposing a repair — its verification run of
+                # the frozen command rewrote that command's own run artifacts
+                # (report, summary, timings), which is churn, not a repair. A
+                # repair the Agent stands behind would have changed between
+                # turns. Discard the churn and validate the untouched frozen
+                # candidate rather than burning the whole budget.
+                discarded = await deps.git.discard_to_baseline(deps.workspace)
+                logger.info(
+                    "validation discarded un-reviewed run artifacts: %s",
+                    ", ".join(discarded) or "none",
+                )
+                continue
+            previous_paths = diff.paths
             preflight = await _deterministic_preflight(
                 workspace=deps.workspace,
                 diff=diff,
@@ -590,6 +636,7 @@ class ValidationSession:
                 timeout_s=options.timeout_s,
                 predict_features=options.predict_features,
                 version=f"validate-{input.validation_key}",
+                keep_paths=reviewed_diff.paths,
             )
             if await deps.git.diff(deps.workspace) != reviewed_diff:
                 repair = await _decode_repair(

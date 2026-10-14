@@ -33,10 +33,17 @@ def _predictions(workdir: Path, ids: range) -> Path:
 class _Git:
     def __init__(self) -> None:
         self.restored: list[tuple[str, ...]] = []
+        self.discarded: list[tuple[str, ...]] = []
 
     async def restore_paths(self, workspace, paths) -> None:
         del workspace
         self.restored.append(tuple(paths))
+
+    async def discard_to_baseline(self, workspace, *, keep_paths=()) -> tuple[str, ...]:
+        """Record the approved paths the run must leave in place."""
+        del workspace
+        self.discarded.append(tuple(keep_paths))
+        return ()
 
 
 class _Execution:

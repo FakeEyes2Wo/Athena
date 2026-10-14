@@ -535,7 +535,11 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == ["row ids do not align"]
+    # The diagnostic must survive intact; the escalating budget note is
+    # appended so a thorough Agent cannot spend the whole Plan re-verifying.
+    assert len(agents.feedback) == 1
+    assert agents.feedback[0].startswith("row ids do not align")
+    assert "turn(s) remain" in agents.feedback[0]
 
 
 def _evaluator_draft(root: Path, labels_csv: str) -> None:

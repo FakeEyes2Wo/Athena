@@ -8,8 +8,7 @@ from typing import Any
 
 from athena.agents.prepare_agent import EVALUATOR_AGENT_TYPE, register_evaluator_agent
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
-from athena.core.artifact_store import (
-    ArtifactIntegrityError,
+from athena.core.artifact_store import (    ArtifactIntegrityError,
     ArtifactNotFoundError,
     InvalidArtifactRefError,
 )
@@ -19,6 +18,14 @@ from athena.research.supervisor.evaluator_plan import run_evaluator_plan
 
 EVALUATOR_PLAN_ID = "evaluator"
 FINAL_EVALUATOR_PLAN_ID = "final_evaluator"
+
+# One evaluator plan owns five required files plus a freeze contract that runs
+# two property probes, and each probe executes the evaluator three times in a
+# fresh environment. On a slow host that is minutes per attempt, so the shared
+# PREPARE turn budget is not enough: an evaluator that is demonstrably
+# converging still runs out of turns and takes the whole run down with
+# "turn budget exhausted without an accepted evaluator". Give it headroom.
+EVALUATOR_PLAN_TURNS = MAX_PLAN_TURNS * 2
 
 
 @dataclass(frozen=True)
@@ -202,7 +209,9 @@ async def run_evaluator_agent(
     )
 
     # The supervisor plan validates and freezes the evaluator bundle.
-    return await run_evaluator_plan(runtime, evaluator_dir, task, name, MAX_PLAN_TURNS)
+    return await run_evaluator_plan(
+        runtime, evaluator_dir, task, name, EVALUATOR_PLAN_TURNS
+    )
 
 
 async def _search_evaluator(runtime: Any, task: str) -> Any:
@@ -298,8 +307,25 @@ def _validate_evaluator_pair(runtime: Any) -> None:
         id_column = search_spec.prediction_id_column
     if final_spec is not None and final_spec.prediction_id_column != id_column:
         raise RuntimeError(
-            "SEARCH and FINAL evaluators declare different prediction id columns"
+            "SEARCH and FINAL evaluators declare different prediction id columns: "
+            f"{id_column!r} vs {final_spec.prediction_id_column!r}. The two "
+            "evaluators must score the same prediction file, so their identity "
+            "and prediction columns have to agree."
         )
+    if search_spec is not None and final_spec is not None:
+        # The candidate writes one predictions file per experiment. VALIDATE
+        # re-scores it with the FINAL evaluator, so a differing file name or
+        # prediction column fails only later, after SEARCH has been paid for.
+        for field in ("prediction_file", "prediction_column"):
+            search_value = getattr(search_spec, field)
+            final_value = getattr(final_spec, field)
+            if search_value != final_value:
+                raise RuntimeError(
+                    "SEARCH and FINAL evaluators declare different "
+                    f"{field.replace('_', ' ')}s: {search_value!r} vs "
+                    f"{final_value!r}. A single predictions file has to satisfy "
+                    "both evaluators."
+                )
     if id_column == "__athena_row_id":
         # Keep the two-argument call shape for legacy descriptor hooks.
         assert_evaluator_splits_are_disjoint(search_labels, final_labels)
@@ -324,11 +350,25 @@ async def prepare_evaluators(
     final_task = final_evaluator_task(task, final_dir, final_rule)
     if (search_root / "metric.json").is_file():
         search_spec = load_evaluator_spec(search_root, legacy_ok=False)
+        # The FINAL evaluator is a second, independent agent. Forwarding only
+        # the metric triple lets it invent its own identity contract, and the
+        # pair check then kills PREPARE with a contract mismatch it could not
+        # have avoided. Give it every field that has to agree.
         final_task += (
-            "\nMatch the frozen SEARCH metric exactly: "
+            "\nThe SEARCH evaluator is already frozen. Reproduce its prediction "
+            "contract exactly; do not invent different names. Declare in "
+            "metric.json: "
             f"task_type={search_spec.task_type}, "
-            f"primary_metric={search_spec.primary_metric}, class_labels="
-            f"{json.dumps(search_spec.class_labels, ensure_ascii=False)}."
+            f"primary_metric={search_spec.primary_metric}, "
+            f"class_labels={json.dumps(search_spec.class_labels, ensure_ascii=False)}, "
+            f"prediction_file={search_spec.prediction_file!r}, "
+            f"prediction_id_column={search_spec.prediction_id_column!r}, "
+            f"prediction_column={search_spec.prediction_column!r}, "
+            "probability_columns="
+            f"{json.dumps(list(search_spec.probability_columns), ensure_ascii=False)}. "
+            f"Use task_id {search_spec.task_id!r} only to keep the file naming "
+            "convention identical; the FINAL evaluator still scores its own "
+            "partition."
         )
     # Freeze FINAL only after SEARCH so overlap can be checked immediately.
     final_ref = await _final_evaluator(runtime, final_task)

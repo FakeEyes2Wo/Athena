@@ -7,7 +7,7 @@
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -65,7 +65,32 @@ _NON_IMPLEMENTATION_MARKERS = (
 )
 
 
-def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
+def _command_entry_points(
+    commands: Sequence[Sequence[str]], workdir: Path
+) -> tuple[str, ...]:
+    """Return the in-tree program files the frozen commands actually execute.
+
+    A candidate that adds a brand-new module without wiring it into the program
+    the manifest runs produces byte-identical predictions to its parent, so the
+    recorded score measures the parent rather than the intervention. Only the
+    argv tokens that name a file inside the worktree can change behaviour.
+    """
+    found: list[str] = []
+    for argv in commands:
+        for token in argv:
+            candidate = (workdir / token).resolve()
+            try:
+                relative = candidate.relative_to(Path(workdir).resolve())
+            except ValueError:
+                continue
+            if candidate.is_file() and relative.suffix == ".py":
+                found.append(relative.as_posix())
+    return tuple(dict.fromkeys(found))
+
+
+def _diff_intervention_failure(
+    paths: tuple[str, ...], entry_points: tuple[str, ...] = ()
+) -> PlanFailure | None:
     """Return a rejection reason when a SEARCH diff does not implement source.
 
     This is a deterministic first line of defense for attribution: it does not
@@ -94,6 +119,19 @@ def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
                 "this candidate changed no implementation source file; only "
                 "manifest/output/documentation changed. Implement the intervention "
                 "in a source file (e.g. model.py, features.py, train.py)."
+            ),
+        )
+    if entry_points and not set(entry_points) & set(paths):
+        joined = ", ".join(entry_points)
+        return PlanFailure(
+            kind="diff_rejected",
+            detail=(
+                "this candidate changed source files that the frozen command never "
+                f"runs. The manifest executes {joined}, and every one of those files "
+                "is unchanged, so the new code cannot affect the predictions: the "
+                "candidate would score exactly its parent. Wire the intervention into "
+                f"{joined} (import and call the new code from there) and run the "
+                "command again."
             ),
         )
     return None
@@ -434,8 +472,22 @@ class PlanRunner:
         try:
             assert_output_roots(self.workdir, manifest.outputs, required=required)
         except OutputFreshnessError as exc:
-            # 命令未产生声明输出 → 同 Plan 修正后重试
-            return PlanFailure(kind="output_failed", detail=str(exc))
+            # 命令未产生声明输出 → 同 Plan 修正后重试。
+            # 这段 detail 是 Plan Agent 唯一的修复信号，必须说清「产出物由谁写」：
+            # 每轮开跑前会把上一轮的同名产出归档，所以 Agent 用文件工具手写的
+            # REPORT.md 一律算过期，只有清单命令自己写出来的才算数。
+            commands = " ; ".join(" ".join(argv) for argv in manifest.commands)
+            return PlanFailure(
+                kind="output_failed",
+                detail=(
+                    f"{exc} The declared output {exc.name!r} at {exc.path} must be "
+                    f"(re)written by the manifest command itself: `{commands}`. "
+                    "Creating or editing it with the file tools does not count, "
+                    "because every turn starts by archiving the previous version. "
+                    "Add that file's generation to the command's program, then "
+                    "reply submit again."
+                ),
+            )
         return None
 
     async def _search_diff_failure(self, state: PlanState) -> PlanFailure | None:
@@ -443,7 +495,10 @@ class PlanRunner:
         if state.kind != "SEARCH":
             return None
         diff = await self._workspace.diff(self._branch)
-        return _diff_intervention_failure(diff.paths)
+        entry_points = _command_entry_points(
+            read_experiment_manifest(self.workdir).commands, self.workdir
+        )
+        return _diff_intervention_failure(diff.paths, entry_points)
 
     async def _score_candidate(
         self,

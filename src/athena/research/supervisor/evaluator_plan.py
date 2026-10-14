@@ -22,7 +22,7 @@ from athena.research.evaluation.trust import (
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import load_agent_result
-from athena.research.supervisor.plans import PlanDecision
+from athena.research.supervisor.plans import PlanDecision, plan_budget_note
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,8 @@ async def run_evaluator_plan(
             if decision.decision != "submit":
                 feedback = (
                     f"Return submit to advance; got {decision.decision!r}. "
-                    "Continue means keep repairing the evaluator, not accept it."
+                    "Continue means keep repairing the evaluator, not accept it. "
+                    + plan_budget_note(turn=turn, max_turns=max_turns)
                 )
                 continue
             try:
