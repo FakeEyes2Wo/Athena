@@ -15,6 +15,7 @@ from athena.research.evaluation.spec import (
     load_evaluator_spec,
 )
 from athena.research.evaluation.trust import (
+    extract_label_column_from_source,
     extract_prediction_column,
     extract_prediction_column_from_source,
     validate_evaluator_properties,
@@ -232,6 +233,16 @@ async def _validate_frozen_evaluator(
         prediction_column_from_spec, evaluator_root, entrypoint
     )
 
+    label_column = spec.label_column if spec is not None else None
+    if label_column is None:
+        source_path = evaluator_root / entrypoint
+        source = (
+            source_path.read_text(encoding="utf-8", errors="replace")
+            if source_path.is_file()
+            else ""
+        )
+        label_column = extract_label_column_from_source(source)
+
     prediction_file = spec.prediction_file if spec is not None else "predictions.csv"
 
     async def score(predictions_csv: str) -> float:
@@ -251,6 +262,7 @@ async def _validate_frozen_evaluator(
         score,
         prediction_column=prediction_column,
         prediction_id_column=id_column,
+        label_column=label_column,
         probability_columns=spec.probability_columns if spec is not None else (),
     )
     if not outcome.get("ok"):
