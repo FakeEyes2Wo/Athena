@@ -18,10 +18,13 @@ from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import PlanTurnResult, load_agent_result
 from athena.research.supervisor.plans import (
+    REJECTION_RETRY_LIMIT,
+    SEARCH_TURN_LIMIT,
     PlanDecision,
     PlanFailure,
     PlanInput,
     PlanState,
+    search_retry_note,
 )
 from athena.research.supervisor.prompt_context import (
     data_contract_block,
@@ -126,10 +129,20 @@ class PlanRuntime:
             if hypothesis is not None
             else ""
         )
+        retry_state = (
+            f"; rejected rounds: {state.rejected_rounds} of {REJECTION_RETRY_LIMIT}"
+            if state.kind == "SEARCH"
+            else ""
+        )
         return (
             f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
             f"turn limit: {state.turn_limit}; patience: {state.patience}; "
-            f"stale rounds: {state.stale_rounds}."
+            f"stale rounds: {state.stale_rounds}{retry_state}."
+            + (
+                search_retry_note(rejected_rounds=state.rejected_rounds)
+                if state.kind == "SEARCH"
+                else ""
+            )
             + (f"\n\n{plan_input.task_context}" if plan_input.task_context else "")
             + (
                 f"\n\nHuman guidance:\n{plan_input.human_context}"
@@ -300,7 +313,7 @@ class PlanRuntime:
             kind="SEARCH",
             context_ref=context_ref,
             turns_used=0,
-            turn_limit=hypothesis.turn_limit,
+            turn_limit=hypothesis.turn_limit or SEARCH_TURN_LIMIT,
             patience=hypothesis.patience,
         )
         self.save_state()

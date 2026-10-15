@@ -11,11 +11,14 @@ from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import decide_settlement
 from athena.research.supervisor.plan_runtime import CompletedPlanTurn
-from athena.research.supervisor.plans import PlanFailure
+from athena.research.supervisor.plans import REJECTION_RETRY_LIMIT, PlanFailure
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.scheduling import ScheduleKind
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_REJECTIONS = frozenset({"no_change", "diff_rejected"})
+"""Turn kinds that mean "no measurable experiment yet" rather than a result."""
 
 
 class PlanCallbacks(Protocol):
@@ -368,14 +371,31 @@ class SearchLoop:
         if completed.result is not None and completed.result.next_state is not None:
             state = completed.result.next_state
             self._state.plans[plan_id] = state
-        if completed.result is not None and completed.result.kind == "diff_rejected":
-            # A diff that does not implement the intervention is not a trusted
-            # experiment; do not settle it. Let the PlanAgent repair and retry.
-            await self._plans.persist_state()
+        if completed.result is not None and completed.result.kind in _RETRYABLE_REJECTIONS:
+            # The turn produced no measurable experiment: either nothing was
+            # changed, or the change never reaches the frozen command. Both are
+            # reasons to keep working, not results, so the Plan is not settled
+            # while its repair allowance lasts. The allowance is finite so a
+            # Plan that never implements anything still settles.
+            if state.rejected_rounds < REJECTION_RETRY_LIMIT:
+                self._state.plans[plan_id] = state.model_copy(
+                    update={"rejected_rounds": state.rejected_rounds + 1}
+                )
+                await self._plans.persist_state()
+                return
+            await self._plans.settle_plan(plan_id, state.best_ref, completed.result)
+            await self._plans.publish_state()
             return
         if completed.decision is None:
             if state.turn_limit is not None and state.turns_used >= state.turn_limit:
-                self._state.status = "WAITING"
+                if state.best_ref is not None:
+                    self._state.status = "WAITING"
+                    self._plans.save_state()
+                else:
+                    # 没有可信结果可结算：回合上限已到，释放槽位而不是把整轮运行停摆。
+                    await self._plans.settle_plan(plan_id, None, completed.result)
+                    await self._plans.publish_state()
+                return
             await self._plans.persist_state()
             return
         if completed.decision.decision == "abandon" and state.best_ref is None:

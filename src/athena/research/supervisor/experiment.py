@@ -219,6 +219,9 @@ async def apply_trusted_score(
 
     优于历史 best → 写新 PlanBest、best_ref 指向它、stale_rounds 归零；
     未显著改进 → stale_rounds 加一且保留历史 best。返回 ``state`` 的副本。
+
+    可信评分同时清空 rejected_rounds：守卫拒绝的额度只约束"还没测出东西"的
+    连续回合，任何一次真正的测量都不该被它计入。
     """
     current = await load_best(state.best_ref, store) if state.best_ref else None
     improved = current is None or (
@@ -228,8 +231,12 @@ async def apply_trusted_score(
     )
     if improved:
         best_ref = await store.put_text(best.model_dump_json())
-        return state.model_copy(update={"best_ref": best_ref, "stale_rounds": 0})
-    return state.model_copy(update={"stale_rounds": state.stale_rounds + 1})
+        return state.model_copy(
+            update={"best_ref": best_ref, "stale_rounds": 0, "rejected_rounds": 0}
+        )
+    return state.model_copy(
+        update={"stale_rounds": state.stale_rounds + 1, "rejected_rounds": 0}
+    )
 
 
 def decide_settlement(

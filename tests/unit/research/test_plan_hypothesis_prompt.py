@@ -182,10 +182,12 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
 def _plan_state(*, last_failure: str | None = None) -> SimpleNamespace:
     """A stand-in for ``PlanState`` that supports the one ``model_copy`` we use."""
     state = SimpleNamespace(
+        kind="SEARCH",
         turns_used=0,
         turn_limit=4,
         patience=2,
         stale_rounds=0,
+        rejected_rounds=0,
         context_ref="sha256:ctx",
         best_ref=None,
         last_failure=last_failure,

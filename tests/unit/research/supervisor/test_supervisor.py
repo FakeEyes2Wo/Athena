@@ -639,9 +639,10 @@ async def test_plan_turn_separates_confirmed_context_from_turn_header(
     await supervisor._plans.run_turn("hyp_failure")
 
     assert agents.task is not None
-    assert "stale rounds: 0.\n\n--- Confirmed task contract (authoritative) ---" in str(
-        agents.task["content"]
-    )
+    assert (
+        "stale rounds: 0; rejected rounds: 0 of 8."
+        "\n\n--- Confirmed task contract (authoritative) ---"
+    ) in str(agents.task["content"])
 
 
 @pytest.mark.asyncio
