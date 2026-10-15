@@ -64,6 +64,7 @@ class WebSocketTransport:
         send_lock = asyncio.Lock()
 
         async def send(message: str) -> None:
+            """Serialize this connection's responses and event writes."""
             async with send_lock:
                 await ws.send(message)
 
@@ -86,6 +87,7 @@ class WebSocketTransport:
             subscription["runtime"] = new_runtime
 
         async def serve_request(raw: str | bytes) -> None:
+            """Validate, dispatch, and answer one independent RPC request."""
             request_id = 0
             method = "?"
             try:

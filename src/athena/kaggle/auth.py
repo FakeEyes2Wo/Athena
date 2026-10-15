@@ -12,11 +12,14 @@ DEFAULT_CONFIG_PATH = Path("~/.kaggle/kaggle.json")
 
 @dataclass(frozen=True, slots=True)
 class KaggleCredentials:
+    """Resolved credentials; bearer tokens take precedence over legacy Basic auth."""
+
     bearer_token: str = ""
     username: str = ""
     key: str = ""
 
     def auth_header(self) -> str | None:
+        """Return one authorization header, or None when credentials are incomplete."""
         if self.bearer_token:
             return f"Bearer {self.bearer_token}"
         if self.username and self.key:
@@ -39,6 +42,7 @@ def _read_config_credentials(path: Path) -> tuple[str, str]:
     try:
         payload = json.loads(expanded.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        # Missing permissions or malformed legacy JSON leave file credentials absent.
         return "", ""
     if not isinstance(payload, dict):
         return "", ""

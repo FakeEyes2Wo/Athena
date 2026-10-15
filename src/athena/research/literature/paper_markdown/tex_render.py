@@ -173,6 +173,7 @@ def bibliography_to_markdown(
     current_nodes: list[LatexNode] = []
 
     def flush() -> None:
+        """Emit the accumulated bibliography entry and reset its buffer."""
         nonlocal current_key, current_nodes
         if current_key:
             text = re.sub(r"\s+", " ", renderer.nodes(current_nodes)).strip()

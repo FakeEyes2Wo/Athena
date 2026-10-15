@@ -46,6 +46,7 @@ def _file_config() -> dict:
         # utf-8-sig：容忍 Windows 编辑器偶尔写入的 BOM，否则 tomllib 直接报错。
         return tomllib.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # Missing/unreadable or malformed optional config falls back to built-in defaults.
         return {}
 
 
@@ -67,6 +68,7 @@ def _coerce(raw: object, default: T, cast: Callable[[object], T] | None) -> T:
     try:
         return cast(raw)
     except (TypeError, ValueError):
+        # Invalid configured value falls back to the caller's validated default.
         return default
 
 

@@ -154,6 +154,7 @@ class ResearchTree:
         try:
             return self._hypotheses[hypothesis_id]
         except KeyError as exc:
+            # Translate the dictionary miss into the tree's public identifier error.
             raise KeyError(f"unknown hypothesis id: {hypothesis_id}") from exc
 
     def hypotheses(self) -> list[Hypothesis]:
@@ -217,6 +218,7 @@ class ResearchTree:
         try:
             return self._experiments[experiment_id]
         except KeyError as exc:
+            # Translate the dictionary miss into the tree's public identifier error.
             raise KeyError(f"unknown experiment id: {experiment_id}") from exc
 
     def root_experiment_ids(self) -> list[str]:

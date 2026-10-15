@@ -68,6 +68,29 @@ function confirmStop(): boolean {
   }
 }
 
+/** Compare the rendered fields of two ordered backend request snapshots. */
+function sameHumanRequestList(left: HumanRequest[], right: HumanRequest[]): boolean {
+  return left.length === right.length && left.every((request, index) => {
+    const other = right[index];
+    const choices = request.choices ?? [];
+    const otherChoices = other.choices ?? [];
+    return request.request_id === other.request_id &&
+      request.session_id === other.session_id &&
+      request.scope_id === other.scope_id &&
+      request.scope_kind === other.scope_kind &&
+      request.prompt === other.prompt &&
+      choices.length === otherChoices.length &&
+      choices.every((choice, choiceIndex) =>
+        choice.label === otherChoices[choiceIndex].label &&
+        choice.value === otherChoices[choiceIndex].value
+      ) &&
+      request.allow_custom === other.allow_custom &&
+      request.allow_skip === other.allow_skip &&
+      request.created_at === other.created_at &&
+      request.expires_at === other.expires_at;
+  });
+}
+
 function loadTitles(key: string): Record<string, string> {
   try {
     return JSON.parse(localStorage.getItem(key) ?? "{}");
@@ -177,6 +200,43 @@ function replacePreview(
   };
 }
 
+function projectRestoredClarificationMessages(
+  messages: UIMessage[],
+  draft: ClarificationDraftDto,
+  draftId: string,
+): UIMessage[] {
+  const restoredMessages = [...messages];
+  if (!restoredMessages.some((message) =>
+    message.role === "user" && message.content.trim() === draft.original_task.trim()
+  )) {
+    restoredMessages.push({
+      id: `restored-task-${draftId}`,
+      role: "user",
+      kind: "text",
+      content: draft.original_task,
+    });
+  }
+  const previewIndex = findPreviewIndex(restoredMessages, draftId);
+  const restoredPreview: UIMessage = {
+    id: `restored-preview-${draftId}`,
+    role: "athena",
+    kind: "intent-preview",
+    content: "Restored task understanding",
+    preview: toClarificationPreview(draft),
+    task: draft.original_task,
+    started: draft.status === "CONFIRMED",
+  };
+  if (previewIndex >= 0) {
+    restoredMessages[previewIndex] = {
+      ...restoredMessages[previewIndex],
+      ...restoredPreview,
+    };
+  } else {
+    restoredMessages.push(restoredPreview);
+  }
+  return restoredMessages;
+}
+
 /** 从 task understanding（TaskUnderstanding）推导会话标题。 */
 function titleFromTask(preview: { title?: string; task_type?: string; primary_metric?: string | null }): string {
   if (preview.title?.trim()) return preview.title.trim();
@@ -216,6 +276,12 @@ interface SessionViewSnapshot {
   pendingOutputEvents: PendingOutputEvent[];
   messageCounter: number;
   logCounter: number;
+}
+
+interface HumanReplySettlement {
+  requestId: string;
+  sessionId: string;
+  epoch: number;
 }
 
 interface SessionTransition {
@@ -503,6 +569,16 @@ export function usePipeline(
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
+  const humanRequestRevisionRef = useRef(0);
+  const humanRequestsRef = useRef(humanRequests);
+  const updateHumanRequests = useCallback((requests: HumanRequest[]) => {
+    if (sameHumanRequestList(humanRequestsRef.current, requests)) return false;
+    humanRequestsRef.current = requests;
+    humanRequestRevisionRef.current += 1;
+    setHumanRequests(requests);
+    return true;
+  }, []);
+  const blockedContinueEpochRef = useRef<number | null>(null);
   const sessionTransitionRef = useRef<SessionTransition | null>(null);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
   const workspaceCacheRoot = workspaceRoot ?? "default";
@@ -525,7 +601,7 @@ export function usePipeline(
   const resumeGenerationRef = useRef(0);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
-  const settlingRequestRef = useRef<string | null>(null);
+  const settlingRequestRef = useRef<HumanReplySettlement | null>(null);
   const humanPollFailures = useRef(0);
   const humanPollInFlightRef = useRef<{ sessionId: string; epoch: number } | null>(null);
 
@@ -551,7 +627,8 @@ export function usePipeline(
           if (settled) return;
           settled = true;
           settle(succeeded);
-          if (succeeded && sessionTransitionRef.current?.promise === promise) {
+          if (!succeeded) blockedContinueEpochRef.current = epoch;
+          if (sessionTransitionRef.current?.promise === promise) {
             sessionTransitionRef.current = null;
           }
         },
@@ -699,15 +776,17 @@ export function usePipeline(
       setCurrentSessionId(snapshot.currentSessionId);
       setViewModel(snapshot.viewModel);
       setClarificationStatus(snapshot.clarificationStatus);
-      setHumanRequests(snapshot.humanRequests);
+      updateHumanRequests(snapshot.humanRequests);
       setHumanPendingError(snapshot.humanPendingError);
-      setSettlingRequestId(snapshot.settlingRequestId);
-      settlingRequestRef.current = snapshot.settlingRequestId;
+      // Session transitions invalidate in-flight reply ownership; restored views
+      // must not resurrect a lock whose async completion is fenced by the new epoch.
+      setSettlingRequestId(null);
+      settlingRequestRef.current = null;
       setLogs(snapshot.logs);
       pendingOutputEventsRef.current = [...snapshot.pendingOutputEvents];
       scheduleOutputDrain();
     },
-    [discardPendingOutput, scheduleOutputDrain, setClarificationIdentity],
+    [discardPendingOutput, scheduleOutputDrain, setClarificationIdentity, updateHumanRequests],
   );
 
   const captureSessionViewRef = useRef(captureSessionView);
@@ -872,6 +951,54 @@ export function usePipeline(
     });
   }, [setClarificationIdentity]);
 
+  const restoreClarificationDraft = useCallback((
+    draft: bridge.ClarificationDraftDto | null | undefined,
+    sessionId: string,
+    epoch: number,
+  ) => {
+    if (!draft || draft.session_id !== sessionId) {
+      setClarificationIdentity(null);
+      setClarificationStatus("IDLE");
+      return;
+    }
+
+    const draftId = draftIdOf(draft) ?? "";
+    const status = normalizeClarificationStatus(draft.status) ?? "CLARIFYING";
+    setClarificationIdentity(draftId, draft.revision);
+    setClarificationStatus(status);
+    setViewModel((prev) => ({
+      ...prev,
+      messages: projectRestoredClarificationMessages(prev.messages, draft, draftId),
+    }));
+
+    if (draft.status === "CONFIRMED") runStarted.current = true;
+    if (draft.status !== "CLARIFYING") return;
+
+    // Re-entering the controller settles any persisted in-flight human request
+    // as interrupted, then continues the same draft. It never confirms research.
+    void bridge.taskClarificationStart(draft.original_task)
+      .then((resumed) => {
+        if (
+          !mountedRef.current ||
+          epoch !== sessionRequestEpochRef.current ||
+          activeSessionIdRef.current !== sessionId
+        ) return;
+        applyDraftToPreview(resumed, draftIdOf(resumed) ?? draftId);
+        setClarificationStatus(
+          normalizeClarificationStatus(resumed.status) ?? "CLARIFYING",
+        );
+      })
+      .catch((error) => {
+        if (
+          !mountedRef.current ||
+          epoch !== sessionRequestEpochRef.current ||
+          activeSessionIdRef.current !== sessionId
+        ) return;
+        setClarificationStatus("FAILED");
+        appendError(errorMessage(error));
+      });
+  }, [appendError, applyDraftToPreview, setClarificationIdentity]);
+
   /** Show one clarification question in the chat as part of the task-understanding flow. */
   const appendClarificationQuestion = useCallback((request: HumanRequest) => {
     const requestId = request.request_id;
@@ -998,15 +1125,13 @@ export function usePipeline(
           return;
         }
         if (payload?.action === "created" && payload.request) {
-          setHumanRequests((prev) =>
-            prev.some((r) => r.request_id === payload.request?.request_id)
-              ? prev
-              : [...prev, payload.request as HumanRequest],
-          );
+          if (!humanRequestsRef.current.some((r) => r.request_id === payload.request?.request_id)) {
+            updateHumanRequests([...humanRequestsRef.current, payload.request]);
+          }
           appendClarificationQuestion(payload.request);
           setHumanPendingError(null);
         } else if (payload?.action === "settled" && payload.request_id) {
-          setHumanRequests((prev) => prev.filter((r) => r.request_id !== payload.request_id));
+          updateHumanRequests(humanRequestsRef.current.filter((r) => r.request_id !== payload.request_id));
           if (payload.outcome?.kind === "timeout" || payload.outcome?.kind === "cancelled") {
             appendClarificationOutcome(payload.request_id, payload.outcome);
           }
@@ -1052,6 +1177,10 @@ export function usePipeline(
           setCurrentSessionId(target);
           setLogs([]);
           restoreRecords(result.records, true, target);
+          restoreClarificationDraft(result.clarification, target, hydrationEpoch);
+          if (result.clarification_error) {
+            appendError(result.clarification_error.message);
+          }
         } catch {
           restoreSessionViewRef.current(previous);
           // The backend already switched, but local hydration failed. Keep the
@@ -1076,7 +1205,7 @@ export function usePipeline(
       transition.settle(false);
       unlisteners.forEach((fn) => fn());
     };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, beginSessionTransition, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendError, appendLog, applySessions, applyDraftToPreview, beginSessionTransition, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreClarificationDraft, restoreRecords, setClarificationIdentity, updateHumanRequests]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -1088,7 +1217,7 @@ export function usePipeline(
     const running = clarificationStatus === "RUNNING" || viewModel.status === "running";
 
     if (!preRun && !running) {
-      setHumanRequests([]);
+      updateHumanRequests([]);
       setHumanPendingError(null);
       humanPollFailures.current = 0;
       return;
@@ -1111,7 +1240,7 @@ export function usePipeline(
       try {
         const { requests } = await bridge.humanPending();
         if (isCurrentPoll()) {
-          setHumanRequests(requests);
+          updateHumanRequests(requests);
           requests.forEach((request) => appendClarificationQuestion(request));
           setHumanPendingError(null);
           humanPollFailures.current = 0;
@@ -1131,7 +1260,7 @@ export function usePipeline(
     void poll();
     const timer = setInterval(poll, interval);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [appendClarificationQuestion, clarificationStatus, currentSessionId, viewModel.status]);
+  }, [appendClarificationQuestion, clarificationStatus, currentSessionId, updateHumanRequests, viewModel.status]);
 
   // The backend is the only owner of task understanding. When its authoritative
   // state event fills the preview card, use that understanding to name the
@@ -1168,6 +1297,7 @@ export function usePipeline(
   // User actions.
 
   const continueCurrentRun = useCallback(async (): Promise<void> => {
+    if (blockedContinueEpochRef.current === sessionRequestEpochRef.current) return;
     const transition = sessionTransitionRef.current;
     if (transition?.epoch === sessionRequestEpochRef.current) {
       const switched = await transition.promise;
@@ -1221,6 +1351,20 @@ export function usePipeline(
   const startClarification = useCallback(async (task: string) => {
     const content = task.trim();
     if (!content) return;
+    // A new session is shown optimistically while the gateway rebuilds its
+    // runtime. Do not send the first task through the outgoing session runtime.
+    const transition = sessionTransitionRef.current;
+    if (transition?.epoch === sessionRequestEpochRef.current) {
+      const switched = await transition.promise;
+      if (
+        !switched ||
+        transition.epoch !== sessionRequestEpochRef.current ||
+        (transition.targetSessionId !== null &&
+          activeSessionIdRef.current !== transition.targetSessionId)
+      ) {
+        throw new Error("Could not open the selected session");
+      }
+    }
     // User input supersedes any mount-time transcript hydration still in flight.
     advanceSessionEpoch();
     setClarificationIdentity("", 0);
@@ -1402,7 +1546,7 @@ export function usePipeline(
       await bridge.taskClarificationCancel(preview.draftId, preview.revision);
       setClarificationIdentity(null);
       setClarificationStatus("IDLE");
-      setHumanRequests([]);
+      updateHumanRequests([]);
       setViewModel((prev) => ({
         ...prev,
         status: "idle",
@@ -1419,37 +1563,68 @@ export function usePipeline(
       appendError(errorMessage(err));
       throw err;
     }
-  }, [appendError, latestPreview, setClarificationIdentity]);
+  }, [appendError, latestPreview, setClarificationIdentity, updateHumanRequests]);
 
   /** Unified human reply dispatch with double-submit protection. */
   const replyToHumanRequest = useCallback(async (requestId: string, reply: HumanReply) => {
-    if (settlingRequestRef.current === requestId) return;
-    settlingRequestRef.current = requestId;
+    const sessionId = activeSessionIdRef.current;
+    const epoch = sessionRequestEpochRef.current;
+    const requestRevision = humanRequestRevisionRef.current;
+    const currentSettlement = settlingRequestRef.current;
+    if (
+      currentSettlement?.requestId === requestId &&
+      currentSettlement.sessionId === sessionId &&
+      currentSettlement.epoch === epoch
+    ) return;
+    const settlement: HumanReplySettlement = { requestId, sessionId, epoch };
+    settlingRequestRef.current = settlement;
     setSettlingRequestId(requestId);
+    const isCurrentReply = () =>
+      mountedRef.current &&
+      activeSessionIdRef.current === sessionId &&
+      sessionRequestEpochRef.current === epoch;
+    const ownsCurrentRequestState = () =>
+      isCurrentReply() &&
+      humanRequestRevisionRef.current === requestRevision &&
+      settlingRequestRef.current === settlement;
     try {
       await bridge.humanReply(requestId, reply);
-      appendClarificationReply(requestId, reply);
-      setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
-      setHumanPendingError(null);
+      if (isCurrentReply()) {
+        const mayClearCurrentError = ownsCurrentRequestState();
+        appendClarificationReply(requestId, reply);
+        updateHumanRequests(humanRequestsRef.current.filter((r) => r.request_id !== requestId));
+        if (mayClearCurrentError) setHumanPendingError(null);
+      }
     } catch (err) {
-      const code = errorCode(err);
-      if (code === "stale_request" || code === "expired_request" || code === "duplicate_reply") {
-        try {
-          const { requests } = await bridge.humanPending();
-          setHumanRequests(requests);
-        } catch {
-          // Keep the existing request list; the typed reason below is still visible.
+      if (ownsCurrentRequestState()) {
+        const code = errorCode(err);
+        if (code === "stale_request" || code === "expired_request" || code === "duplicate_reply") {
+          let mayPublishError = ownsCurrentRequestState();
+          try {
+            const { requests } = await bridge.humanPending();
+            mayPublishError = ownsCurrentRequestState();
+            if (mayPublishError) {
+              updateHumanRequests(requests);
+            }
+          } catch {
+            // Keep the existing request list; the typed reason below is still visible.
+            mayPublishError = ownsCurrentRequestState();
+          }
+          if (mayPublishError) {
+            setHumanPendingError(`该问题已失效（${code}）：${errorMessage(err)}`);
+          }
+        } else {
+          setHumanPendingError(errorMessage(err));
         }
-        setHumanPendingError(`该问题已失效（${code}）：${errorMessage(err)}`);
-      } else {
-        setHumanPendingError(errorMessage(err));
       }
       throw err;
     } finally {
-      settlingRequestRef.current = null;
-      setSettlingRequestId(null);
+      if (settlingRequestRef.current === settlement) {
+        settlingRequestRef.current = null;
+        if (isCurrentReply()) setSettlingRequestId(null);
+      }
     }
-  }, [appendClarificationReply]);
+  }, [appendClarificationReply, updateHumanRequests]);
 
   const answerHuman = useCallback((requestId: string, answer: string) => {
     const text = answer.trim();
@@ -1544,8 +1719,26 @@ export function usePipeline(
       return;
     }
 
+    // A restored ready draft is still the active task in this session. Treat
+    // ordinary input as an edit to its understanding; independent tasks belong
+    // in a new session so the canonical draft is not orphaned.
+    if (
+      clarificationStatus === "READY_FOR_CONFIRMATION" &&
+      latestPreview?.draftId
+    ) {
+      setViewModel((prev) => ({
+        ...prev,
+        messages: [
+          ...prev.messages,
+          { id: nextId("user"), role: "user", kind: "text", content },
+        ],
+      }));
+      await reviseDraft(content);
+      return;
+    }
+
     await startClarification(content);
-  }, [appendError, continueCurrentRun, nextId, startClarification, viewModel]);
+  }, [appendError, clarificationStatus, continueCurrentRun, latestPreview, nextId, reviseDraft, startClarification, viewModel]);
 
   const pauseRun = useCallback(async () => {
     await pauseSearch();
@@ -1583,12 +1776,13 @@ export function usePipeline(
     setClarificationIdentity(null);
     runStarted.current = false;
     setClarificationStatus("IDLE");
-    setHumanRequests([]);
+    updateHumanRequests([]);
     setHumanPendingError(null);
     setSettlingRequestId(null);
     settlingRequestRef.current = null;
     saveTitle(titlesKey, id, "新会话");
-    const requestEpoch = advanceSessionEpoch();
+    const transition = beginSessionTransition(id);
+    const requestEpoch = transition.epoch;
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
@@ -1606,6 +1800,7 @@ export function usePipeline(
         }
         if (mountedRef.current && requestEpoch === sessionRequestEpochRef.current) {
           applySessions(result.sessions);
+          transition.settle(true);
         }
       },
       (error) => {
@@ -1613,12 +1808,16 @@ export function usePipeline(
         if (pendingCreationsRef.current.get(id) === creation) {
           pendingCreationsRef.current.delete(id);
         }
-        if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
-        restoreSessionView(previous, { sessions: false });
-        appendError(errorMessage(error));
+        if (requestEpoch === sessionRequestEpochRef.current) {
+          if (mountedRef.current) {
+            restoreSessionView(previous, { sessions: false });
+            appendError(errorMessage(error));
+          }
+          transition.settle(false);
+        }
       },
     );
-  }, [advanceSessionEpoch, appendError, applySessions, captureSessionView, discardPendingOutput, restoreSessionView, setClarificationIdentity, titlesKey]);
+  }, [advanceSessionEpoch, appendError, applySessions, beginSessionTransition, captureSessionView, discardPendingOutput, restoreSessionView, setClarificationIdentity, titlesKey, updateHumanRequests]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
@@ -1628,7 +1827,7 @@ export function usePipeline(
     let switchStarted = false;
     let switchSucceeded = false;
     try {
-      const { records, sessions: list } = await sessionSwitch(id);
+      const { records, sessions: list, clarification, clarification_error } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
       switchStarted = true;
@@ -1641,9 +1840,14 @@ export function usePipeline(
       // neutral until that session's authoritative state has been fetched.
       setViewModel(createEmptyPipelineViewModel());
       restoreRecords(records, true, id);
-      applySessions(list);
       setClarificationStatus("IDLE");
-      setHumanRequests([]);
+      restoreClarificationDraft(clarification, id, requestEpoch);
+      if (clarification_error) appendError(clarification_error.message);
+      applySessions(list);
+      updateHumanRequests([]);
+      setHumanPendingError(null);
+      setSettlingRequestId(null);
+      settlingRequestRef.current = null;
       const resumeGeneration = resumeGenerationRef.current;
       void stateGet()
         .then((snapshot) => {
@@ -1668,7 +1872,7 @@ export function usePipeline(
     } finally {
       transition.settle(switchSucceeded);
     }
-  }, [appendError, applySessions, beginSessionTransition, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
+  }, [appendError, applySessions, beginSessionTransition, captureSessionView, discardPendingOutput, restoreClarificationDraft, restoreRecords, restoreSessionView, setClarificationIdentity, updateHumanRequests]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。

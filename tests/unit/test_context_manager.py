@@ -1,5 +1,10 @@
 ﻿"""``athena.memory.context_manager.ContextManager`` 的单元测试。"""
 
+import subprocess
+import sys
+
+import pytest
+
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -7,6 +12,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
     TextPart,
     ToolCallPart,
+    ToolReturnContent,
     ToolReturnPart,
 )
 
@@ -23,7 +29,9 @@ def _tool_call(name: str, args: dict) -> ModelResponse:
     return ModelResponse(parts=[ToolCallPart(tool_name=name, args=args)])
 
 
-def _tool_result(name: str, content: str, call_id: str = "c1") -> ModelRequest:
+def _tool_result(
+    name: str, content: ToolReturnContent, call_id: str = "c1"
+) -> ModelRequest:
     return ModelRequest(
         parts=[
             ToolReturnPart(
@@ -35,7 +43,72 @@ def _tool_result(name: str, content: str, call_id: str = "c1") -> ModelRequest:
     )
 
 
+def test_memory_can_be_imported_before_the_core_facade():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from athena.memory import ContextManager; from athena.core import Agent",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 class TestContextManager:
+
+    @pytest.mark.parametrize("write", ["append", "replace_range"])
+    def test_nested_tool_result_input_cannot_change_owned_history(self, write):
+        from athena.memory.context_manager import ContextManager
+
+        content = {"rows": [[1, 2]]}
+        message = _tool_result("bash", content)
+        ctx = ContextManager()
+        if write == "append":
+            ctx.append(message)
+        else:
+            ctx.replace_range(0, 0, [message])
+        snapshot, tokens = ctx.snapshot(), ctx.tokens
+        content["rows"][0][0] = 99
+        message.parts[0].tool_name = "changed"
+        assert ctx.items[0].parts[0].content == {"rows": [[1, 2]]}
+        assert ctx.items[0].parts[0].tool_name == "bash"
+        assert ctx.snapshot() == snapshot
+        assert ctx.tokens == tokens
+
+    @pytest.mark.parametrize("write", ["append", "replace_range"])
+    def test_nested_input_mutation_cannot_change_owned_history(self, write):
+        from athena.memory.context_manager import ContextManager
+
+        args = {"commands": ["read"]}
+        message = _tool_call("bash", args)
+        ctx = ContextManager()
+        if write == "append":
+            ctx.append(message)
+        else:
+            ctx.replace_range(0, 0, [message])
+        snapshot, tokens = ctx.snapshot(), ctx.tokens
+        args["commands"].append("injected" * 100)
+        message.parts[0].tool_name = "changed"
+        assert ctx.items[0].parts[0].args == {"commands": ["read"]}
+        assert ctx.items[0].parts[0].tool_name == "bash"
+        assert ctx.snapshot() == snapshot
+        assert ctx.tokens == tokens
+
+    @pytest.mark.parametrize("view", ["items", "items_since"])
+    def test_nested_view_mutation_cannot_rewrite_history(self, view):
+        from athena.memory.context_manager import ContextManager
+
+        ctx = ContextManager()
+        ctx.append(_tool_call("bash", {"commands": ["read"]}))
+        ctx.append(_tool_result("bash", {"rows": [[1, 2]]}))
+        messages = ctx.items if view == "items" else ctx.items_since(0)
+        messages[0].parts[0].args["commands"].append("injected")
+        messages[1].parts[0].content["rows"][0][0] = 99
+        assert ctx.items[0].parts[0].args == {"commands": ["read"]}
+        assert ctx.items[1].parts[0].content == {"rows": [[1, 2]]}
 
     def test_empty_context_has_zero_tokens(self):
         from athena.memory.context_manager import ContextManager
@@ -71,7 +144,7 @@ class TestContextManager:
         ctx.append(_user("x"))
         assert ctx.tokens > 0
 
-    def test_items_returns_shallow_copy(self):
+    def test_items_container_is_independent(self):
         from athena.memory.context_manager import ContextManager
 
         ctx = ContextManager()

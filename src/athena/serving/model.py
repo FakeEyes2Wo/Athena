@@ -1,19 +1,23 @@
 """Frozen model + preprocessing constants for the serving prediction API.
 
 Kept free of HTTP concerns so it can be tested and reused without starting a
-server. ``lightgbm`` is imported lazily: the framework does not depend on it,
-and this module must import and test without it.
+server. ``lightgbm`` is optional: the framework and injected test boosters can
+use this module without it; loading serialized LightGBM weights requires it.
 """
 
-from __future__ import annotations
-
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
+
+try:
+    import lightgbm as lgb
+except ImportError:
+    # LightGBM is an optional serving dependency, not a framework requirement.
+    lgb = None
 
 ID_COL = "image_filename"
 MAX_RECORDS = 10_000
@@ -37,7 +41,9 @@ DEFAULT_NULLABLE_FIELDS = ("Teff", "Rad")
 class Booster(Protocol):
     """Anything with ``predict(ndarray) -> ndarray`` can be served."""
 
-    def predict(self, data: Any) -> Any: ...
+    def predict(self, data: Any) -> Any:
+        """Produce model probabilities for the already-preprocessed feature rows."""
+        ...
 
 
 class ValidationError(ValueError):
@@ -69,40 +75,45 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
 class ModelBundle:
     """A booster plus the preprocessing constants it was trained with."""
 
-    def __init__(self, booster: Booster, preproc: dict, source: str = "<memory>") -> None:
+    def __init__(
+        self, booster: Booster, preproc: dict, source: str = "<memory>"
+    ) -> None:
         self.booster = booster
         self.preproc = preproc
         self.source = source
 
     @property
     def default_threshold(self) -> float:
+        """Use the decision threshold stored with the frozen preprocessing data."""
         return float(self.preproc["threshold"])
 
     @property
     def required_fields(self) -> tuple[str, ...]:
+        """Return the non-null input columns required by this model bundle."""
         return tuple(self.preproc.get("required_fields") or DEFAULT_REQUIRED_FIELDS)
 
     @property
     def nullable_fields(self) -> tuple[str, ...]:
+        """Return columns whose missing values are handled by preprocessing."""
         return tuple(self.preproc.get("nullable_fields") or DEFAULT_NULLABLE_FIELDS)
 
     @classmethod
     def load(cls, weights_dir: Path) -> "ModelBundle":
+        """Load frozen weights and preprocessing, or explain a missing prerequisite."""
         preproc_path = weights_dir / "preproc.json"
         model_path = weights_dir / "model.txt"
         for path in (preproc_path, model_path):
             if not path.is_file():
                 raise SystemExit(f"{path}: 不存在；用 --weights <dir> 指向权重目录")
-        try:
-            import lightgbm as lgb
-        except ImportError as exc:
+        if lgb is None:
             raise SystemExit(
-                "需要 lightgbm 才能装载模型：pip install lightgbm （或 uv sync --extra serve）"
-            ) from exc
+                "需要 lightgbm 才能装载模型：在运行服务的环境中安装 lightgbm。"
+            )
         preproc = json.loads(preproc_path.read_text(encoding="utf-8"))
         return cls(lgb.Booster(model_file=str(model_path)), preproc, str(weights_dir))
 
     def validate(self, payload: object) -> PredictionRequest:
+        """Validate supported request shapes before any model execution."""
         threshold: float | None = None
         if isinstance(payload, dict) and "records" in payload:
             records = payload["records"]
@@ -111,6 +122,7 @@ class ModelBundle:
                 try:
                     threshold = float(raw)
                 except (TypeError, ValueError):
+                    # A supplied threshold must be representable as a number.
                     raise ValidationError("threshold 必须是 0 到 1 之间的数")
                 if not 0.0 <= threshold <= 1.0:
                     raise ValidationError("threshold 必须在 0 到 1 之间")
@@ -152,6 +164,7 @@ class ModelBundle:
         )
 
     def predict(self, request: PredictionRequest) -> list[dict]:
+        """Apply frozen preprocessing and return probabilities with caller IDs."""
         frame = pd.DataFrame(request.records)
         for field in (*self.nullable_fields, *self.required_fields):
             if field not in frame.columns:
@@ -179,6 +192,7 @@ class ModelBundle:
         ]
 
     def describe(self, host: str) -> dict:
+        """Describe this model's task and the HTTP routes exposed by its adapter."""
         return {
             "name": "TESS 恒星耀发检测 · 可调用测试 API",
             "task_id": "TESS_flare_win120min",
@@ -203,6 +217,7 @@ class ModelBundle:
         }
 
     def schema(self) -> dict:
+        """Expose accepted fields, null handling, and frozen threshold metadata."""
         thresholds = self.preproc.get("thresholds", {})
         return {
             "request": {
@@ -238,6 +253,7 @@ class ModelBundle:
         }
 
     def example(self) -> dict:
+        """Provide a request body and known labels for checking the prediction API."""
         records = self.preproc.get("example_records") or EXAMPLE_RECORDS
         truth = self.preproc.get("example_truth") or EXAMPLE_TRUTH
         return {

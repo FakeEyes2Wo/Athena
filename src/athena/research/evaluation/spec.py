@@ -38,6 +38,7 @@ class EvaluatorSpec(BaseModel):
     prediction_file: str = Field(min_length=1)
     prediction_id_column: str = Field(min_length=1)
     prediction_column: str = Field(min_length=1)
+    label_column: str | None = None
     probability_columns: list[str] = Field(default_factory=list)
     metrics_file: str = Field(default="metrics_public_test.csv", min_length=1)
     eval_script: str = Field(default="eval_metrics.py", min_length=1)
@@ -58,6 +59,16 @@ class EvaluatorSpec(BaseModel):
         """Require non-empty CSV field names without imposing a dataset schema."""
         if not value.strip() or "," in value or "\n" in value:
             raise ValueError("prediction column names must be simple CSV fields")
+        return value.strip()
+
+    @field_validator("label_column")
+    @classmethod
+    def _label_column_name(cls, value: str | None) -> str | None:
+        """Validate an optional explicit target field in labels.csv."""
+        if value is None:
+            return None
+        if not value.strip() or "," in value or "\n" in value:
+            raise ValueError("label_column must be a simple CSV field")
         return value.strip()
 
     @field_validator("probability_columns", mode="before")
@@ -124,6 +135,7 @@ def load_metric_json(root: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
+        # Trigger: metric.json is absent, unreadable, or not valid JSON.
         raise ValueError(f"cannot read evaluator metric.json: {path}") from exc
     if not isinstance(payload, dict):
         raise TypeError("metric.json must contain a JSON object")
@@ -137,15 +149,47 @@ def load_evaluator_spec(root: Path, *, legacy_ok: bool = True) -> EvaluatorSpec 
     by the absence of ``task_id`` and retain the old ``eval_script`` behavior.
     A partially specified new contract is rejected instead of silently filling
     in dataset-specific values.
+
+    Example: ``load_evaluator_spec(root)`` returns ``None`` for an old metric
+    that declares only ``eval_script``.
     """
-    payload = load_metric_json(root)
+    return parse_evaluator_spec(load_metric_json(root), legacy_ok=legacy_ok)
+
+
+def parse_evaluator_spec(
+    payload: dict[str, Any], *, legacy_ok: bool = True
+) -> EvaluatorSpec | None:
+    """Validate an already-read metric payload with the same legacy rules.
+
+    Example: ``parse_evaluator_spec({"eval_script": "evaluate.py"})`` returns
+    ``None`` for a legacy evaluator. Callers that already loaded ``metric.json``
+    can use this function to avoid reading the frozen contract a second time.
+    """
     if "task_id" not in payload:
+        v2_markers = {
+            "contract_version",
+            "task_type",
+            "class_labels",
+            "prediction_file",
+            "prediction_id_column",
+            "prediction_column",
+            "label_column",
+            "probability_columns",
+            "metrics_file",
+        }
+        partial_fields = sorted(v2_markers.intersection(payload))
+        if partial_fields:
+            raise ValueError(
+                "partially specified evaluator contract is missing task_id "
+                f"(found {', '.join(partial_fields)})"
+            )
         if legacy_ok:
             return None
         raise ValueError("metric.json must declare task_id")
     try:
         return EvaluatorSpec.model_validate(payload)
     except (TypeError, ValueError) as exc:
+        # Trigger: metric.json fields do not satisfy the EvaluatorSpec schema.
         raise ValueError(f"invalid evaluator metric.json: {exc}") from exc
 
 
@@ -161,4 +205,5 @@ async def read_eval_handoff(
         )
         return (Path(descriptor.dir_path) / "HANDOFF.md").read_text(encoding="utf-8")
     except (OSError, ValueError):
+        # Trigger: the optional evaluator handoff artifact is unavailable or malformed.
         return ""

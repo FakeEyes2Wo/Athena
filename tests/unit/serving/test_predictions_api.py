@@ -1,17 +1,20 @@
 ﻿"""``predictions_api`` 单元测试：校验、路由、阈值、缺失值。
 
-用桩 booster，所以**不需要装 lightgbm**——这正是模块把 lightgbm 做成惰性导入
-的意义：框架不依赖实验侧的包，测试也就不该依赖。
+用桩 booster，所以**不需要装 lightgbm**。框架不依赖实验侧的包，
+只有从权重加载实际模型时才要求可选依赖可用。
 """
 
+import http.client
 import json
 import threading
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from athena.serving import model
 from athena.serving.model import (
     PredictionRequest,
     ID_COL,
@@ -93,6 +96,35 @@ def _record(**overrides) -> dict:
     }
     rec.update(overrides)
     return rec
+
+
+def test_load_reports_missing_optional_dependency_without_breaking_injected_models(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / "preproc.json").write_text(json.dumps(PREPROC), encoding="utf-8")
+    (tmp_path / "model.txt").write_text("model", encoding="utf-8")
+    monkeypatch.setattr(model, "lgb", None)
+    assert _bundle().predict(_bundle().validate(_record()))
+    with pytest.raises(SystemExit, match="lightgbm"):
+        ModelBundle.load(tmp_path)
+
+
+def test_load_uses_frozen_weights_and_preprocessing(tmp_path, monkeypatch) -> None:
+    (tmp_path / "preproc.json").write_text(json.dumps(PREPROC), encoding="utf-8")
+    weights = tmp_path / "model.txt"
+    weights.write_text("model", encoding="utf-8")
+    booster = _SnrBooster()
+    seen = []
+
+    def load_booster(*, model_file):
+        seen.append(model_file)
+        return booster
+
+    monkeypatch.setattr(model, "lgb", SimpleNamespace(Booster=load_booster))
+    bundle = ModelBundle.load(tmp_path)
+    assert seen == [str(weights)]
+    assert bundle.booster is booster
+    assert bundle.preproc == PREPROC
 
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +340,19 @@ def test_bad_json_and_empty_body_are_400_not_500(server) -> None:
     assert status == 400 and "JSON" in body["error"]
     status, body = _post(server, "/predict", b"")
     assert status == 400 and "/example" in body["error"]
+
+
+def test_malformed_content_length_is_a_client_error(server) -> None:
+    connection = http.client.HTTPConnection(server.removeprefix("http://"), timeout=5)
+    try:
+        connection.request(
+            "POST", "/predict", body="{}", headers={"Content-Length": "oops"}
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert "Content-Length" in json.loads(response.read())["error"]
+    finally:
+        connection.close()
 
 
 def test_validation_failure_is_400_with_the_field_name(server) -> None:

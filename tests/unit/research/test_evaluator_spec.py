@@ -8,6 +8,7 @@ import pytest
 from athena.research.evaluation.spec import (
     EvaluatorSpec,
     load_evaluator_spec,
+    parse_evaluator_spec,
 )
 
 
@@ -50,6 +51,48 @@ def test_load_evaluator_spec_preserves_legacy_metric_json(tmp_path: Path) -> Non
     )
 
     assert load_evaluator_spec(tmp_path) is None
+
+
+def test_load_evaluator_spec_rejects_partial_v2_instead_of_legacy_fallback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "metric.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 2,
+                "task_type": "classification",
+                "prediction_id_column": "sample_key",
+                "eval_script": "evaluate.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="partially specified.*task_id"):
+        load_evaluator_spec(tmp_path)
+
+
+def test_legacy_prediction_format_does_not_count_as_partial_v2(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
+        encoding="utf-8",
+    )
+    assert load_evaluator_spec(tmp_path) is None
+
+
+def test_parse_evaluator_spec_preserves_legacy_and_partial_v2_rules() -> None:
+    """The in-memory parser keeps the loader's migration behavior."""
+    assert (
+        parse_evaluator_spec(
+            {"eval_script": "evaluate.py", "prediction_format": "custom"}
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="partially specified.*task_id"):
+        parse_evaluator_spec(
+            {"contract_version": 2, "prediction_id_column": "sample_key"}
+        )
 
 
 def test_classification_contract_requires_the_complete_label_universe() -> None:

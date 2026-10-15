@@ -5,13 +5,41 @@ from pathlib import Path
 
 import pytest
 
-from athena.agents.prepare_agent import register_prepare_agent
+from athena.agents import prepare_agent
+from athena.agents.prepare_agent import (
+    register_prepare_agent,
+    register_prepare_eda_agent,
+)
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import RunStatus
 from athena.core.artifact_store import LocalArtifactStore
 from athena.execution.runtime import ExecutionRuntime
+
+
+def test_prepare_eda_coordinator_shell_is_confined_to_its_workspace(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+
+    def capture_registration(_registry, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(prepare_agent, "register_prompt_agent", capture_registration)
+    register_prepare_eda_agent(
+        AgentTypeRegistry(),
+        provider=object(),
+        artifacts=object(),
+        workspace=Path("session-eda"),
+        runtime=object(),
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["agent_type"] == "prepare_eda"
+    assert calls[0]["restrict_shell_workdir"] is True
+    assert calls[1]["agent_type"] == "eda_worker"
+    assert "restrict_shell_workdir" not in calls[1]
 
 
 class _WriteManifestProvider:

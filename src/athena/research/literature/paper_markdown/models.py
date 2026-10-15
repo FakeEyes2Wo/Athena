@@ -173,6 +173,7 @@ class VisualInterpretationRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_evidence(self) -> "VisualInterpretationRequest":
+        """Require an image asset or extracted text as interpretation evidence."""
         if self.asset_ref is None and self.structured_text_ref is None:
             raise ValueError(
                 "Visual interpretation requires an asset or structured text."
@@ -191,9 +192,13 @@ class VisualInterpretation(BaseModel):
 
 
 class VisualInterpreter(Protocol):
+    """Interpret a cited visual using supplied source-backed evidence."""
+
     async def interpret(
         self, request: VisualInterpretationRequest
-    ) -> VisualInterpretation: ...
+    ) -> VisualInterpretation:
+        """Return a structured and confidence-bounded visual interpretation."""
+        ...
 
 
 class StructureRepairRequest(BaseModel):
@@ -214,9 +219,11 @@ class StructureRepairResult(BaseModel):
 
 
 class StructureRefiner(Protocol):
-    async def repair(
-        self, request: StructureRepairRequest
-    ) -> StructureRepairResult: ...
+    """Repair Markdown structure while preserving scientific content."""
+
+    async def repair(self, request: StructureRepairRequest) -> StructureRepairResult:
+        """Return repaired Markdown and an auditable summary of changes."""
+        ...
 
 
 class PaperProvenance(BaseModel):

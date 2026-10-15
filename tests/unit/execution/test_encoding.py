@@ -1,9 +1,11 @@
 ﻿"""``_StreamDecoder`` 单元测试：UTF-8 优先、GBK/系统代码页回退、chunk 边界。"""
 
 import os
+from pathlib import Path
 
 import pytest
 
+import athena.execution.runtime as execution_runtime
 from athena.execution.runtime import (
     CommandRequest,
     EnvironmentManager,
@@ -71,18 +73,52 @@ def test_invalid_byte_degrades_to_replacement() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows shell 探测")
-def test_windows_shell_detection_finds_pwsh_on_path(tmp_path) -> None:
-    """探测到的必须是 PowerShell 7，哪怕它不在 Program Files 下。
+def test_windows_shell_detection_finds_pwsh_on_path(tmp_path, monkeypatch) -> None:
+    """PATH 里的 pwsh 7 可用时，即使固定安装路径不存在也会选中它。"""
+    candidates = (
+        (r"C:\Program Files\PowerShell\7\pwsh.exe", ["-NoProfile"]),
+        ("pwsh", ["-NoProfile"]),
+        (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", ["/c"]),
+    )
+    monkeypatch.setattr(execution_runtime, "_WIN_SHELLS", candidates)
+    monkeypatch.setattr(Path, "is_file", lambda _path: False)
+    monkeypatch.setattr(
+        execution_runtime.shutil,
+        "which",
+        lambda name, **_kwargs: r"D:\PowerShell\pwsh.exe" if name == "pwsh" else None,
+    )
 
-    回归自 2026-08-30：``_WIN_SHELLS`` 只列了两个写死的 ``Program Files`` 路径，
-    Windows 分支又只判断 ``Path(shell).is_file()``、从不查 PATH。本机的 pwsh 7 是
-    Microsoft Store 装的（``…\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe``），
-    于是探测直接掉到 Windows PowerShell 5.1 —— 而 5.1 的 ``Get-Content`` 按系统
-    ANSI 代码页读文件，中文 Windows 上把 UTF-8 文本读成乱码喂给 agent。
-    """
-    manager = EnvironmentManager(environment_root=tmp_path)
-    shell, _args = manager.shell_parts()
-    assert "pwsh" in shell.lower(), f"应选 PowerShell 7，实际是 {shell}"
+    shell, args = EnvironmentManager(environment_root=tmp_path).shell_parts()
+
+    assert shell == r"D:\PowerShell\pwsh.exe"
+    assert args == ["-NoProfile"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows shell 探测")
+def test_windows_shell_detection_falls_back_to_powershell_51(
+    tmp_path, monkeypatch
+) -> None:
+    """PowerShell 5.1 remains the supported fallback when pwsh is unavailable."""
+    fallback = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    candidates = (
+        (r"C:\Program Files\PowerShell\7\pwsh.exe", ["-NoProfile"]),
+        ("pwsh", ["-NoProfile"]),
+        (fallback, ["/d", "/s", "/c"]),
+    )
+    monkeypatch.setattr(execution_runtime, "_WIN_SHELLS", candidates)
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: str(path).casefold() == fallback.casefold(),
+    )
+    monkeypatch.setattr(
+        execution_runtime.shutil, "which", lambda *_args, **_kwargs: None
+    )
+
+    shell, args = EnvironmentManager(environment_root=tmp_path).shell_parts()
+
+    assert shell == fallback
+    assert args == ["/d", "/s", "/c"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="依赖 Windows shell")
@@ -107,6 +143,234 @@ async def test_runtime_reads_utf8_cjk_file_without_mojibake(tmp_path) -> None:
     assert "�" not in result.stdout
 
 
+@pytest.mark.skipif(os.name != "nt", reason="依赖 Windows PowerShell")
+@pytest.mark.asyncio
+async def test_powershell_formats_object_output_before_process_exit(tmp_path) -> None:
+    """PowerShell object output is rendered before the runtime exits the shell."""
+    workspace = tmp_path / "挑战杯工作区"
+    workspace.mkdir()
+    (workspace / "visible-dataset.csv").write_text("feature,target\n1,0\n")
+    runtime = ExecutionRuntime(project_root=workspace, environment_root=tmp_path)
+    context = ExecutionContext(
+        project_root=workspace,
+        workspace_root=workspace,
+        environment_root=tmp_path,
+    )
+
+    for command in ("pwd", "Get-Location"):
+        result = await runtime.run(
+            context, CommandRequest(command=command, workdir=workspace)
+        )
+        assert result.ok, result.stderr
+        assert str(workspace) in result.stdout
+
+    listing = await runtime.run(
+        context, CommandRequest(command="Get-ChildItem", workdir=workspace)
+    )
+    assert listing.ok, listing.stderr
+    assert "visible-dataset.csv" in listing.stdout
+
+    combined = await runtime.run(
+        context,
+        CommandRequest(command="pwd; ls -la", workdir=workspace),
+    )
+    assert str(workspace) in combined.stdout
+    assert "parameter name 'la'" in combined.stderr
+    assert combined.exit_code != 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="依赖 Windows PowerShell")
+@pytest.mark.asyncio
+async def test_powershell_wrapper_preserves_errors_exit_codes_and_unicode(
+    tmp_path,
+) -> None:
+    runtime = ExecutionRuntime(project_root=tmp_path, environment_root=tmp_path)
+    context = ExecutionContext(
+        project_root=tmp_path,
+        workspace_root=tmp_path,
+        environment_root=tmp_path,
+    )
+
+    cmdlet_error = await runtime.run(
+        context,
+        CommandRequest(command="Get-ChildItem -ATHENA_INVALID_PARAMETER"),
+    )
+    assert not cmdlet_error.ok
+    assert cmdlet_error.exit_code != 0
+    assert "ATHENA_INVALID_PARAMETER" in cmdlet_error.stderr
+
+    native_error = await runtime.run(
+        context,
+        CommandRequest(
+            command=("python -c \"import sys; print('native-marker'); sys.exit(17)\"")
+        ),
+    )
+    assert "native-marker" in native_error.stdout
+    assert native_error.exit_code == 17
+
+    script_exit = await runtime.run(
+        context,
+        CommandRequest(command="Write-Output 'before-挑战杯'; exit 23"),
+    )
+    assert "before-挑战杯" in script_exit.stdout
+    assert script_exit.exit_code == 23
+
+    cmdlet_failure = await runtime.run(
+        context, CommandRequest(command="Write-Error 'last-command-error'")
+    )
+    assert not cmdlet_failure.ok
+    assert cmdlet_failure.exit_code != 0
+    assert "last-command-error" in cmdlet_failure.stderr
+
+    terminating_failure = await runtime.run(
+        context, CommandRequest(command="throw 'terminating-marker'")
+    )
+    assert not terminating_failure.ok
+    assert terminating_failure.exit_code != 0
+    assert "terminating-marker" in terminating_failure.stderr
+
+    handled_exception = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                "try { throw 'expected-caught'; } "
+                "catch { Write-Output 'caught-marker' }"
+            )
+        ),
+    )
+    assert handled_exception.ok
+    assert handled_exception.exit_code == 0
+    assert "caught-marker" in handled_exception.stdout
+
+    native_then_missing_item = await runtime.run(
+        context,
+        CommandRequest(
+            command=('python -c "pass"; ' "Get-Item 'ATHENA_DEFINITELY_MISSING_PATH'")
+        ),
+    )
+    assert not native_then_missing_item.ok
+    assert native_then_missing_item.exit_code != 0
+    assert "ATHENA_DEFINITELY_MISSING_PATH" in native_then_missing_item.stderr
+
+    cmdlet_error_then_success = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                "Get-Item 'ATHENA_DEFINITELY_MISSING_PATH'; "
+                "Write-Output 'after-cmdlet-error'"
+            )
+        ),
+    )
+    assert not cmdlet_error_then_success.ok
+    assert cmdlet_error_then_success.exit_code != 0
+    assert "ATHENA_DEFINITELY_MISSING_PATH" in cmdlet_error_then_success.stderr
+    assert "after-cmdlet-error" in cmdlet_error_then_success.stdout
+
+    native_then_invalid_parameter = await runtime.run(
+        context,
+        CommandRequest(
+            command=('python -c "pass"; ' "Get-ChildItem -ATHENA_INVALID_PARAMETER")
+        ),
+    )
+    assert not native_then_invalid_parameter.ok
+    assert native_then_invalid_parameter.exit_code != 0
+    assert "ATHENA_INVALID_PARAMETER" in native_then_invalid_parameter.stderr
+
+    native_warning = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                "python -c \"import sys; sys.stderr.write('native-warning'); "
+                'sys.exit(0)" 2>&1 | Select-Object -Last 40'
+            )
+        ),
+    )
+    assert native_warning.ok, native_warning.stderr
+    assert native_warning.exit_code == 0
+    assert "native-warning" in native_warning.stdout + native_warning.stderr
+
+    native_warning_nonzero = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                "python -c \"import sys; sys.stderr.write('native-warning'); "
+                'sys.exit(17)" 2>&1 | Select-Object -Last 40'
+            )
+        ),
+    )
+    assert not native_warning_nonzero.ok
+    assert native_warning_nonzero.exit_code == 17
+    assert "native-warning" in (
+        native_warning_nonzero.stdout + native_warning_nonzero.stderr
+    )
+
+    delayed_native_warning = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                'python -c "import sys,time; '
+                "sys.stderr.write('warning-line1\\nline2\\n'); sys.stderr.flush(); "
+                "time.sleep(0.2); print('completion-marker'); sys.exit(0)"
+                '" 2>&1 | Select-Object -Last 40'
+            )
+        ),
+    )
+    assert delayed_native_warning.ok, delayed_native_warning.stderr
+    assert delayed_native_warning.exit_code == 0
+    assert "warning-line1" in (
+        delayed_native_warning.stdout + delayed_native_warning.stderr
+    )
+    assert "line2" in delayed_native_warning.stdout + delayed_native_warning.stderr
+    assert "completion-marker" in (
+        delayed_native_warning.stdout + delayed_native_warning.stderr
+    )
+
+    delayed_native_warning_nonzero = await runtime.run(
+        context,
+        CommandRequest(
+            command=(
+                'python -c "import sys,time; '
+                "sys.stderr.write('warning-line1\\nline2\\n'); sys.stderr.flush(); "
+                "time.sleep(0.2); print('completion-marker'); sys.exit(17)"
+                '" 2>&1 | Select-Object -Last 40'
+            )
+        ),
+    )
+    assert not delayed_native_warning_nonzero.ok
+    assert delayed_native_warning_nonzero.exit_code == 17
+    assert "warning-line1" in (
+        delayed_native_warning_nonzero.stdout + delayed_native_warning_nonzero.stderr
+    )
+    assert "line2" in (
+        delayed_native_warning_nonzero.stdout + delayed_native_warning_nonzero.stderr
+    )
+    assert "completion-marker" in (
+        delayed_native_warning_nonzero.stdout + delayed_native_warning_nonzero.stderr
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="依赖 Windows PowerShell")
+@pytest.mark.asyncio
+async def test_powershell_success_output_streams_before_timeout(tmp_path) -> None:
+    runtime = ExecutionRuntime(project_root=tmp_path, environment_root=tmp_path)
+    context = ExecutionContext(
+        project_root=tmp_path,
+        workspace_root=tmp_path,
+        environment_root=tmp_path,
+    )
+
+    result = await runtime.run(
+        context,
+        CommandRequest(
+            command="Write-Output 'before-timeout-marker'; Start-Sleep -Seconds 10",
+            timeout_s=1,
+        ),
+    )
+
+    assert result.error == "timeout"
+    assert "before-timeout-marker" in result.stdout
+
+
 @pytest.mark.skipif(os.name != "nt", reason="依赖 Windows shell")
 @pytest.mark.asyncio
 async def test_chain_operator_works_under_powershell7(tmp_path) -> None:
@@ -116,6 +380,9 @@ async def test_chain_operator_works_under_powershell7(tmp_path) -> None:
     ——2026-08-30 的运行日志里每个 EDA worker 都撞了一次。7 原生支持。
     """
     runtime = ExecutionRuntime(project_root=tmp_path, environment_root=tmp_path)
+    shell, _args = EnvironmentManager(environment_root=tmp_path).shell_parts()
+    if Path(shell).name.casefold() == "powershell.exe":
+        pytest.skip("PowerShell 5.1 does not support the PowerShell 7 && operator")
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )

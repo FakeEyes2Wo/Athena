@@ -75,10 +75,12 @@ class DatasetStager:
         try:
             raw = await self._channel.read_file(path)
         except RemoteError:
+            # The remote agent reported that the requested operation failed.
             return None
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
+            # Invalid JSON or non-UTF-8 metadata is not a readable remote dataset record.
             return None
         return payload if isinstance(payload, dict) else None
 

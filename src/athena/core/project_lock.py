@@ -17,44 +17,40 @@ kernel drops it when the handle closes. The holder's pid goes in a *separate*
 handle -- and is only ever used to make the error message useful.
 """
 
-from __future__ import annotations
-
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 LOCK_NAME = "run.lock"
 PID_NAME = "run.pid"
 
 
-def _lock_exclusive(handle) -> bool:
+def _lock_exclusive(handle: BinaryIO) -> bool:
     """Take a non-blocking exclusive lock on byte 0; False when already held."""
     try:
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
-
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
-            import fcntl
-
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        # Another process holds the lock or the filesystem rejected locking.
         return False
     return True
 
 
-def _unlock(handle) -> None:
+def _unlock(handle: BinaryIO) -> None:
     try:
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
-
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
-            import fcntl
-
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     except OSError:
         # 解锁失败无所谓：句柄关闭时内核会释放。
@@ -74,12 +70,13 @@ def project_lock(athena_dir: Path | str) -> Iterator[Path]:
     pid_path = athena_dir / PID_NAME
     if not path.exists():
         path.write_bytes(b"\0")
-    handle = path.open("r+b")
-    try:
+    with path.open("r+b") as handle:
+        # Refused contenders own only this handle, never the holder's pid file.
         if not _lock_exclusive(handle):
             try:
                 holder = pid_path.read_text(encoding="utf-8").strip()
             except OSError:
+                # The holder may have exited before its diagnostic pid was read.
                 holder = ""
             raise ProjectBusyError(
                 f"project {athena_dir.parent} is already being run by "
@@ -88,14 +85,17 @@ def project_lock(athena_dir: Path | str) -> Iterator[Path]:
                 "settled experiments disappear. Stop the other run first."
             )
         try:
-            pid_path.write_text(f"pid {os.getpid()}", encoding="utf-8")
-        except OSError:
-            pass  # 只用于报错文案，写不成也不该拦住运行
-        yield path
-    finally:
-        _unlock(handle)
-        handle.close()
-        try:
-            pid_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            try:
+                pid_path.write_text(f"pid {os.getpid()}", encoding="utf-8")
+            except OSError:
+                # An unwritable diagnostic file does not invalidate the OS lock.
+                pass
+            yield path
+        finally:
+            # Remove our diagnostic before releasing ownership to the next writer.
+            try:
+                pid_path.unlink(missing_ok=True)
+            except OSError:
+                # Diagnostic cleanup can fail on read-only or disconnected media.
+                pass
+            _unlock(handle)

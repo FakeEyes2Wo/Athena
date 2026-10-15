@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 
 from athena.core.agent import settings
+from athena.core.project_lock import ProjectBusyError, project_lock
 from athena.research import ResearchRuntime
 from athena.research.config import (
     ProviderConfig,
@@ -35,7 +36,10 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         default=10,
         help="SEARCH 尝试次数上限；加速验证可调小（如 2）",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.search_limit < 0:
+        parser.error("--search-limit must be non-negative")
+    return args
 
 
 def _subscribe(runtime: ResearchRuntime) -> None:
@@ -43,6 +47,7 @@ def _subscribe(runtime: ResearchRuntime) -> None:
     agent_plan: object | None = None
 
     def flush_agent() -> None:
+        """Print one bounded agent message before another event takes the console."""
         nonlocal agent_buf, agent_plan
         if agent_buf:
             head = "".join(agent_buf)
@@ -54,6 +59,7 @@ def _subscribe(runtime: ResearchRuntime) -> None:
         agent_plan = None
 
     def on_event(kind: str, payload: dict) -> None:
+        """Render canonical state changes and coalesce consecutive agent fragments."""
         nonlocal agent_buf, agent_plan
         if kind == "output":
             source = payload.get("source", "?")
@@ -88,36 +94,47 @@ async def _run(args: argparse.Namespace) -> int:
         return 2
     task_text = args.task
     if args.data:
-        task_text = f"{task_text}\n数据集路径: {args.data}"
-    runtime = ResearchRuntime(
-        project_root=Path(args.project),
-        research=ResearchOptions(
-            task=TaskConfig(text=task_text),
-            search=SearchLimits(search_limit=args.search_limit),
-            policy=ResearchPolicy(auto_validate=True),
-        ),
-        dependencies=RuntimeDependencies(
-            provider=ProviderConfig(model=settings.model_name())
-        ),
-    )
-    _subscribe(runtime)
-    try:
-        supervisor_task = await runtime.start()
-        await supervisor_task
-    except Exception as exc:  # noqa: BLE001 - process boundary reports all failures
-        print(f"RUN FAILED: {type(exc).__name__}: {exc}", flush=True)
-        traceback.print_exc()
-        await runtime.aclose()
-        return 1
-    state = runtime.state
-    print(f"TERMINAL: phase={state.phase} status={state.status}", flush=True)
-    await runtime.aclose()
-    return 0
+        task_text = f"{task_text}\n数据集路径: {Path(args.data).resolve()}"
+    # This entry point obeys the same single-writer rule as Athena-cli run.
+    with project_lock(Path(args.project) / ".athena"):
+        runtime = ResearchRuntime(
+            project_root=Path(args.project),
+            research=ResearchOptions(
+                task=TaskConfig(
+                    text=task_text, confirmation_gate=False, auto_confirm=True
+                ),
+                search=SearchLimits(search_limit=args.search_limit),
+                policy=ResearchPolicy(auto_validate=True),
+            ),
+            dependencies=RuntimeDependencies(
+                provider=ProviderConfig(model=settings.model_name())
+            ),
+        )
+        try:
+            _subscribe(runtime)
+            supervisor_task = await runtime.start()
+            await supervisor_task
+            state = runtime.state
+            print(f"TERMINAL: phase={state.phase} status={state.status}", flush=True)
+            return 0 if state.phase == "COMPLETED" and state.status != "FAILED" else 1
+        except Exception as exc:  # noqa: BLE001 - process boundary reports failures
+            print(f"RUN FAILED: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
+            return 1
+        finally:
+            # Cancellation also joins runtime cleanup before releasing the lock.
+            await runtime.aclose()
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run a noninteractive task and return failure unless research completed."""
     args = _parse(sys.argv[1:] if argv is None else argv)
-    return asyncio.run(_run(args))
+    try:
+        return asyncio.run(_run(args))
+    except ProjectBusyError as exc:
+        # A live CLI/GUI process already owns the project; no new runtime was started.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

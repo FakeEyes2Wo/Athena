@@ -7,6 +7,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 
 ## 首读
 
+- [Hypothesis 修复循环与 GUI 恢复验收](codex_docs/2026-10-15-hypothesis-repair-completion.md)：本轮缺陷修正、预算 4 的 GPU 实跑及自动修复边界。
 - [源码改进与冗余清单](reviews/2026-10-10-source-improvements.md)：已复现问题、静态发现、适用路径和验证证据。
 - [Codex app-server 差异台账](reviews/codex-app-server-comparison.md)：固定上游版本、设计差异及后续跟踪验收条件。
 - [项目目录导航](repository-layout.md)：源码、测试、工具和历史材料的位置。
@@ -19,7 +20,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`
 | [研究核心机制整理](research_core_mechanisms_ch.md) | current | ResearchTree / SEARCH 搜索 / IdeaGenerator / Hypothesis 排序 / 动态 EDA |
 | [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
 | [结构化输出与工具调用](agent_structured_output_ch.md) | current | `response_format` 与工具互斥、schema 注入、围栏剥离 |
-| [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) | current | lane 契约、CLI 终态、修复反馈可执行性、环境自检 |
+| [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) | current | 同 Plan 修复、数据错误边界、GUI 会话恢复与历史跑测案例 |
 | [Evaluator 契约](evaluator_contract_ch.md) | current | 预测与标签必须按 id 对齐；一个"安静地成功"的失效 |
 | [可运行研究工作流](../README.md#运行) | current | `Athena-cli` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |

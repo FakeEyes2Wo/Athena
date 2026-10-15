@@ -14,11 +14,13 @@ def _safe_getsource(obj):
     try:
         return _original_getsource(obj)
     except (OSError, TypeError):
+        # Frozen dependencies and built-in objects have no inspectable source.
         return ""
 
 
 inspect.getsource = _safe_getsource
 
+# Dependency model setup must see the frozen-source fallback during import.
 from athena_tui.entrypoint import main
 
 if __name__ == "__main__":

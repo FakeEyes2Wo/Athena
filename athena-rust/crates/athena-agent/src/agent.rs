@@ -304,7 +304,7 @@ impl Agent {
         ctx: &AgentContext,
     ) -> Result<String, AgentError> {
         let tool_ctx = ToolContext {
-            call_id: format!("{}:{}", ctx.turn.turn_id.as_str(), tc.name),
+            call_id: tc.call_id.clone(),
             cancel: ctx.cancel.clone(),
         };
         match executor

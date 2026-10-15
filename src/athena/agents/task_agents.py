@@ -127,6 +127,7 @@ def register_plan_agent(
         output_type=PlanDecision,
         extra_tools=extra_tools,
         name="plan-agent-{agent_id}",
+        restrict_shell_workdir=True,
     )
 
 

@@ -498,6 +498,7 @@ class SurveyRuntime:
 
     @property
     def report(self) -> SurveyReport:
+        """Return the report accumulated by this pipeline run."""
         return self.state.report
 
 
@@ -509,22 +510,27 @@ class _SurveyComponent:
 
     @property
     def stack(self) -> "SurveyStack":
+        """Return the providers and persistent services used by this run."""
         return self.runtime.stack
 
     @property
     def request(self) -> SurveyRequest:
+        """Return the immutable request defining this survey run."""
         return self.runtime.request
 
     @property
     def state(self) -> PipelineState:
+        """Return the mutable per-run progress and outcome state."""
         return self.runtime.state
 
     @property
     def report(self) -> SurveyReport:
+        """Return the report accumulated by this pipeline run."""
         return self.runtime.report
 
     @property
     def emit(self) -> EmitEvent:
+        """Return the event sink scoped to this survey run."""
         return self.runtime.emit
 
 
@@ -640,6 +646,7 @@ class ScoutStage(_SurveyComponent):
         try:
             result = PaperScoutResult.model_validate_json(payload)
         except ValueError:
+            # Trigger: a cached PaperScoutResult artifact is malformed or violates its schema.
             return None
         refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
         wanted = [ref for ref in refs if ref]
@@ -657,6 +664,7 @@ class ScoutStage(_SurveyComponent):
         try:
             result = PaperScoutResult.model_validate_json(payload)
         except ValueError:
+            # Trigger: the persisted PaperScoutResult cannot be parsed for artifact copying.
             return
         refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
         await copy_refs(
@@ -863,6 +871,7 @@ class ConversionStage(_SurveyComponent):
                 await self.stack.artifacts.get_text(request_ref)
             )
         except (ValueError, OSError):
+            # Trigger: the saved conversion request is missing, malformed, or unavailable in the artifact store.
             return None
         return conversion_key(
             request.paper_id or "",
@@ -904,6 +913,7 @@ class ConversionStage(_SurveyComponent):
             request = PaperConversionRequest.model_validate_json(payload)
             content = await processor.process(request)
         except VisualInterpretationRequiredError as error:
+            # Trigger: the source contains a visual requiring explicit interpretation.
             outcome.conversion_status = "failed"
             outcome.error = f"VisualInterpretationRequiredError: {error}"
             return None
@@ -944,6 +954,7 @@ class IndexStage(_SurveyComponent):
                 ),
             )
         except OpenAIError as error:
+            # Trigger: the embedding provider request fails.
             self.state.report.warnings.append(f"index_failed: {type(error).__name__}")
             for content in selected:
                 raw = content.paper_id or ""

@@ -24,7 +24,9 @@ INTEGER_SETTINGS: dict[str, tuple[int, int | None]] = {
     "experiment_timeout_s": (1, None),
 }
 POLICY_FLAGS = ("auto_validate", "skip_validate")
-DURABLE_SETTINGS = frozenset({*INTEGER_SETTINGS, "handoff_sources", "data_root"})
+DURABLE_SETTINGS = frozenset(
+    {*INTEGER_SETTINGS, "handoff_sources", "data_root", "tolerance"}
+)
 SETTINGS_WHITELIST = frozenset(
     {
         *DURABLE_SETTINGS,
@@ -221,6 +223,7 @@ async def _apply_policy_settings(runtime: Any, patch: dict[str, Any]) -> None:
         if not isinstance(tolerance, (int, float)) or tolerance < 0:
             raise ValueError("tolerance must be a number >= 0")
         options.tolerance = float(tolerance)
+        state.tolerance = options.tolerance
         supervisor.configure_options(tolerance=options.tolerance)
 
     for name in POLICY_FLAGS:

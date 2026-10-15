@@ -152,7 +152,10 @@ Create inside `evaluate/`:
   exactly `predictions__{task_id}.csv`, `metrics_file` SHOULD be
   `metrics_public_test.csv`, and `eval_script` SHOULD be `eval_metrics.py`.
   `probability_columns` is optional and lists probability fields in the public
-  prediction schema. `metrics_file` is written directly under `evaluate/`, not
+  prediction schema. For CSV labels, declare `label_column` as the target field
+  in `labels.csv`; metadata columns must never be interpreted as target values.
+  Legacy bundles with exactly one non-ID field may omit it. `metrics_file` is
+  written directly under `evaluate/`, not
   under `predictions/`. A valid example is:
 
   ```json
@@ -165,6 +168,7 @@ Create inside `evaluate/`:
     "prediction_file": "predictions__<short-task-id>.csv",
     "prediction_id_column": "<stable-id-column>",
     "prediction_column": "pred_label",
+    "label_column": "<target-column>",
     "probability_columns": [],
     "metrics_file": "metrics_public_test.csv",
     "eval_script": "eval_metrics.py",

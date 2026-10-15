@@ -40,6 +40,7 @@ def _factory_accepts(factory: RuntimeFactory, keyword: str) -> bool:
     try:
         parameters = inspect.signature(factory).parameters.values()
     except (TypeError, ValueError):
+        # Builtins or proxy callables may not provide introspectable signatures.
         return False
     return any(
         parameter.name == keyword or parameter.kind is inspect.Parameter.VAR_KEYWORD
@@ -117,6 +118,7 @@ def _fixed_port() -> int:
     try:
         return int(raw) if raw else DEFAULT_GUI_PORT
     except ValueError:
+        # An invalid environment override should not prevent the local GUI starting.
         return DEFAULT_GUI_PORT
 
 

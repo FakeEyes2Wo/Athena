@@ -135,7 +135,20 @@ async def _collect_reports(
         agent_id=PREPARE_EDA_AGENT_ID,
         workspace=workspace,
         output_file="EDA_TODO.md",
-        content=task,
+        content=(
+            f"{task}\n\nCurrent handoff requirement: call write_file with the "
+            "relative path EDA_TODO.md to save the plan in your workspace. "
+            f"The current session EDA workspace is {workspace.resolve()}. "
+            "Only use reports under this exact directory for this run; do not "
+            "search or read project-level workspaces/eda or another session's "
+            "reports. Keep shell workdir at this workspace; use absolute paths "
+            "only when reading external dataset files. "
+            "A .athena ancestor above the workspace does not prohibit writing "
+            "workspace reports; only .athena paths within the workspace are "
+            "protected. On a resumed run, retry the current file tool instead "
+            "of relying on an earlier permission failure. A plan printed in "
+            "the conversation is not a saved handoff."
+        ),
     )
     failed = await EdaTodoRunner(runtime.agents, runtime.store, workspace).run(
         EdaTodoOptions(
@@ -165,7 +178,11 @@ async def _aggregate_reports(
         workspace=workspace,
         output_file="EDA_INDEX.md",
         content=(
-            "Finalize EDA: read all EDA_REPORT_*.md and write "
+            f"Finalize EDA in the current session workspace {workspace.resolve()}. "
+            "Read only EDA_REPORT_*.md files under this exact directory; do not "
+            "search or read project-level workspaces/eda or another session's "
+            "reports. Keep shell workdir at this workspace; use absolute paths "
+            "only when reading external dataset files. Write "
             "EDA_INDEX.md and EDA_HANDOFF.md."
         ),
         reap_after=True,
@@ -334,6 +351,7 @@ class EdaTodoRunner:
                     raise RuntimeError(f"{output_file} was not written")
                 return True
             except TimeoutError:
+                # Trigger: the EDA Agent run exceeds its configured preparation timeout.
                 return False
             except Exception:  # noqa: BLE001 - worker retry boundary
                 if attempt >= options.retries:

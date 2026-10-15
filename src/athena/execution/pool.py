@@ -22,6 +22,30 @@ logger = logging.getLogger(__name__)
 Placement = Literal["pack", "spread", "homogeneous"]
 
 
+async def _close_lease_backend(backend: Any, plan_id: str) -> bool:
+    """Finish lease closure despite caller cancellation; return if it was interrupted."""
+    cleanup = asyncio.create_task(backend.aclose())
+    interrupted = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # The caller cancelled this await; cleanup runs before cancellation propagates.
+            if cleanup.cancelled():
+                break
+            interrupted = True
+        except Exception:
+            break
+    try:
+        cleanup.result()
+    except asyncio.CancelledError:
+        # The caller cancelled this await; cleanup runs before cancellation propagates.
+        logger.warning("lease cleanup cancelled for %s", plan_id)
+    except Exception as exc:
+        logger.warning("could not close failed lease %s: %s", plan_id, exc)
+    return interrupted
+
+
 class NoComputeAvailable(RuntimeError):
     """池子里没有可用算力。"""
 
@@ -198,20 +222,25 @@ class GpuPool:
                 try:
                     await asyncio.wait_for(self._freed.wait(), timeout=timeout_s)
                 except asyncio.TimeoutError:
+                    # The operation exceeded its configured deadline.
                     raise NoComputeAvailable(
                         f"no free GPU for plan {plan_id} after {timeout_s}s"
                     ) from None
 
+        lease: Lease | None = None
         try:
             lease = await self._open_lease(
                 plan_id, state, tuple(gpu_ids), local_workspace
             )
             lease.dataset = await self._stage_dataset(lease)
-        except Exception:
-            async with self._freed:
-                state.busy_gpus.difference_update(gpu_ids)
-                state.leases -= 1
-                self._freed.notify_all()
+        except BaseException:
+            # Lease setup/staging failed or was cancelled after reservation → close
+            # any opened channel, return the GPU reservation, then preserve the cause.
+            try:
+                if lease is not None:
+                    await _close_lease_backend(lease.backend, plan_id)
+            finally:
+                await self._return_gpus(state, tuple(gpu_ids))
             raise
         lease.queued_seconds = loop.time() - started
         self._leases[plan_id] = lease
@@ -257,24 +286,30 @@ class GpuPool:
         remote_workspace = str(scratch / "leases" / plan_id / "workspace")
 
         channel = RemoteChannel(self._transport_factory(host))
-        await channel.open()
-        inner = SshBackend(
-            host,
-            channel=channel,
-            remote_workspace=remote_workspace,
-            gpu_ids=gpu_ids,
-            store=self._store,
-        )
-        mirror = WorkspaceMirror(
-            channel, local_root=local_workspace, remote_root=remote_workspace
-        )
-        assert state.card is not None
-        return Lease(
-            card=state.card,
-            gpu_ids=gpu_ids,
-            backend=MirroredBackend(inner, mirror),
-            remote_workspace=remote_workspace,
-        )
+        try:
+            await channel.open()
+            inner = SshBackend(
+                host,
+                channel=channel,
+                remote_workspace=remote_workspace,
+                gpu_ids=gpu_ids,
+                store=self._store,
+            )
+            mirror = WorkspaceMirror(
+                channel, local_root=local_workspace, remote_root=remote_workspace
+            )
+            assert state.card is not None
+            return Lease(
+                card=state.card,
+                gpu_ids=gpu_ids,
+                backend=MirroredBackend(inner, mirror),
+                remote_workspace=remote_workspace,
+            )
+        except BaseException:
+            # Channel startup or lease construction failed/cancelled → close transport
+            # resources before the caller returns the reserved GPU slot.
+            await channel.close()
+            raise
 
     async def _stage_dataset(self, lease: Lease) -> StageReport | None:
         """把数据集送到这台机器（已有就复用），并把 ATHENA_DATA_ROOT 指过去。"""
@@ -299,13 +334,24 @@ class GpuPool:
             return
         try:
             await self._discard_workspace(lease)
-            await lease.backend.aclose()
         finally:
-            async with self._freed:
-                state = self._states[lease.card.name]
-                state.busy_gpus.difference_update(lease.gpu_ids)
-                state.leases = max(0, state.leases - 1)
-                self._freed.notify_all()
+            # Remote removal can fail or be cancelled; channel close and pool accounting
+            # still run so neither transport nor GPU lease is stranded.
+            try:
+                cancelled_during_close = await _close_lease_backend(
+                    lease.backend, plan_id
+                )
+            finally:
+                await self._return_gpus(self._states[lease.card.name], lease.gpu_ids)
+        if cancelled_during_close:
+            raise asyncio.CancelledError
+
+    async def _return_gpus(self, state: _HostState, gpu_ids: tuple[int, ...]) -> None:
+        """Release one host reservation and wake plans waiting for capacity."""
+        async with self._freed:
+            state.busy_gpus.difference_update(gpu_ids)
+            state.leases = max(0, state.leases - 1)
+            self._freed.notify_all()
 
     async def _discard_workspace(self, lease: Lease) -> None:
         """删掉这份租约在远端的工作区目录。"""

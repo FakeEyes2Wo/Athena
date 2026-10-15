@@ -62,6 +62,31 @@ describe("useWorkspace", () => {
     expect(result.current.pickerOpen).toBe(false);
   });
 
+  it("does not let a pre-switch root reload overwrite the selected workspace", async () => {
+    localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a"]));
+    const initial = deferred<ReturnType<typeof settings>>();
+    const reload = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.settingsGet
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(reload.promise);
+    bridgeMocks.setProjectRoot.mockResolvedValue(settings("/b"));
+    const { result } = renderHook(() => useWorkspace());
+
+    await act(async () => initial.resolve(settings("/a")));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let pendingReload!: Promise<void>;
+    act(() => {
+      pendingReload = result.current.reload();
+    });
+    await act(async () => result.current.switchTo("/b"));
+    await act(async () => reload.resolve(settings("/a")));
+    await pendingReload;
+
+    expect(result.current.currentRoot).toBe("/b");
+    expect(result.current.requestedSessionId).toBeNull();
+  });
+
   it("records a requested session without reordering known roots", async () => {
     localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a", "/b"]));
     bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));

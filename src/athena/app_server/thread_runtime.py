@@ -393,6 +393,7 @@ class ThreadRuntime:
         try:
             done = self._turn_done[turn_id]
         except KeyError as exc:
+            # No completion future exists for an unknown turn identifier.
             raise KeyError(f"unknown turn: {turn_id}") from exc
         terminal = await asyncio.shield(done)
         if terminal.cancelled:
@@ -437,6 +438,7 @@ class ThreadRuntime:
             if not msg.reply.done():
                 msg.reply.set_result(turn)
         except RuntimeError as e:
+            # The thread already has a turn, or is closed; return the rejection to this submitter.
             if not msg.reply.done():
                 msg.reply.set_exception(e)
 
@@ -453,6 +455,7 @@ class ThreadRuntime:
             try:
                 await runner_task
             except asyncio.CancelledError:
+                # The interrupt path just cancelled this runner and owns its completion.
                 pass
         if not msg.reply.done():
             msg.reply.set_result(None)
@@ -487,6 +490,7 @@ class ThreadRuntime:
             try:
                 await asyncio.shield(runner_task)
             except asyncio.CancelledError:
+                # Shutdown cancels the runner; a shielded cancellation also means shutdown itself was cancelled.
                 pass
         if not msg.reply.done():
             msg.reply.set_result(None)

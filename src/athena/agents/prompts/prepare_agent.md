@@ -81,6 +81,12 @@ Create all artifacts needed for a trusted baseline:
   with it and silently corrupts every score in the run, including every candidate
   that inherits this directory. Also write a Markdown report output.
 
+Every manifest command run must regenerate all declared outputs, including the
+Markdown report. The runner archives existing output files before executing the
+commands. Put report generation in the runnable source (or a manifest command)
+and test with the old report removed; a report written only with a file tool
+before submitting will be archived and cannot satisfy the output contract.
+
 Install every third-party dependency (numpy, pandas, scikit-learn, ...) into
 the shared environment root, not into a workspace-local venv. The deterministic
 runner resolves a bare `python` manifest command only through

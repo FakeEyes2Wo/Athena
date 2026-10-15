@@ -170,6 +170,7 @@ def _shorten_mapping_field(
         return
 
     def field_fits(candidate: str) -> bool:
+        """Check whether replacing this field keeps the full draft in budget."""
         projected = {**value, field: candidate}
         return fits(projected)
 
@@ -208,6 +209,7 @@ def _fit_record(
     projected = dict(record)
 
     def fits(candidate: dict[str, object]) -> bool:
+        """Check the retained records plus candidate against the size budget."""
         records = [*retained, (index, candidate)]
         ordered = [value for _index, value in sorted(records)]
         return len(_safe_json(ordered)) <= budget
@@ -252,6 +254,7 @@ def _compact_unresolved(
         projected = dict(item)
 
         def fits(candidate: dict[str, object]) -> bool:
+            """Check whether this candidate record fits the serialized budget."""
             return len(_safe_json([*retained, candidate])) <= budget
 
         exact_field = {**projected, "reason": ""}
@@ -319,6 +322,7 @@ class _ReportingTool(BaseTool):
         self._seen: set[tuple[str, str]] = set()
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict[str, bool]:
+        """Persist one public progress update for the active clarification draft."""
         del ctx
         progress = PublicProgress.model_validate(input)
         identity = (progress.stage, progress.summary)
@@ -356,6 +360,7 @@ class LLMClarificationGenerator:
         self._progress_sink = progress_sink
 
     async def next_step(self, draft: ClarificationDraft) -> ClarificationModelOutput:
+        """Ask the clarification model for one typed draft update."""
         prompt = build_clarification_prompt(draft)
         tools = ToolRegistry()
         tools.register(_ReportingTool(draft, self._progress_sink))

@@ -64,6 +64,7 @@ def parse_verdict(paper_id: str, content: str) -> SupportVerdict:
     try:
         payload = json.loads(match.group(0))
     except json.JSONDecodeError:
+        # Trigger: the support judge response contains no parseable JSON object.
         return SupportVerdict(paper_id, False, "unparseable verdict")
     if not isinstance(payload, dict):
         return SupportVerdict(paper_id, False, "unparseable verdict")

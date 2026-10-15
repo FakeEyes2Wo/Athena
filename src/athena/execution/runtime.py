@@ -254,7 +254,14 @@ def _reject_athena_shell_write(
         workdir_path = Path(workdir)
         if not workdir_path.is_absolute():
             workdir_path = workspace_root / workdir_path
-        if ".athena" in workdir_path.resolve().parts:
+        resolved_workdir = workdir_path.resolve()
+        resolved_root = workspace_root.resolve()
+        protected_parts = (
+            resolved_workdir.relative_to(resolved_root).parts
+            if resolved_workdir.is_relative_to(resolved_root)
+            else resolved_workdir.parts
+        )
+        if ".athena" in protected_parts:
             raise ValueError(
                 ".athena/ is owned by the Athena runtime and is read-only for "
                 "agents; run shell commands from your workspace instead."
@@ -287,6 +294,7 @@ class EnvironmentManager:
         try:
             shell = Path(self.shell_parts()[0]).name.lower()
         except RuntimeError:
+            # The subprocess or transport is no longer in a state where this operation can run.
             return f"${name}"
         if "powershell" in shell or "pwsh" in shell:
             return f"$env:{name}"
@@ -404,6 +412,7 @@ class EnvironmentManager:
                 timeout=300,
             )
         except subprocess.TimeoutExpired:
+            # The synchronous subprocess exceeded its configured timeout.
             return self._mark_repair("uv sync timed out")
         if proc.returncode != 0:
             return self._mark_repair((proc.stderr or proc.stdout).strip()[:200])
@@ -433,6 +442,7 @@ class EnvironmentManager:
         try:
             shell_name = Path(self.shell_parts()[0]).name
         except RuntimeError as exc:
+            # The subprocess or transport is no longer in a state where this operation can run.
             return f"Runtime:\n- environment needs repair: {exc}"
         shell_line = f"- Shell: {shell_name}"
         if shell_name == "powershell.exe":
@@ -467,6 +477,7 @@ class EnvironmentManager:
             )
             return (proc.stdout or proc.stderr).strip().splitlines()[0]
         except (OSError, subprocess.TimeoutExpired):
+            # Missing package metadata or a slow tool makes this optional probe inconclusive.
             return "missing"
 
 
@@ -497,6 +508,7 @@ async def _reap_process(proc) -> None:
     try:
         await asyncio.wait_for(proc.wait(), timeout=POST_EXIT_DRAIN_TIMEOUT_S)
     except (asyncio.TimeoutError, TimeoutError):
+        # The child ignored termination until the bounded post-exit drain expired.
         logger.warning("terminated process did not exit before cleanup deadline")
 
 
@@ -566,6 +578,7 @@ class _StreamDecoder:
         try:
             data.decode("utf-8", "strict")
         except UnicodeDecodeError as exc:
+            # The input bytes are not valid UTF-8 for this text format.
             if exc.reason == "unexpected end of data":
                 return None if not final else "utf-8"
             return self._fallback
@@ -593,7 +606,7 @@ class CommandExecutor:
 
     @staticmethod
     def _utf8_command(shell: str, command: str) -> str:
-        """PowerShell 显式设 UTF-8 输出编码并透传最后命令退出码。"""
+        """以 UTF-8 流式输出 PowerShell 对象，并保留命令失败状态。"""
         name = Path(shell).name.lower()
         if "powershell" in name or "pwsh" in name:
             # 用换行分隔 exit：避免 `; exit ...` 被末尾注释吞掉。
@@ -604,8 +617,33 @@ class CommandExecutor:
                 # 默认用系统 ANSI，UTF-8 文本会在读入时就变成乱码，再怎么
                 # 正确地写出去也没用。7 默认就是 UTF-8，这行对它无害。
                 "$PSDefaultParameterValues['*:Encoding']='utf8';"
+                "$PSDefaultParameterValues['*:ErrorAction']='Stop';"
+                # Keep native stderr records non-terminating: under Windows
+                # PowerShell 5.1, Stop aborts native pipelines on warnings.
+                # The command body records newly emitted non-native errors
+                # below, so cmdlet failures still affect the wrapper result.
+                "$ErrorActionPreference='Continue';"
+                "$global:LASTEXITCODE=$null;"
+                "$global:__athena_success=$true;"
+                "$global:__athena_native_exit=$null;"
+                "$global:__athena_failed=$false;"
+                "$global:__athena_error_count=$Error.Count;"
+                # 显式完成对象格式化后再退出；直接追加 exit 会丢失 5.1 的
+                # 自动格式化输出。-Stream 避免将整段训练日志缓存在变量中。
+                "& {\ntrap { if ($_.FullyQualifiedErrorId -like 'NativeCommandError*') { "
+                "Write-Output $_; continue }; $global:__athena_failed=$true; "
+                "Write-Error $_ -ErrorAction Continue; continue }\n"
                 + command
-                + "\nexit $LASTEXITCODE"
+                + "\nif (-not $? -and $Error.Count -gt $global:__athena_error_count "
+                + "-and $Error[0].FullyQualifiedErrorId -notlike 'NativeCommandError*') { "
+                "$global:__athena_failed=$true };"
+                "$global:__athena_success=(-not $global:__athena_failed);"
+                "$global:__athena_native_exit=$LASTEXITCODE;"
+                "} | Out-String -Stream | Out-Default;"
+                "if ($null -ne $__athena_native_exit -and $__athena_native_exit -ne 0) { exit $__athena_native_exit };"
+                "if (-not $__athena_success) { exit 1 };"
+                "if ($null -ne $__athena_native_exit) { exit $__athena_native_exit };"
+                "exit 0"
             )
         return command
 
@@ -620,10 +658,12 @@ class CommandExecutor:
                 try:
                     process_group = os.getpgid(proc.pid)
                 except ProcessLookupError:
+                    # The process exited between lookup and the signal or termination request.
                     return
             try:
                 os.killpg(process_group, signal.SIGKILL)
             except ProcessLookupError:
+                # The process exited between lookup and the signal or termination request.
                 pass
 
     def _resolve_executable(self, argv: list[str]) -> list[str]:
@@ -671,6 +711,7 @@ class CommandExecutor:
                     start_new_session=new_session,
                 )
         except FileNotFoundError:
+            # The optional persisted file or target path does not exist.
             error = (
                 "command_not_found" if isinstance(command, list) else "shell_not_found"
             )
@@ -710,6 +751,7 @@ class CommandExecutor:
         try:
             returncode = await _wait_for_process_exit(proc, timeout_s)
         except asyncio.TimeoutError:
+            # The operation exceeded its configured deadline.
             self._terminate(proc, process_group)
             await _cleanup_terminated_process(proc, readers)
             # drain 也要有界：孙进程可能脱离进程组仍霸占管道。
@@ -721,6 +763,7 @@ class CommandExecutor:
                 error="timeout",
             )
         except asyncio.CancelledError:
+            # The caller cancelled the local command → terminate its process group and propagate.
             self._terminate(proc, process_group)
             await _cleanup_terminated_process(proc, readers)
             raise
@@ -805,9 +848,16 @@ class ExecutionRuntime:
         """数据集根目录；未配置时为 None（此时不注入 ATHENA_DATA_ROOT）。"""
         return self._data_root
 
-    def shell_command_tool(self, workspace_root: str | Path) -> BaseTool:
+    def shell_command_tool(
+        self,
+        workspace_root: str | Path,
+        *,
+        restrict_workdir: bool = False,
+    ) -> BaseTool:
         """构造模型可见的 shell_command 工具（cwd 默认 workspace）。"""
-        return _ShellCommandTool(self, Path(workspace_root))
+        return _ShellCommandTool(
+            self, Path(workspace_root), restrict_workdir=restrict_workdir
+        )
 
     @property
     def backend(self) -> "ExecutionBackend":
@@ -884,14 +934,35 @@ class _ShellCommandTool(BaseTool):
         },
     )
 
-    def __init__(self, runtime: ExecutionRuntime, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        runtime: ExecutionRuntime,
+        workspace_root: Path,
+        *,
+        restrict_workdir: bool = False,
+    ) -> None:
         self._runtime = runtime
-        self._workspace_root = workspace_root
+        self._workspace_root = workspace_root.resolve()
+        self._restrict_workdir = restrict_workdir
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """执行命令：委托 ``ExecutionRuntime.run`` 并返回契约 JSON。"""
         command = str(input["command"])
         workdir = input.get("workdir")
+        if self._restrict_workdir and workdir is not None:
+            requested = Path(workdir)
+            if not requested.is_absolute():
+                requested = self._workspace_root / requested
+            requested = requested.resolve()
+            if not requested.is_relative_to(self._workspace_root):
+                raise ValueError(
+                    "shell_command workdir must stay inside this isolated "
+                    f"workspace ({self._workspace_root}); omit workdir to use "
+                    "the workspace root, or pass a relative path inside it. "
+                    "Use absolute file paths in the command when reading "
+                    "external datasets."
+                )
+            workdir = str(requested)
         _reject_athena_shell_write(command, workdir, self._workspace_root)
         context = ExecutionContext(
             project_root=self._runtime.project_root,

@@ -21,6 +21,7 @@ from athena.core.human_request import HumanOutcome
 from athena.core.tool import ToolRegistry
 from athena.research import ResearchRuntime
 from athena.research.clarification.controller import CLARIFICATION_FAILURE_NOTICE
+from athena.research.clarification.errors import ClarificationPersistenceError
 from athena.research.clarification.generator import (
     DeterministicClarificationGenerator,
 )
@@ -184,6 +185,10 @@ async def test_real_runtime_exposes_clarification_rpc(tmp_path: Path) -> None:
         got = await runtime.task_clarification_get(draft.draft_id)
         assert got.draft_id == draft.draft_id
         assert got.revision == draft.revision
+        current = runtime.task_clarification_current()
+        assert current is not None
+        assert current.draft_id == draft.draft_id
+        assert current.status == "READY_FOR_CONFIRMATION"
 
         cancelled = await runtime.task_clarification_cancel(
             draft.draft_id, draft.revision
@@ -193,6 +198,31 @@ async def test_real_runtime_exposes_clarification_rpc(tmp_path: Path) -> None:
         # Cancellation clears the previous draft so a different task can start.
         again = await runtime.task_clarification_start("another task")
         assert again.status == "READY_FOR_CONFIRMATION"
+        current = runtime.task_clarification_current()
+        assert current is not None
+        assert current.draft_id == again.draft_id
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_draft_is_preserved_and_does_not_block_a_new_task(
+    tmp_path: Path,
+) -> None:
+    draft_path = tmp_path / ".athena" / "clarification.json"
+    draft_path.parent.mkdir(parents=True)
+    draft_path.write_text("{broken json", encoding="utf-8")
+    runtime = _runtime(tmp_path, StubBroker())
+    try:
+        with pytest.raises(ClarificationPersistenceError, match="draft_corrupt"):
+            runtime.task_clarification_current()
+
+        draft = await runtime.task_clarification_start("predict churn")
+        assert draft.status == "READY_FOR_CONFIRMATION"
+        assert runtime.task_clarification_current().draft_id == draft.draft_id
+        backups = list(draft_path.parent.glob("clarification.corrupt-*.json"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == "{broken json"
     finally:
         await runtime.aclose()
 

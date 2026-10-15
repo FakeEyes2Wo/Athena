@@ -18,10 +18,14 @@ from athena.agents.task_agents import register_validate_agent
 from athena.core.agent.chat import single_turn_chat
 from athena.core.agent.types import RunStatus
 from athena.execution.runtime import ExecutionContext
-from athena.research.clarification.context import confirmed_task_context_block
+from athena.research.clarification.context import (
+    confirmed_task_context_block,
+    task_prompt,
+)
 from athena.research.contracts import ValidationResult
 from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.prepare.baseline import _load_authoritative_baseline_record
+from athena.research.prepare.evaluator import prepare_final_evaluator
 from athena.research.prepare.orchestrator import run_prepare_phase
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import (
@@ -276,16 +280,16 @@ class PhaseRunner:
         if evaluator_ref is None:
             raise RuntimeError("VALIDATE requires a frozen evaluator")
         final_evaluator_ref = rt.supervisor.final_evaluator_ref
+        sota_id = rt.tree.best_experiment_id()
+        if sota_id is None:
+            raise RuntimeError("VALIDATE requires a trusted SOTA baseline")
+        experiment = rt.tree.get_experiment(sota_id)
+        hypothesis = rt.tree.get_hypothesis(experiment.hypothesis_id)
         if final_evaluator_ref is None:
-            # Legacy projects do not have a separate final evaluator yet. Keep
-            # working but make the limitation explicit instead of silently
-            # pretending the search evaluator is an unseen final test.
-            final_evaluator_ref = evaluator_ref
-            logger.warning(
-                "VALIDATE has no final_evaluator_ref; using the search evaluator "
-                "as final. Re-run PREPARE with final-evaluator support for a "
-                "true unseen final test."
-            )
+            # FINAL is provisioned only after the SOTA commit and metric are
+            # frozen.  This call is unreachable from SEARCH-only policy.
+            final_task = task_prompt(rt.task_text, task_context)
+            final_evaluator_ref = await prepare_final_evaluator(rt, final_task)
         predict_features = _predict_features_path(rt, "final")
         workspace = await rt.git.create(sota_commit, "athena/validate")
         if not rt.registry.contains("validate"):
@@ -296,11 +300,6 @@ class PhaseRunner:
                 workspace=Path(workspace.path),
                 runtime=rt.execution,
             )
-        sota_id = rt.tree.best_experiment_id()
-        if sota_id is None:
-            raise RuntimeError("VALIDATE requires a trusted SOTA baseline")
-        experiment = rt.tree.get_experiment(sota_id)
-        hypothesis = rt.tree.get_hypothesis(experiment.hypothesis_id)
         sota_context = {
             "experiment_id": sota_id,
             "statement": hypothesis.statement,

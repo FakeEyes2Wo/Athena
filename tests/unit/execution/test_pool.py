@@ -17,6 +17,9 @@ import pytest
 
 from athena.execution.pool import (
     GpuPool,
+    GpuCard,
+    HostCard,
+    Lease,
     NoComputeAvailable,
     PreflightError,
 )
@@ -94,6 +97,226 @@ async def test_first_acquire_records_the_facts_a_lease_needs(tmp_path, patched_p
         assert [gpu.index for gpu in lease.card.gpus] == [0, 1]
     finally:
         await pool.release("h1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_stage", [False, True])
+async def test_dataset_staging_failure_closes_lease_and_returns_gpu(
+    tmp_path, monkeypatch, cancel_stage
+):
+    host = _host("gpu-01", tmp_path)
+    pool = _make_pool([host])
+    pool._states[host.name].card = HostCard(
+        name=host.name,
+        os="linux",
+        hostname="gpu-01",
+        gpus=(GpuCard(0, "NVIDIA A100"),),
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    stage_started = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _Backend:
+        remote_only = ()
+
+        async def aclose(self):
+            closed.set()
+
+    lease = Lease(
+        card=pool._states[host.name].card,
+        gpu_ids=(0,),
+        backend=_Backend(),
+        remote_workspace="/scratch/lease/workspace",
+    )
+
+    async def open_lease(*args):
+        return lease
+
+    async def stage_dataset(_lease):
+        stage_started.set()
+        if cancel_stage:
+            await asyncio.Event().wait()
+        raise OSError("dataset staging failed")
+
+    monkeypatch.setattr(pool, "_open_lease", open_lease)
+    monkeypatch.setattr(pool, "_stage_dataset", stage_dataset)
+    task = asyncio.create_task(pool.acquire("plan-1", local_workspace=workspace))
+    await stage_started.wait()
+    if cancel_stage:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(OSError, match="dataset staging failed"):
+            await task
+
+    state = pool._states[host.name]
+    assert closed.is_set()
+    assert not state.busy_gpus
+    assert state.leases == 0
+    assert not pool._leases
+
+
+@pytest.mark.asyncio
+async def test_cancelled_workspace_discard_still_closes_lease(tmp_path, monkeypatch):
+    host = _host("gpu-01", tmp_path)
+    pool = _make_pool([host])
+    card = HostCard(
+        name=host.name,
+        os="linux",
+        hostname="gpu-01",
+        gpus=(GpuCard(0, "NVIDIA A100"),),
+    )
+    pool._states[host.name].card = card
+    pool._states[host.name].busy_gpus.add(0)
+    pool._states[host.name].leases = 1
+    discard_started = asyncio.Event()
+    lease_closed = asyncio.Event()
+
+    class _Backend:
+        remote_only = ()
+
+        async def aclose(self):
+            lease_closed.set()
+
+    lease = Lease(
+        card=card,
+        gpu_ids=(0,),
+        backend=_Backend(),
+        remote_workspace="/scratch/lease/workspace",
+    )
+    pool._leases["plan-1"] = lease
+
+    async def discard(_lease):
+        discard_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pool, "_discard_workspace", discard)
+    task = asyncio.create_task(pool.release("plan-1"))
+    await discard_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    state = pool._states[host.name]
+    assert lease_closed.is_set()
+    assert not state.busy_gpus
+    assert state.leases == 0
+    assert not pool._leases
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_release_gpu_before_acquire_cleanup(
+    tmp_path, monkeypatch
+):
+    host = _host("gpu-01", tmp_path)
+    pool = _make_pool([host])
+    card = HostCard(host.name, "linux", "gpu-01", (GpuCard(0, "NVIDIA A100"),))
+    pool._states[host.name].card = card
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+    stage_started = asyncio.Event()
+    closed = False
+
+    class _Backend:
+        remote_only = ()
+
+        async def aclose(self):
+            nonlocal closed
+            close_started.set()
+            await finish_close.wait()
+            closed = True
+
+    lease = Lease(card, (0,), _Backend(), "/scratch/lease/workspace")
+
+    async def open_lease(*_args):
+        return lease
+
+    async def stage(_lease):
+        stage_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pool, "_open_lease", open_lease)
+    monkeypatch.setattr(pool, "_stage_dataset", stage)
+    task = asyncio.create_task(pool.acquire("plan-1", local_workspace=tmp_path))
+    await stage_started.wait()
+    task.cancel()
+    await close_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+
+    cleanup_was_protected = (
+        not task.done()
+        and not closed
+        and pool._states[host.name].busy_gpus == {0}
+        and pool._states[host.name].leases == 1
+    )
+
+    finish_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    state = pool._states[host.name]
+    assert cleanup_was_protected
+    assert closed
+    assert not state.busy_gpus
+    assert state.leases == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_does_not_release_gpu_before_release_cleanup(
+    tmp_path, monkeypatch
+):
+    host = _host("gpu-01", tmp_path)
+    pool = _make_pool([host])
+    card = HostCard(host.name, "linux", "gpu-01", (GpuCard(0, "NVIDIA A100"),))
+    state = pool._states[host.name]
+    state.card = card
+    state.busy_gpus.add(0)
+    state.leases = 1
+    discard_started = asyncio.Event()
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+    closed = False
+
+    class _Backend:
+        remote_only = ()
+
+        async def aclose(self):
+            nonlocal closed
+            close_started.set()
+            await finish_close.wait()
+            closed = True
+
+    pool._leases["plan-1"] = Lease(card, (0,), _Backend(), "/scratch/lease/workspace")
+
+    async def discard(_lease):
+        discard_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(pool, "_discard_workspace", discard)
+    task = asyncio.create_task(pool.release("plan-1"))
+    await discard_started.wait()
+    task.cancel()
+    await close_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+
+    cleanup_was_protected = (
+        not task.done() and not closed and state.busy_gpus == {0} and state.leases == 1
+    )
+
+    finish_close.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_was_protected
+    assert closed
+    assert not state.busy_gpus
+    assert state.leases == 0
 
 
 @pytest.mark.asyncio

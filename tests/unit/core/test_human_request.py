@@ -137,6 +137,12 @@ def test_parse_human_reply_rejects_payload_plus_legacy_and_server_outcomes():
         parse_human_reply({"kind": "cancelled"})
 
 
+@pytest.mark.parametrize("kind", [[], {}, ["choice"], 1, None])
+def test_invalid_reply_kind_stays_a_contract_error(kind):
+    with pytest.raises(HumanContractError, match="invalid_reply"):
+        parse_human_reply({"kind": kind})
+
+
 def test_fixture_valid_request_loads():
     payload = json.loads(
         (FIXTURES / "human_request_valid.json").read_text(encoding="utf-8")

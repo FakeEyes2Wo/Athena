@@ -127,17 +127,30 @@ class AgentRunner(Protocol[RequestT, ResponseT]):
         *,
         session: "RunSession",
         emit: EventSink,
-    ) -> ResponseT: ...
+    ) -> ResponseT:
+        """Execute a request using its run-scoped session and event sink."""
+        ...
 
 
 @runtime_checkable
 class AgentCodec(Protocol[RequestT, ResponseT]):
     """请求、响应与 artifact 之间的类型化编解码（§2.2）。"""
 
-    def encode_request(self, value: RequestT) -> ArtifactRef: ...
-    def decode_request(self, ref: ArtifactRef) -> RequestT: ...
-    def encode_response(self, value: ResponseT) -> ArtifactRef: ...
-    def decode_response(self, ref: ArtifactRef) -> ResponseT: ...
+    def encode_request(self, value: RequestT) -> ArtifactRef:
+        """Serialize a request into an artifact reference."""
+        ...
+
+    def decode_request(self, ref: ArtifactRef) -> RequestT:
+        """Restore a typed request from its artifact reference."""
+        ...
+
+    def encode_response(self, value: ResponseT) -> ArtifactRef:
+        """Serialize a response into an artifact reference."""
+        ...
+
+    def decode_response(self, ref: ArtifactRef) -> ResponseT:
+        """Restore a typed response from its artifact reference."""
+        ...
 
 
 class JsonCodec:
@@ -182,6 +195,7 @@ class AgentMessage:
 
     @property
     def is_control(self) -> bool:
+        """Whether this message represents an internal control signal."""
         return self.source is None
 
 

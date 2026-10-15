@@ -12,9 +12,11 @@ from athena.core.workspace import resolve_workspace_path
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation.spec import (
     DEFAULT_PREDICTION_ID_COLUMN,
-    load_evaluator_spec,
+    EvaluatorSpec,
+    parse_evaluator_spec,
 )
 from athena.research.evaluation.trust import (
+    extract_label_column_from_source,
     extract_prediction_column,
     extract_prediction_column_from_source,
     validate_evaluator_properties,
@@ -29,13 +31,62 @@ logger = logging.getLogger(__name__)
 ROW_ID_COLUMN = "__athena_row_id"
 
 
+def _resolve_prediction_column(
+    declared: str | None, evaluator_root: Path, entrypoint: str
+) -> str:
+    """Resolve the synthetic probe field, preferring metric.json's contract."""
+    if declared:
+        return declared
+    handoff_path = evaluator_root / "HANDOFF.md"
+    handoff_text = (
+        handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+    )
+    from_handoff = extract_prediction_column(handoff_text)
+    if from_handoff is not None:
+        return from_handoff
+    source_path = evaluator_root / entrypoint
+    source = (
+        source_path.read_text(encoding="utf-8", errors="replace")
+        if source_path.is_file()
+        else ""
+    )
+    from_source = extract_prediction_column_from_source(source)
+    if from_source is not None:
+        return from_source
+    raise ValueError(
+        "cannot determine the tabular prediction CSV column from the declared "
+        "metric contract, HANDOFF.md, or the evaluator source; declare "
+        "prediction_column in metric.json (or in HANDOFF.md for a legacy "
+        "descriptor) so the property probe can build a synthetic prediction file"
+    )
+
+
+def _resolve_label_column(
+    declared: str | None, evaluator_root: Path, entrypoint: str
+) -> str | None:
+    """Resolve optional labels target declaration without guessing by position."""
+    if declared:
+        return declared
+    source_path = evaluator_root / entrypoint
+    source = (
+        source_path.read_text(encoding="utf-8", errors="replace")
+        if source_path.is_file()
+        else ""
+    )
+    return extract_label_column_from_source(source)
+
+
 def _require_joinable_labels(
     labels_file: Path, *, id_column: str = DEFAULT_PREDICTION_ID_COLUMN
 ) -> None:
     """Require stable, unique row ids in one evaluator labels file."""
     with labels_file.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        columns = [name.strip() for name in (reader.fieldnames or []) if name.strip()]
+        raw_columns = reader.fieldnames or []
+        columns = [name.strip() for name in raw_columns]
+        if any(not name for name in columns) or len(set(columns)) != len(columns):
+            raise ValueError("labels.csv contains empty or duplicate column names")
+        reader.fieldnames = columns
         if id_column not in columns or len(columns) < 2:
             raise ValueError(
                 f"labels.csv must carry a row-id column named {id_column!r} next to "
@@ -54,6 +105,71 @@ def _require_joinable_labels(
             seen.add(raw)
 
 
+def _csv_identity_values(path: Path, id_column: str) -> set[str]:
+    """Read normalized, non-empty row identities without retaining them in errors."""
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        raw_fields = reader.fieldnames or []
+        fields = [field.strip() for field in raw_fields]
+        if (
+            not fields
+            or any(not field for field in fields)
+            or len(set(fields)) != len(fields)
+        ):
+            raise ValueError(f"{path.name} has empty or duplicate CSV columns")
+        reader.fieldnames = fields
+        if id_column not in fields:
+            raise ValueError(
+                f"{path.name} is missing declared identity column {id_column!r}"
+            )
+        values: set[str] = set()
+        count = 0
+        for row in reader:
+            if None in row or None in row.values():
+                raise ValueError(
+                    f"{path.name} contains a row with an invalid field count"
+                )
+            value = (row.get(id_column) or "").strip()
+            if not value:
+                raise ValueError(f"{path.name} contains an empty identity value")
+            if value in values:
+                raise ValueError(f"{path.name} contains duplicate identity values")
+            values.add(value)
+            count += 1
+        if count == 0:
+            raise ValueError(f"{path.name} contains no data rows")
+        return values
+
+
+def _require_label_coverage(
+    root: Path, expected_features: Path, *, id_column: str
+) -> None:
+    """Require frozen evaluator labels to cover exactly its own feature split."""
+    labels_file = root / "labels.csv"
+    label_files = (
+        [labels_file]
+        if labels_file.is_file()
+        else sorted((root / "labels").rglob("*.csv"))
+    )
+    expected_ids = _csv_identity_values(expected_features, id_column)
+    actual_ids: set[str] = set()
+    for path in label_files:
+        current = _csv_identity_values(path, id_column)
+        if actual_ids.intersection(current):
+            raise ValueError(
+                "evaluator labels contain duplicate identity values across files"
+            )
+        actual_ids.update(current)
+    missing = len(expected_ids - actual_ids)
+    extra = len(actual_ids - expected_ids)
+    if missing or extra:
+        raise ValueError(
+            "evaluator labels do not exactly cover this split's feature rows "
+            f"(missing {missing}, unexpected {extra}); rebuild labels from the "
+            "matching SEARCH or FINAL split only"
+        )
+
+
 def _require_joinable_labels_dir(
     labels_dir: Path, *, id_column: str = DEFAULT_PREDICTION_ID_COLUMN
 ) -> None:
@@ -67,8 +183,10 @@ def _require_joinable_labels_dir(
         _require_joinable_labels(path, id_column=id_column)
 
 
-def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
-    """Return the evaluator root, entrypoint, and prediction format."""
+def _evaluator_layout(
+    root: Path,
+) -> tuple[Path, str, str, EvaluatorSpec | None]:
+    """Read and validate the evaluator contract, then resolve its entrypoint."""
     spec_path = root / "metric.json"
     if not spec_path.is_file():
         existing = sorted(p.name for p in root.iterdir())[:10] if root.is_dir() else []
@@ -79,12 +197,19 @@ def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
             "created anywhere else do not count."
         )
     try:
-        spec = json.loads(spec_path.read_text(encoding="utf-8"))
-        evaluator_rel = spec["eval_script"]
-    except (OSError, ValueError, KeyError, TypeError):
-        # metric.json is unreadable or lacks eval_script, so freeze must reject it.
-        raise ValueError("metric.json must declare eval_script")
-    prediction_format = spec.get("prediction_format", "tabular_csv")
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # Invalid JSON or an unreadable contract cannot be frozen.
+        raise ValueError("metric.json must declare eval_script") from exc
+    if not isinstance(payload, dict):
+        raise TypeError("metric.json must contain a JSON object")
+    try:
+        evaluator_rel = payload["eval_script"]
+    except KeyError as exc:
+        # Freeze requires an explicit entrypoint, including for v2 contracts.
+        raise ValueError("metric.json must declare eval_script") from exc
+    if not isinstance(evaluator_rel, str):
+        raise TypeError("metric.json eval_script must be a string")
     try:
         evaluator_path = resolve_workspace_path(root, evaluator_rel)
     except ValueError as exc:
@@ -103,15 +228,23 @@ def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
         entrypoint = evaluator_path.name
     else:
         raise ValueError("eval_script is missing")
-    return evaluator_root, entrypoint, prediction_format
+    spec = parse_evaluator_spec(payload)
+    prediction_format = (
+        spec.prediction_format
+        if spec is not None
+        else payload.get("prediction_format", "tabular_csv")
+    )
+    return evaluator_root, entrypoint, prediction_format, spec
 
 
-def _evaluator_readme(root: Path, *, entrypoint: str, prediction_format: str) -> str:
+def _evaluator_readme(
+    root: Path,
+    *,
+    entrypoint: str,
+    prediction_format: str,
+    spec: EvaluatorSpec | None,
+) -> str:
     """Build the freeze marker for an accepted evaluator."""
-    spec = None
-    metric_path = root / "metric.json"
-    if metric_path.is_file():
-        spec = load_evaluator_spec(root)
     contract_lines = ""
     if spec is not None:
         probabilities = ", ".join(spec.probability_columns) or "none"
@@ -145,19 +278,21 @@ async def _validate_frozen_evaluator(
     *,
     root: Path,
     scripts: DataScriptRunner,
+    layout: tuple[Path, str, str, EvaluatorSpec | None],
+    expected_features: Path | None = None,
 ) -> None:
     """Run format-aware property tests on a frozen evaluator directory."""
-    evaluator_root, entrypoint, prediction_format = _evaluator_layout(root)
-    spec = (
-        load_evaluator_spec(evaluator_root)
-        if (evaluator_root / "metric.json").is_file()
-        else None
-    )
+    evaluator_root, entrypoint, prediction_format, spec = layout
     id_column = spec.prediction_id_column if spec is not None else ROW_ID_COLUMN
     prediction_column_from_spec = spec.prediction_column if spec is not None else None
     if spec is not None:
-        required = ("metric.json", entrypoint, "HANDOFF.md", "pyproject.toml")
-        missing = [name for name in required if not (evaluator_root / name).is_file()]
+        required = {
+            "metric.json": root / "metric.json",
+            entrypoint: evaluator_root / entrypoint,
+            "HANDOFF.md": evaluator_root / "HANDOFF.md",
+            "pyproject.toml": evaluator_root / "pyproject.toml",
+        }
+        missing = [name for name, path in required.items() if not path.is_file()]
         if missing:
             raise ValueError(
                 "new evaluator bundle is missing required files: " + ", ".join(missing)
@@ -187,28 +322,16 @@ async def _validate_frozen_evaluator(
     else:
         raise ValueError("no labels found for evaluator property tests")
 
-    # Read the declared prediction column, then fall back to evaluator source.
-    handoff_path = evaluator_root / "HANDOFF.md"
-    handoff_text = (
-        handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+    if expected_features is not None:
+        _require_label_coverage(evaluator_root, expected_features, id_column=id_column)
+
+    # Resolve declarations before the legacy prose/source fallbacks.
+    prediction_column = _resolve_prediction_column(
+        prediction_column_from_spec, evaluator_root, entrypoint
     )
-    prediction_column = extract_prediction_column(handoff_text)
-    if prediction_column is None:
-        prediction_column = prediction_column_from_spec
-    if prediction_column is None:
-        source_path = evaluator_root / entrypoint
-        source = (
-            source_path.read_text(encoding="utf-8", errors="replace")
-            if source_path.is_file()
-            else ""
-        )
-        prediction_column = extract_prediction_column_from_source(source)
-    if prediction_column is None:
-        raise ValueError(
-            "cannot determine the tabular prediction CSV column from either "
-            "HANDOFF.md or the evaluator source; declare it in HANDOFF.md or "
-            "make evaluate.py read a clearly named prediction column"
-        )
+    label_column = _resolve_label_column(
+        spec.label_column if spec is not None else None, evaluator_root, entrypoint
+    )
 
     prediction_file = spec.prediction_file if spec is not None else "predictions.csv"
 
@@ -229,6 +352,7 @@ async def _validate_frozen_evaluator(
         score,
         prediction_column=prediction_column,
         prediction_id_column=id_column,
+        label_column=label_column,
         probability_columns=spec.probability_columns if spec is not None else (),
     )
     if not outcome.get("ok"):
@@ -241,6 +365,7 @@ async def run_evaluator_plan(
     task: str,
     plan_id: str,
     max_turns: int,
+    expected_features: Path | None = None,
 ) -> ArtifactRef:
     """Run and repair one evaluator Agent until its bundle is accepted."""
     if max_turns < 1:
@@ -296,15 +421,19 @@ async def run_evaluator_plan(
                 )
                 continue
             try:
-                _, entrypoint, prediction_format = _evaluator_layout(root)
+                layout = _evaluator_layout(root)
+                _evaluator_root, entrypoint, prediction_format, spec = layout
                 await _validate_frozen_evaluator(
                     root=root,
                     scripts=runtime.scripts,
+                    expected_features=expected_features,
+                    layout=layout,
                 )
                 readme_text = _evaluator_readme(
                     root,
                     entrypoint=entrypoint,
                     prediction_format=prediction_format,
+                    spec=spec,
                 )
                 (root / "README.md").write_text(readme_text, encoding="utf-8")
                 readme_ref = await runtime.store.put_text(readme_text)
@@ -317,7 +446,7 @@ async def run_evaluator_plan(
                     ).model_dump_json()
                 )
                 return evaluator_ref
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            except (OSError, TypeError, ValueError, subprocess.SubprocessError) as exc:
                 # Freeze validation failed, so return concise feedback to this Plan.
                 feedback = " ".join(str(exc).split())[:1000]
                 logger.warning(

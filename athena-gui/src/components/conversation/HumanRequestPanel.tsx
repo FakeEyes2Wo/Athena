@@ -44,6 +44,7 @@ export function HumanRequestPanel({
 }: HumanRequestPanelProps) {
   const [localError, setLocalError] = useState<string | null>(null);
   const submittingRef = useRef(false);
+  const requestEpoch = useRef(0);
   const [submitting, setSubmitting] = useState(false);
   const choicesRef = useRef<HTMLDivElement | null>(null);
   const remaining = useRemainingSeconds(request.expires_at);
@@ -52,20 +53,29 @@ export function HumanRequestPanel({
     setLocalError(null);
     submittingRef.current = false;
     setSubmitting(false);
+    return () => {
+      // Replies can finish after a different question is shown or the panel closes.
+      requestEpoch.current += 1;
+    };
   }, [request.request_id]);
 
   const submit = async (reply: HumanReply) => {
     if (settling || submittingRef.current) return;
+    const epoch = requestEpoch.current;
     submittingRef.current = true;
     setSubmitting(true);
     try {
       await onReply(reply);
-      setLocalError(null);
+      if (requestEpoch.current === epoch) setLocalError(null);
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err));
+      if (requestEpoch.current === epoch) {
+        setLocalError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      if (requestEpoch.current === epoch) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   };
 

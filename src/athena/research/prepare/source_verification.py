@@ -33,9 +33,10 @@ from .baseline_research import (
     BaselineVerification,
     VerificationAttempt,
     assert_verification_matches_artifacts,
+    authority_titles_match,
     design_sha256,
     research_sha256,
-    titles_match,
+    titles_match,  # noqa: F401 - compatibility re-export
 )
 from .repository_url import (
     _is_public_repository_address,
@@ -73,6 +74,7 @@ def _trusted_git_candidates() -> tuple[tuple[Path, Path], ...]:
         try:
             root = Path(value).resolve(strict=True)
         except OSError:
+            # Trigger: an environment-listed install root is missing or inaccessible.
             continue
         if not root.is_dir() or root in seen_roots:
             continue
@@ -94,6 +96,7 @@ def _capture_git_executable() -> str | None:
             resolved_root = trusted_root.resolve(strict=True)
             resolved = candidate.resolve(strict=True)
         except OSError:
+            # Trigger: the candidate Git executable is missing or inaccessible.
             continue
         if (
             resolved.is_file()
@@ -217,6 +220,7 @@ def _resolve_public_host_addresses(host: str, port: int) -> tuple[str, ...]:
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
+        # Trigger: the host is a DNS name rather than an IPv4 or IPv6 literal.
         literal = None
     if literal is not None:
         if not _is_public_repository_address(literal):
@@ -232,6 +236,7 @@ def _resolve_public_host_addresses(host: str, port: int) -> tuple[str, ...]:
             proto=socket.IPPROTO_TCP,
         )
     except OSError:
+        # Trigger: DNS lookup fails for the repository host.
         raise ValueError("repository hostname resolution failed") from None
 
     addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
@@ -241,6 +246,7 @@ def _resolve_public_host_addresses(host: str, port: int) -> tuple[str, ...]:
         try:
             address = ipaddress.ip_address(sockaddr[0])
         except ValueError:
+            # Trigger: DNS returned an address string that is not an IP literal.
             raise ValueError("repository hostname resolution was invalid") from None
         if (family == socket.AF_INET) != isinstance(address, ipaddress.IPv4Address):
             raise ValueError("repository hostname resolution was invalid")
@@ -279,6 +285,7 @@ class GitCloneVerifier:
         try:
             normalized_url = normalize_public_https_repository_url(repository_url)
         except ValueError as exc:
+            # Trigger: the supplied URL is malformed or fails the public-HTTPS policy.
             self._raise_failure(str(exc))
         parsed_url = urlsplit(normalized_url)
         host = parsed_url.hostname
@@ -288,6 +295,7 @@ class GitCloneVerifier:
         try:
             ipaddress.ip_address(host)
         except ValueError:
+            # Trigger: the parsed host is a DNS name, so resolve and pin its addresses.
             host_is_literal = False
         else:
             host_is_literal = True
@@ -306,6 +314,7 @@ class GitCloneVerifier:
                 if repeated_addresses != addresses:
                     raise ValueError("repository hostname resolution changed")
         except (OSError, ValueError) as exc:
+            # Trigger: DNS fails or resolves to any non-public repository address.
             self._raise_failure(str(exc))
 
         environment = _clean_environment()
@@ -426,10 +435,12 @@ class GitCloneVerifier:
         try:
             return await self.runner(argv, cwd=cwd, env=env, timeout_s=self.timeout_s)
         except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            # Trigger: starting Git times out or Git exceeds its configured run deadline.
             self._raise_failure(
                 f"git {operation} timed out after {self.timeout_s:g} seconds: {exc}"
             )
         except (OSError, ValueError) as exc:
+            # Trigger: Git cannot start because its executable or temporary worktree is unavailable.
             self._raise_failure(f"git {operation} could not be started: {exc}")
 
     @staticmethod
@@ -486,6 +497,7 @@ class BaselineSourceVerifier:
                 assert_verification_matches_artifacts(artifacts, verification)
                 return verification
             except BaselineResearchError as error:
+                # Trigger: the baseline artifact fails domain validation.
                 attempts.append(
                     VerificationAttempt(
                         route="git", success=False, diagnostic=_joined_diagnostic(error)
@@ -514,7 +526,7 @@ class BaselineSourceVerifier:
                             diagnostic="OpenAlex did not resolve the paper locator",
                         )
                     )
-                elif not work.openalex_id.strip() or not titles_match(
+                elif not work.openalex_id.strip() or not authority_titles_match(
                     work.title, work.title
                 ):
                     attempts.append(
@@ -524,12 +536,18 @@ class BaselineSourceVerifier:
                             diagnostic="OpenAlex returned incomplete work identity",
                         )
                     )
-                elif not titles_match(selected.title, work.title):
+                elif not authority_titles_match(selected.title, work.title):
+                    selected_title = _bounded_diagnostic(selected.title)[:1200]
+                    resolved_title = _bounded_diagnostic(work.title)[:1200]
                     attempts.append(
                         VerificationAttempt(
                             route="openalex",
                             success=False,
-                            diagnostic="OpenAlex title does not match selected source",
+                            diagnostic=_bounded_diagnostic(
+                                "OpenAlex title does not match selected source; "
+                                f"selected title={selected_title!r}; "
+                                f"OpenAlex title={resolved_title!r}"
+                            ),
                         )
                     )
                 elif work.cited_by_count < AUTHORITY_CITATION_THRESHOLD:
@@ -567,6 +585,7 @@ class BaselineSourceVerifier:
                             ],
                         )
                     except ValidationError:
+                        # Trigger: decoded data violates the declared model schema.
                         attempts.append(
                             VerificationAttempt(
                                 route="openalex",

@@ -6,8 +6,6 @@ The Python runtime uses these Pydantic models as the boundary contract; other
 languages consume the same ``test/fixtures/clarification`` JSON fixtures.
 """
 
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -103,6 +101,8 @@ class HumanRequest(BaseModel):
 
 
 class ChoiceReply(BaseModel):
+    """Client selection of one value advertised by a human request."""
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
     kind: Literal["choice"]
@@ -110,6 +110,8 @@ class ChoiceReply(BaseModel):
 
 
 class TextReply(BaseModel):
+    """Client free-text answer, validated before broker settlement."""
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
     kind: Literal["text"]
@@ -117,6 +119,8 @@ class TextReply(BaseModel):
 
 
 class SkipReply(BaseModel):
+    """Explicit client request to skip an optional human question."""
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
     kind: Literal["skip"]
@@ -176,7 +180,8 @@ def parse_human_reply(
             raise HumanContractError("invalid_reply", "legacy answer must be a string")
         try:
             return TextReply(kind="text", text=legacy_answer)
-        except Exception as error:
+        except ValidationError as error:
+            # Legacy text still has to satisfy the canonical reply length contract.
             raise HumanContractError(
                 "invalid_reply", "legacy answer is not valid text reply"
             ) from error
@@ -194,7 +199,7 @@ def parse_human_reply(
 
 
 def _parse_reply_payload(payload: object, kind: object) -> HumanReply:
-    model = _REPLY_MODELS.get(kind)  # type: ignore[arg-type]
+    model = _REPLY_MODELS.get(kind) if isinstance(kind, str) else None
     if model is None:
         raise HumanContractError(
             "invalid_reply",
@@ -203,6 +208,7 @@ def _parse_reply_payload(payload: object, kind: object) -> HumanReply:
     try:
         return model.model_validate(payload)
     except ValidationError as error:
+        # The client selected a valid reply kind but supplied invalid fields.
         raise HumanContractError(
             "invalid_reply", f"invalid {kind!r} reply payload"
         ) from error

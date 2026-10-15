@@ -16,6 +16,7 @@ from athena.research.config import (
     RuntimeDependencies,
     TaskConfig,
 )
+from athena.research.prepare.authority_local import LocalBaselineAuthorityStore
 from athena.research.runtime.resume_contract import ResearchControlError
 
 
@@ -31,7 +32,10 @@ def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRu
             task=TaskConfig(auto_seed=auto_seed_task, auto_confirm=True)
         ),
         dependencies=RuntimeDependencies(
-            provider=ProviderConfig(model="fake", client=object())
+            provider=ProviderConfig(model="fake", client=object()),
+            baseline_authority=LocalBaselineAuthorityStore(
+                tmp_path / "controller", tmp_path, "default"
+            ),
         ),
     )
 

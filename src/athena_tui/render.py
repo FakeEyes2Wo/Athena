@@ -11,6 +11,26 @@ from athena_tui.state import CONFIRMATION, HistoryEntry, TuiState, _IDEATOR_PLAN
 Fragment = tuple[str, str]
 Fragments = list[Fragment]
 
+# Owl and branch from PR #35: athena-gui/public/athena-logo-{light,dark}.png.
+_WELCOME_LOGO = (
+    "    ##              ##",
+    "    ####          ####",
+    "    ##################",
+    "    ##  oo######oo  ##",
+    "    ########  ########",
+    "    ##################",
+    "      ##############",
+    "        ##      ##",
+    "      ==============",
+    "            ||",
+    "....        ||",
+    "............||",
+    "            ||",
+    "            ||",
+    "          ======",
+    "          ======",
+)
+
 HELP_TEXT = """输入
 Enter 发送    Shift+Enter 换行    Ctrl+J 换行
 
@@ -273,11 +293,13 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
     lane_count = 0
 
     def flush_ordinary() -> None:
+        """Render buffered non-Ideator entries before changing display lanes."""
         if ordinary:
             output.extend(_render_entry_lines(ordinary, width))
             ordinary.clear()
 
     def flush_board() -> None:
+        """Render and clear buffered Ideator lanes before ordinary history."""
         nonlocal lane_count
         if lane_count <= 1:
             # 单 lane 不分屏：按普通条目渲染，不产生 "Ideator N" 标题栏。
@@ -470,6 +492,45 @@ def join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
             output.append(("", "\n"))
         output.extend(line)
     return output
+
+
+def render_welcome(width: int, height: int) -> StyleAndTextTuples:
+    """Fit the owl-and-branch logo into an empty terminal history pane."""
+    logo = _WELCOME_LOGO
+    if width < 22 or height < len(logo) + 2:
+        logo = (
+            " /\\___/\\",
+            "( o v o )",
+            " \\_|_|_/",
+            "====|====",
+            " ___|",
+            "    |",
+        )
+    if height < len(logo) + 2:
+        logo = ()
+
+    # Keep the mark's proportions; the compact version retains its branch.
+    logo_width = max((len(line) for line in logo), default=0)
+    rows: list[StyleAndTextTuples] = []
+    for line in logo:
+        padding = " " * max(0, (width - logo_width) // 2)
+        row: StyleAndTextTuples = [("", padding)]
+        for char in line[:width]:
+            style = "class:logo"
+            if char == "o":
+                style = "class:logo.eye"
+            elif char in "=|.":
+                style = "class:logo.perch"
+            row.append((style, char))
+        rows.append(row)
+    if logo:
+        rows.append([])
+    title = "Athena"[:width]
+    rows.append(
+        [("class:header.brand", " " * max(0, (width - len(title)) // 2) + title)]
+    )
+    padding_rows = max(0, (height - len(rows)) // 2)
+    return join_lines(tuple([[] for _ in range(padding_rows)] + rows))
 
 
 def render_bottom_pane(state: TuiState, width: int) -> StyleAndTextTuples:

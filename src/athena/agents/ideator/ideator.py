@@ -15,11 +15,6 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from athena.app_server.thread_manager import RuntimeThreadManager
-from athena.core.agent import AgentOutcome
-from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
-from athena.core.research_models import Hypothesis
-from athena.core.research_tree import ResearchTree
 from athena.agents.ideator.types import (
     DebateResult,
     _JudgeOutput,
@@ -28,6 +23,11 @@ from athena.agents.ideator.types import (
     _RevisionBatch,
     _TurnRequest,
 )
+from athena.app_server.thread_manager import RuntimeThreadManager
+from athena.core.agent import AgentOutcome
+from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
+from athena.core.research_models import Hypothesis
+from athena.core.research_tree import ResearchTree
 
 _OUTPUT_TYPES = {
     "proposal": _ProposalBatch,
@@ -164,11 +164,13 @@ class Ideator:
             async with asyncio.timeout(self._config.stage_timeout_seconds):
                 result_ref = await manager.wait_turn(thread_id, turn.turn_id)
         except TimeoutError:
+            # Trigger: the configured wait deadline expires.
             try:
                 await manager.interrupt(
                     thread_id, turn.turn_id, "ideator stage timeout"
                 )
             except RuntimeError as exc:
+                # Trigger: interrupt races with a turn that already finished; other runtime errors still propagate.
                 if str(exc) != f"no active turn {turn.turn_id}":
                     raise
             raise
@@ -569,8 +571,10 @@ class Ideator:
                     hypotheses = self._validated_hypotheses(judge_output, parent_id)
                     break
                 except asyncio.CancelledError:
+                    # Trigger: the judge stage is cancelled; propagate instead of consuming a retry attempt.
                     raise
-                except BaseException as exc:
+                # Retry provider or judge-validation failures with the next attempt.
+                except Exception as exc:  # noqa: BLE001
                     last_judge_error = exc
             if judge_output is None or hypotheses is None:
                 raise RuntimeError("ideator judge failed") from last_judge_error

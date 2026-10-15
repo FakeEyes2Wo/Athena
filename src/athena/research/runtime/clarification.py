@@ -32,6 +32,12 @@ def _store(runtime: Any) -> ClarificationStore:
     return ClarificationStore(state_root)
 
 
+def current_draft(runtime: Any) -> ClarificationDraft | None:
+    """Read the session's canonical draft without starting or advancing it."""
+    store = _store(runtime)
+    return store.load() if store.exists() else None
+
+
 async def confirm_and_start(
     runtime: Any,
     draft_id: str,

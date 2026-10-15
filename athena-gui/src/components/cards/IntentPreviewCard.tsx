@@ -20,7 +20,7 @@ const STATUS_META: Record<string, { label: string; tone: string }> = {
   CLARIFYING: { label: "理解中", tone: "warning" },
   READY_FOR_CONFIRMATION: { label: "待确认", tone: "accent" },
   CONFIRMING: { label: "启动中", tone: "warning" },
-  RUNNING: { label: "运行中", tone: "success" },
+  RUNNING: { label: "已启动", tone: "success" },
   FAILED: { label: "失败", tone: "danger" },
   IDLE: { label: "已取消", tone: "neutral" },
 };

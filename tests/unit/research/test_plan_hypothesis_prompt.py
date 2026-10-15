@@ -96,6 +96,10 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prefer robust scaling", content)
         # 契约那一段是同一条教训的第一处落点，不能在修第二处时把它弄丢
         self.assertIn("row_id", content)
+        workspace = (Path("isolated-worktrees") / "hyp_abc").resolve()
+        self.assertIn(f"Workspace for this Plan: {workspace}", content)
+        self.assertIn("omit shell workdir", content)
+        self.assertIn("ATHENA_ENV_ROOT", content)
 
 
 class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
@@ -138,8 +142,10 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("execution_failed", content)
         self.assertIn("Do not resubmit the same experiment unchanged", content)
 
-    async def test_the_failure_is_consumed_once_not_repeated_forever(self) -> None:
-        """已经修好的错误不该一直挂在 prompt 里误导后续每一轮。"""
+    async def test_missing_result_replaces_previous_failure_with_current_cause(
+        self,
+    ) -> None:
+        """A missing Agent result is a new failure, not proof of a successful repair."""
         sent: dict[str, object] = {}
         supervisor = self._supervisor(
             sent, _plan_state(last_failure="output_failed: nope")
@@ -147,7 +153,12 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
 
         await supervisor._plans.run_turn("hyp_abc")
 
-        self.assertIsNone(supervisor.state.plans["hyp_abc"].last_failure)
+        self.assertIn("output_failed", sent["content"])
+        self.assertIn("nope", sent["content"])
+        self.assertIn(
+            "missing structured PlanDecision",
+            supervisor.state.plans["hyp_abc"].last_failure,
+        )
 
     async def test_a_clean_previous_turn_adds_nothing(self) -> None:
         sent: dict[str, object] = {}
@@ -170,18 +181,24 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("primary score is not finite", stored)
 
     async def test_a_scored_result_records_nothing(self) -> None:
-        supervisor = self._supervisor({}, _plan_state())
-
-        await supervisor._plans._record_turn_failure(
-            "hyp_abc", SimpleNamespace(kind="scored", error=None)
+        supervisor = self._supervisor(
+            {}, _plan_state(last_failure="output_failed: nope")
+        )
+        result = SimpleNamespace(
+            kind="scored",
+            error=None,
+            next_state=_plan_state(last_failure="output_failed: nope"),
         )
 
-        self.assertIsNone(supervisor.state.plans["hyp_abc"].last_failure)
+        await supervisor._plans._record_turn_failure("hyp_abc", result)
+
+        self.assertIsNone(result.next_state.last_failure)
 
 
 def _plan_state(*, last_failure: str | None = None) -> SimpleNamespace:
     """A stand-in for ``PlanState`` that supports the one ``model_copy`` we use."""
     state = SimpleNamespace(
+        kind="SEARCH",
         turns_used=0,
         turn_limit=4,
         patience=2,
@@ -231,6 +248,11 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
         ),
     )
     supervisor._plans.persist_state = _noop
+    for plan_id in state.plans:
+        supervisor._run.add_branch(
+            plan_id,
+            SimpleNamespace(path=str(Path("isolated-worktrees") / plan_id)),
+        )
 
     async def plan_input(plan_id: str):
         try:
@@ -242,6 +264,9 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
             human_context="prefer robust scaling",
             hypothesis=hypothesis,
             eval_handoff=await _handoff(plan_id),
+            reference_metric=0.71,
+            direction="maximize",
+            tolerance=0.005,
         )
 
     supervisor._plans.plan_input = plan_input

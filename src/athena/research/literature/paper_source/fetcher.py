@@ -31,7 +31,6 @@ from athena.research.literature.contracts import (
     ProcessingDiagnostic,
     TexSourceFormat,
 )
-from athena.research.literature.source_payload import MAX_SOURCE_BYTES, is_tar_payload
 from athena.research.literature.paper_source.arxiv import (
     ArxivClient,
     ArxivMetadata,
@@ -56,6 +55,7 @@ from athena.research.literature.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
+from athena.research.literature.source_payload import MAX_SOURCE_BYTES, is_tar_payload
 
 TEX_MARKERS = (b"\\documentclass", b"\\begin{document}", b"\\section", b"\\input{")
 TEX_FORMATS = frozenset({"auto", "tar", "tar.gz", "zip", "gzip", "plain"})
@@ -79,6 +79,7 @@ def _decompress_gzip(payload: bytes) -> bytes:
         with gzip.GzipFile(fileobj=io.BytesIO(payload)) as archive:
             decompressed = archive.read(MAX_SOURCE_BYTES + 1)
     except OSError as error:
+        # Trigger: downloaded bytes are not a valid gzip stream or exceed decompression limits.
         raise PayloadError("Invalid gzip TeX source.") from error
     if len(decompressed) > MAX_SOURCE_BYTES:
         raise PayloadError("Gzip TeX source exceeds the 256 MiB safety limit.")
@@ -90,6 +91,7 @@ def _gzip_format(payload: bytes) -> TexSourceFormat | None:
     try:
         inner = _decompress_gzip(payload)
     except PayloadError:
+        # Trigger: gzip decoding fails, so the payload is classified as non-gzip input.
         return None
     return "tar.gz" if is_tar_payload(inner) else "gzip"
 

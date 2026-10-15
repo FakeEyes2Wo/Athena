@@ -25,6 +25,16 @@ TRANSFER_FILES = 4
 # 保留多少 stderr 用于解释掉线。
 DIAGNOSTIC_TAIL_BYTES = 4096
 
+# Sending a best-effort remote cancel must not hold the caller's original
+# cancellation/error behind a stalled SSH write.
+SPAWN_CANCEL_TIMEOUT_S = 1.0
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    """Retrieve a detached cleanup task's exception to avoid loop warnings."""
+    if not task.cancelled():
+        task.exception()
+
 
 class RemoteError(RuntimeError):
     """远端把一个请求判成失败。"""
@@ -71,6 +81,7 @@ class StderrTail:
                 if len(self._buffer) > DIAGNOSTIC_TAIL_BYTES * 2:
                     del self._buffer[:-DIAGNOSTIC_TAIL_BYTES]
         except (asyncio.CancelledError, ConnectionError, OSError, ValueError):
+            # The channel is closing or stderr has disconnected; stop draining quietly.
             return
 
     def stop(self) -> None:
@@ -129,6 +140,7 @@ class SubprocessTransport:
             try:
                 proc.kill()
             except ProcessLookupError:
+                # The process exited between lookup and the signal or termination request.
                 pass
         await proc.wait()
 
@@ -166,6 +178,7 @@ class RemoteChannel:
         ] = {}
         self._counter = 0
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
         self.ready: dict[str, Any] = {}
         self._write_lock = asyncio.Lock()
 
@@ -176,38 +189,53 @@ class RemoteChannel:
 
     async def open(self) -> dict[str, Any]:
         """连上、喂源码、等 ``ready``；握手不成立即失败。"""
-        self._writer, self._reader = await self._transport.start()
-        self._writer.write(bootstrap_payload())
-        await self._writer.drain()
-        ready = asyncio.get_running_loop().create_future()
-        self._pending["@ready"] = ready
-        self._pump = asyncio.create_task(self._read_loop())
         try:
-            self.ready = await asyncio.wait_for(ready, timeout=HANDSHAKE_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            await self.close()
-            raise RemoteError(
-                f"remote agent did not report ready on {self.description}"
-            ) from None
-        except RemoteError:
+            self._writer, self._reader = await self._transport.start()
+            self._writer.write(bootstrap_payload())
+            await self._writer.drain()
+            ready = asyncio.get_running_loop().create_future()
+            self._pending["@ready"] = ready
+            self._pump = asyncio.create_task(self._read_loop())
+            try:
+                self.ready = await asyncio.wait_for(ready, timeout=HANDSHAKE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # The operation exceeded its configured deadline.
+                raise RemoteError(
+                    f"remote agent did not report ready on {self.description}"
+                ) from None
+            if self.ready.get("op") == "fatal":
+                raise RemoteError(
+                    f"remote agent refused to start on {self.description}: "
+                    f"{self.ready.get('error')}"
+                )
+            # 必须在这里补一次 probe：事实缺失会让 Runtime 块充满缺省值，错法不报错。
+            facts = await self.request("probe")
+            self.ready = {**self.ready, **facts, "op": "ready"}
+            return self.ready
+        except BaseException:
+            # 启动、写入、握手或 probe 失败/被取消 → 关闭部分建立的传输后传播。
             await self.close()
             raise
-        if self.ready.get("op") == "fatal":
-            await self.close()
-            raise RemoteError(
-                f"remote agent refused to start on {self.description}: "
-                f"{self.ready.get('error')}"
-            )
-        # 必须在这里补一次 probe：事实缺失会让 Runtime 块充满缺省值，错法不报错。
-        facts = await self.request("probe")
-        self.ready = {**self.ready, **facts, "op": "ready"}
-        return self.ready
 
     async def close(self) -> None:
-        """关闭通道。"""
-        if self._closed:
-            return
+        """关闭通道并等待资源清理；可从 EOF 后调用且可安全重复调用。"""
         self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close_resources())
+        interrupted = False
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                # The caller cancelled this await; cleanup runs before cancellation propagates.
+                if self._close_task.cancelled():
+                    raise
+                interrupted = True
+        self._close_task.result()
+        if interrupted:
+            raise asyncio.CancelledError
+
+    async def _close_resources(self) -> None:
         writer = self._writer
         self._writer = None
         if writer is not None:
@@ -216,15 +244,24 @@ class RemoteChannel:
                     writer.write_eof()
                 writer.close()
             except (OSError, RuntimeError):
+                # A closed writer cannot send EOF, but remaining transport cleanup must run.
                 pass
-        await self._transport.stop()
-        if self._pump is not None:
-            self._pump.cancel()
-            try:
-                await self._pump
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._fail_pending(RemoteError("remote channel closed"))
+        try:
+            await self._transport.stop()
+        finally:
+            pump = self._pump
+            self._pump = None
+            if pump is not None and pump is not asyncio.current_task():
+                pump.cancel()
+                try:
+                    await pump
+                except asyncio.CancelledError:
+                    # 通道关闭主动取消 reader pump，完成后继续结算其他请求。
+                    pass
+                except Exception:
+                    # Reader 已异常退出时，关闭仍须继续完成 pending 清理。
+                    pass
+            self._fail_pending(RemoteError("remote channel closed"))
 
     async def request(self, op: str, **fields: Any) -> dict:
         """发一条请求并等它的终结响应（``ok`` / 该 op 自己的结果 / ``error``）。"""
@@ -236,7 +273,15 @@ class RemoteChannel:
         request_id = self._next_id()
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        await self._send({"op": op, "id": request_id, **fields})
+        try:
+            await self._send({"op": op, "id": request_id, **fields})
+        except BaseException:
+            # 请求未成功写入或写入时被取消 → 移除没有响应方的 future 后传播。
+            self._pending.pop(request_id, None)
+            self._collect.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+            raise
         return future
 
     async def spawn(
@@ -267,8 +312,36 @@ class RemoteChannel:
             payload["argv"] = command
         if shell is not None:
             payload["shell"] = shell
-        await self._send(payload)
-        await started
+        try:
+            await self._send(payload)
+            await started
+        except BaseException:
+            # 启动请求失败/调用者取消 → 丢弃本地状态，并尽力取消可能已到达的远端作业。
+            self._pending.pop(job_id, None)
+            self._jobs.pop(job_id, None)
+            if not started.done():
+                started.cancel()
+            if not exited.done():
+                exited.cancel()
+            cancel_send = asyncio.create_task(
+                self._send({"op": "cancel", "id": self._next_id(), "target": job_id})
+            )
+            # The bounded wait may detach a cancellation-resistant writer; retrieve
+            # its eventual exception without extending the caller's cleanup wait.
+            cancel_send.add_done_callback(_consume_task_exception)
+            try:
+                done, _pending = await asyncio.wait(
+                    {cancel_send}, timeout=SPAWN_CANCEL_TIMEOUT_S
+                )
+                if done:
+                    cancel_send.result()
+                else:
+                    cancel_send.cancel()
+            except BaseException:
+                # Preserve the original spawn failure/cancellation; best-effort
+                # cleanup is bounded and its write must not replace that cause.
+                cancel_send.cancel()
+            raise
         return job_id, exited
 
     async def cancel(self, job_id: str) -> None:
@@ -398,6 +471,7 @@ class RemoteChannel:
                 try:
                     line = await reader.readline()
                 except ValueError as exc:
+                    # The supplied value cannot be parsed or is invalid for the requested operation.
                     self._fail_pending(
                         RemoteError(f"remote line exceeded the buffer limit: {exc}")
                     )
@@ -407,9 +481,11 @@ class RemoteChannel:
                 try:
                     message = json.loads(line.decode("utf-8"))
                 except ValueError:
+                    # The supplied value cannot be parsed or is invalid for the requested operation.
                     continue
                 self._dispatch(message)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            # EOF or transport loss ends the reader loop after pending requests are failed.
             pass
         finally:
             self._closed = True

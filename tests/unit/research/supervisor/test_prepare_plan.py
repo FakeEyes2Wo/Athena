@@ -16,6 +16,7 @@ from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.prepare.baseline_research import BaselineResearchError
 from athena.research.supervisor import prepare
 from athena.research.supervisor.evaluator_plan import (
+    _evaluator_layout,
     _validate_frozen_evaluator,
     run_evaluator_plan,
 )
@@ -471,11 +472,17 @@ async def test_prepare_result_requires_every_trusted_artifact(
 
     assert agents.created == ["prepare"]
     assert len(agents.feedback) == 1
-    assert agents.feedback[0].startswith(expected_error)
+    assert expected_error in agents.feedback[0]
+    assert "PREPARE repair turn 2/2" in agents.feedback[0]
+    assert str(workspace_path.resolve()) in agents.feedback[0]
+    assert "use the workspace and shell tools" in agents.feedback[0]
 
 
 @pytest.mark.asyncio
-async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("timeout_s", [None, 120])
+async def test_prepare_returns_result_on_trusted_baseline(
+    tmp_path: Path, monkeypatch, timeout_s: int | None
+) -> None:
     workspace_path = tmp_path / "eda"
     _write_eda_workspace(workspace_path, missing=None)
     store = _Store(tmp_path / "artifacts")
@@ -483,6 +490,17 @@ async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> Non
     evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
     tree_ref = await store.put_text('{"experiments": []}')
 
+    original_runner = prepare.PlanRunner
+    captured_timeouts: list[int] = []
+
+    def capture_runner(*args, **kwargs):
+        runner = original_runner(*args, **kwargs)
+        captured_timeouts.append(runner._timeout_s)
+        return runner
+
+    monkeypatch.setattr(prepare, "PlanRunner", capture_runner)
+
+    run_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
     result = await run_prepare_plan(
         agents=agents,
         evaluator=_Evaluator(),
@@ -497,6 +515,7 @@ async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> Non
         task="build baseline",
         max_turns=2,
         assert_baseline=_passing_baseline_guard,
+        **run_kwargs,
     )
 
     assert result.metric == 0.75
@@ -504,6 +523,9 @@ async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> Non
     assert result.commit == "commit-baseline"
     assert agents.created == ["prepare"]
     assert agents.feedback == []
+    assert captured_timeouts == [
+        prepare.DEFAULT_EXPERIMENT_TIMEOUT_S if timeout_s is None else timeout_s
+    ]
 
 
 @pytest.mark.asyncio
@@ -535,7 +557,98 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == ["row ids do not align"]
+    assert len(agents.feedback) == 1
+    assert "row ids do not align" in agents.feedback[0]
+
+
+@pytest.mark.asyncio
+async def test_prepare_repair_feedback_tracks_budget_and_repeated_failure(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "eda"
+    _write_eda_workspace(workspace_path, missing=None)
+    store = _Store(tmp_path / "artifacts")
+    agents = _AgentRuntime(store.inner)
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    with pytest.raises(RuntimeError, match="turn budget exhausted"):
+        await run_prepare_plan(
+            agents=agents,
+            evaluator=_FailingEvaluator(),
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=3,
+            assert_baseline=_passing_baseline_guard,
+        )
+
+    assert len(agents.feedback) == 2
+    first, second = agents.feedback
+    assert "PREPARE repair turn 2/3; 2 attempts remain" in first
+    assert "PREPARE repair turn 3/3; 1 attempt remain" in second
+    assert (
+        str(workspace_path.resolve()) in first
+        and str(workspace_path.resolve()) in second
+    )
+    assert "row ids do not align" in first and "row ids do not align" in second
+    assert "exact failure also occurred" in second
+    assert "Do not only describe a plan or promise" in first
+
+
+@pytest.mark.asyncio
+async def test_prepare_repair_feedback_redacts_and_preserves_diagnostic_tail(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "eda"
+    _write_eda_workspace(workspace_path, missing=None)
+    store = _Store(tmp_path / "artifacts")
+    agents = _AgentRuntime(store.inner)
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    class SecretLongFailureEvaluator(_FailingEvaluator):
+        async def score(self, **kwargs):
+            del kwargs
+            raise ValueError(
+                "earlier context " * 100 + "api_key=private-value root-cause-tail"
+            )
+
+    with pytest.raises(RuntimeError, match="turn budget exhausted") as exhausted:
+        await run_prepare_plan(
+            agents=agents,
+            evaluator=SecretLongFailureEvaluator(),
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+            assert_baseline=_passing_baseline_guard,
+        )
+
+    assert len(agents.feedback) == 1
+    feedback = agents.feedback[0]
+    assert "private-value" not in feedback
+    assert "api_key=[REDACTED]" in feedback
+    assert "root-cause-tail" in feedback
+    assert len(feedback) < 1600
+    terminal = str(exhausted.value)
+    assert "last failure:" in terminal
+    assert "root-cause-tail" in terminal
+    assert "api_key=[REDACTED]" in terminal
+    assert "private-value" not in terminal
+    assert len(terminal) < 1600
 
 
 def _evaluator_draft(root: Path, labels_csv: str) -> None:
@@ -560,7 +673,11 @@ async def test_labels_without_row_id_are_rejected_by_validation(tmp_path: Path) 
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "label\n0\n1\n")
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+        await _validate_frozen_evaluator(
+            root=evaluator_dir,
+            scripts=_Scripts(),
+            layout=_evaluator_layout(evaluator_dir),
+        )
 
 
 @pytest.mark.asyncio
@@ -570,7 +687,11 @@ async def test_labels_with_wrong_row_id_are_rejected_by_validation(
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "id,label\n0,0\n1,1\n")
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+        await _validate_frozen_evaluator(
+            root=evaluator_dir,
+            scripts=_Scripts(),
+            layout=_evaluator_layout(evaluator_dir),
+        )
 
 
 @pytest.mark.asyncio
@@ -581,14 +702,22 @@ async def test_duplicate_row_ids_are_rejected_by_validation(tmp_path: Path) -> N
         "__athena_row_id,label\n0,0\n0,1\n",
     )
     with pytest.raises(ValueError, match="duplicate '__athena_row_id'"):
-        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+        await _validate_frozen_evaluator(
+            root=evaluator_dir,
+            scripts=_Scripts(),
+            layout=_evaluator_layout(evaluator_dir),
+        )
 
 
 @pytest.mark.asyncio
 async def test_valid_tabular_labels_pass_validation(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
-    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+    await _validate_frozen_evaluator(
+        root=evaluator_dir,
+        scripts=_Scripts(),
+        layout=_evaluator_layout(evaluator_dir),
+    )
 
 
 @pytest.mark.asyncio
@@ -609,7 +738,11 @@ async def test_labels_directory_and_handoff_are_accepted(tmp_path: Path) -> None
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
-    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+    await _validate_frozen_evaluator(
+        root=evaluator_dir,
+        scripts=_Scripts(),
+        layout=_evaluator_layout(evaluator_dir),
+    )
 
 
 @pytest.mark.asyncio
@@ -627,7 +760,11 @@ async def test_labels_directory_without_row_id_is_rejected(tmp_path: Path) -> No
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+        await _validate_frozen_evaluator(
+            root=evaluator_dir,
+            scripts=_Scripts(),
+            layout=_evaluator_layout(evaluator_dir),
+        )
 
 
 @pytest.mark.asyncio
@@ -651,7 +788,11 @@ async def test_eval_script_directory_labels_are_located_correctly(
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluator"}), encoding="utf-8"
     )
-    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+    await _validate_frozen_evaluator(
+        root=evaluator_dir,
+        scripts=_Scripts(),
+        layout=_evaluator_layout(evaluator_dir),
+    )
 
 
 @pytest.mark.asyncio
@@ -668,7 +809,11 @@ async def test_custom_format_skips_csv_probes(tmp_path: Path) -> None:
     )
     # No CSV labels required: custom formats are validated by the agent's own
     # format-aware probes instead of the platform CSV property tests.
-    await _validate_frozen_evaluator(root=evaluator_dir, scripts=_Scripts())
+    await _validate_frozen_evaluator(
+        root=evaluator_dir,
+        scripts=_Scripts(),
+        layout=_evaluator_layout(evaluator_dir),
+    )
 
 
 @pytest.mark.asyncio
@@ -712,6 +857,90 @@ async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
     )
     assert descriptor.dir_path == str(evaluator_dir.resolve())
     assert descriptor.entrypoint == "evaluate.py"
+
+
+@pytest.mark.asyncio
+async def test_evaluator_freeze_reuses_one_v2_contract_read_across_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe, README and descriptor use the same single-read contract."""
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir(parents=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,outcome\n1,0\n2,1\n", encoding="utf-8"
+    )
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
+    )
+    metric_path = evaluator_dir / "metric.json"
+    metric_path.write_text(
+        json.dumps(
+            {
+                "contract_version": 2,
+                "task_id": "single-read",
+                "task_type": "classification",
+                "primary_metric": "accuracy",
+                "class_labels": ["0", "1"],
+                "prediction_file": "predictions__single-read.csv",
+                "prediction_id_column": "__athena_row_id",
+                "prediction_column": "prediction",
+                "label_column": "outcome",
+                "eval_script": "evaluate.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class CapturingScripts(_Scripts):
+        def __init__(self) -> None:
+            self.prediction_files: list[str] = []
+
+        async def run_dir(self, root, *, request, extra_files, output_schema):
+            """Capture the declared output path before applying the usual probe."""
+            self.prediction_files.extend(extra_files)
+            return await super().run_dir(
+                root,
+                request=request,
+                extra_files=extra_files,
+                output_schema=output_schema,
+            )
+
+    original_read_text = Path.read_text
+    metric_reads = 0
+
+    def count_metric_reads(path: Path, *args, **kwargs):
+        nonlocal metric_reads
+        if path.resolve() == metric_path.resolve():
+            metric_reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", count_metric_reads)
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _AgentRuntime(store, agent_id="evaluator")
+    scripts = CapturingScripts()
+
+    evaluator_ref = await run_evaluator_plan(
+        _evaluator_runtime(tmp_path, store, agents, scripts=scripts),
+        evaluator_dir,
+        "write the evaluator",
+        "evaluator",
+        1,
+    )
+
+    assert metric_reads == 1
+    assert scripts.prediction_files == ["predictions/predictions__single-read.csv"] * 3
+    readme = (evaluator_dir / "README.md").read_text(encoding="utf-8")
+    assert "task_id: `single-read`" in readme
+    assert "prediction_file: `predictions__single-read.csv`" in readme
+    descriptor = EvaluatorDescriptor.model_validate_json(
+        await store.get_text(evaluator_ref)
+    )
+    assert descriptor.entrypoint == "evaluate.py"
+    assert descriptor.prediction_format == "tabular_csv"
 
 
 @pytest.mark.asyncio

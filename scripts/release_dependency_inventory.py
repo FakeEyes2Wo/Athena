@@ -8,6 +8,7 @@ import importlib.metadata
 
 
 def main() -> None:
+    """Print installed distribution versions and their declared license metadata."""
     print("| Distribution | Installed version | Declared license metadata |")
     print("| --- | --- | --- |")
     for dist in sorted(

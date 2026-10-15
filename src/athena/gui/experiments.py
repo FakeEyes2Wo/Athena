@@ -31,6 +31,7 @@ def list_experiments(
         details.append(_detail(data, exp_id))
 
     def sort_key(detail: dict[str, Any]) -> tuple[bool, int]:
+        """Order details by hypothesis index, leaving unindexed items last."""
         order = detail["hypothesis"].get("order")
         return (order is None, order if order is not None else 0)
 

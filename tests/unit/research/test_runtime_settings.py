@@ -7,6 +7,7 @@ from inspect import signature
 import pytest
 
 from athena.research.config import (
+    ExecutionConfig,
     ResearchConfig,
     ResearchOptions,
     ResearchPaths,
@@ -229,6 +230,95 @@ async def test_apply_settings_handoff_sources_persists(tmp_path) -> None:
 
     assert runtime.state.handoff_sources == ["kaggle", "literature"]
     assert result["handoff_sources"] == ["kaggle", "literature"]
+
+
+@pytest.mark.asyncio
+async def test_session_settings_survive_reload_and_drive_plan_runner(
+    tmp_path, monkeypatch
+) -> None:
+    state_root = tmp_path / "session-state"
+    session = SessionConfig(state_root=state_root, session_id="settings-reload")
+    dependencies = RuntimeDependencies(
+        execution=ExecutionConfig(experiment_timeout_s=900)
+    )
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        session=session,
+        dependencies=dependencies,
+    )
+
+    saved = await runtime.apply_settings(
+        {"experiment_timeout_s": 120, "tolerance": 0.005}
+    )
+    assert saved["experiment_timeout_s"] == 120
+    assert saved["tolerance"] == 0.005
+
+    reloaded = ResearchRuntime(
+        project_root=tmp_path,
+        session=session,
+        dependencies=dependencies,
+    )
+    assert reloaded.settings()["experiment_timeout_s"] == 120
+    assert reloaded.settings()["tolerance"] == 0.005
+    assert reloaded.supervisor._deps.search.tolerance == 0.005
+
+    captured: dict[str, int] = {}
+
+    class CapturingPlanRunner:
+        def __init__(self, **kwargs) -> None:
+            captured["timeout_s"] = kwargs["timeout_s"]
+
+        async def run_turn(self, *_args, **_kwargs):
+            return None
+
+    async def plan_input(_plan_id):
+        return object()
+
+    async def execution_for(*_args, **_kwargs):
+        return object()
+
+    monkeypatch.setattr(
+        "athena.research.runtime.phase_runner.PlanRunner", CapturingPlanRunner
+    )
+    monkeypatch.setattr(reloaded.supervisor, "plan_input", plan_input)
+    monkeypatch.setattr(
+        reloaded.supervisor, "workspace_path", lambda _plan_id: tmp_path
+    )
+    monkeypatch.setattr(reloaded.supervisor, "workspace", lambda _plan_id: object())
+    monkeypatch.setattr(reloaded, "execution_for", execution_for)
+
+    await reloaded.services.workflow.phases.run_plan_turn("plan-test", object())
+
+    assert captured["timeout_s"] == 120
+
+
+def test_legacy_state_settings_fall_back_to_current_config(tmp_path) -> None:
+    state_root = tmp_path / "legacy-state"
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        session=SessionConfig(state_root=state_root, session_id="legacy"),
+        research=ResearchOptions(policy=ResearchPolicy(tolerance=0.02)),
+        dependencies=RuntimeDependencies(
+            execution=ExecutionConfig(experiment_timeout_s=75)
+        ),
+    )
+    runtime.state.save(runtime.config.paths.state)
+    payload = __import__("json").loads(runtime.config.paths.state.read_text())
+    payload.pop("experiment_timeout_s", None)
+    payload.pop("tolerance", None)
+    runtime.config.paths.state.write_text(__import__("json").dumps(payload))
+
+    reloaded = ResearchRuntime(
+        project_root=tmp_path,
+        session=SessionConfig(state_root=state_root, session_id="legacy"),
+        research=ResearchOptions(policy=ResearchPolicy(tolerance=0.02)),
+        dependencies=RuntimeDependencies(
+            execution=ExecutionConfig(experiment_timeout_s=75)
+        ),
+    )
+
+    assert reloaded.settings()["experiment_timeout_s"] == 75
+    assert reloaded.settings()["tolerance"] == 0.02
 
 
 @pytest.mark.asyncio

@@ -89,6 +89,7 @@ class ClarificationStore:
         try:
             atomic_write_json(self.journal_path, journal.model_dump(mode="json"))
         except OSError as error:
+            # Trigger: atomic persistence of the confirmation journal fails.
             raise ClarificationError("confirmation_write_failed", str(error)) from error
 
     def delete_journal(self) -> None:
@@ -120,6 +121,7 @@ def _confirmed_draft(
     try:
         draft = drafts.load(journal.draft_id)
     except ClarificationPersistenceError:
+        # Trigger: a journal points to a missing/corrupt draft, so recovery falls back to no draft.
         draft = None
     if draft is not None and draft.status == "CONFIRMED":
         return draft

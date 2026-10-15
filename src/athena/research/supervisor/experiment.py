@@ -29,6 +29,7 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.evaluation.spec import load_evaluator_spec
 from athena.research.exploration_files import (
     append_experiment_log,
     read_exploration_note,
@@ -38,8 +39,12 @@ from athena.research.output_freshness import (
     archive_output_roots,
     assert_output_roots,
 )
+from athena.research.prediction_contract import (
+    PredictionInputError,
+    assert_predictions_cover,
+)
 from athena.research.script_runner import load_directory, pack_directory
-from athena.research.supervisor.events import redact
+from athena.research.supervisor.events import bounded_redacted_tail
 from athena.research.supervisor.manifest import (
     ExperimentManifest,
     read_experiment_manifest,
@@ -77,8 +82,9 @@ def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
         return PlanFailure(
             kind="no_change",
             detail=(
-                "this candidate changed no file, so it re-ran the parent unchanged "
-                "and cannot test anything. Implement the intervention in source code."
+                "this candidate changed no file since the latest committed revision. "
+                "Athena commits each successfully scored revision automatically. "
+                "Implement a new source change, or submit an existing trusted best."
             ),
         )
     semantic = [
@@ -91,9 +97,12 @@ def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
         return PlanFailure(
             kind="diff_rejected",
             detail=(
-                "this candidate changed no implementation source file; only "
-                "manifest/output/documentation changed. Implement the intervention "
-                "in a source file (e.g. model.py, features.py, train.py)."
+                "this candidate changed no implementation source file since the "
+                "latest committed revision; only manifest/output/documentation "
+                "changed. Athena already commits each successfully scored revision. "
+                "The comparison is against that latest commit, not always the "
+                "original parent. Make a new source change, or submit the saved "
+                "trusted best if no further change is intended."
             ),
         )
     return None
@@ -141,6 +150,7 @@ class PlanTurnResult(BaseModel):
         "evaluator_infrastructure_failed",
         "output_failed",
         "execution_failed",
+        "execution_infrastructure_failed",
         "manifest_invalid",
         # SEARCH 候选一个文件都没改：它重跑的是父实验，测不了任何东西。
         "no_change",
@@ -206,7 +216,9 @@ def decide_settlement(
     用尽或 turn 用尽且有 best → settle best；turn 用尽且无 best → wait。
     """
     patience_exhausted = (
-        state.patience is not None and state.stale_rounds >= state.patience
+        state.patience is not None
+        and state.patience > 0
+        and state.stale_rounds >= state.patience
     )
     turns_exhausted = (
         state.turn_limit is not None and state.turns_used >= state.turn_limit
@@ -289,6 +301,7 @@ class PlanRunner:
         try:
             manifest = read_experiment_manifest(self.workdir)
         except ValueError as exc:
+            # Trigger: the submitted manifest is missing or fails schema validation.
             return await self._failure(
                 plan_id,
                 PlanFailure(
@@ -303,8 +316,17 @@ class PlanRunner:
 
         predictions_root = manifest.outputs["predictions"]
         predictions_dir = self.workdir / predictions_root
-        predictions_ref = await pack_directory(self._store, predictions_dir)
-        predictions = await load_directory(self._store, predictions_ref)
+        try:
+            predictions_ref = await pack_directory(self._store, predictions_dir)
+            predictions = await load_directory(self._store, predictions_ref)
+        except Exception as exc:  # noqa: BLE001 - artifact packing is infrastructure
+            return await self._failure(
+                plan_id,
+                PlanFailure(
+                    kind="execution_infrastructure_failed",
+                    detail=f"stage=pack_predictions; {type(exc).__name__}: {exc}",
+                ),
+            )
         report_ref = await self._store_report(manifest)
         if state.kind == "PREPARE" and report_ref is None:
             return await self._failure(
@@ -400,34 +422,73 @@ class PlanRunner:
         version = f"{plan_id}-{state.turns_used}"
         try:
             archive_output_roots(self.workdir, manifest.outputs, version=version)
-        except Exception as exc:  # noqa: BLE001 - archive failure is an output failure
+        except Exception as exc:  # noqa: BLE001 - archive failure is infrastructure
             return PlanFailure(
-                kind="output_failed", detail=f"failed to archive old outputs: {exc}"
+                kind="execution_infrastructure_failed",
+                detail=f"stage=archive_outputs; {type(exc).__name__}: {exc}",
             )
 
-        for argv in manifest.commands:
-            result = await self._execution.run(
-                self._context,
-                CommandRequest(
-                    command=argv,
-                    timeout_s=self._timeout_s,
-                    workdir=str(self.workdir),
-                    emit=emit,
-                    evaluation_split="search",
-                ),
-            )
-            if not result.ok:
-                error = (
-                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
+        for index, argv in enumerate(manifest.commands, start=1):
+            try:
+                result = await self._execution.run(
+                    self._context,
+                    CommandRequest(
+                        command=argv,
+                        timeout_s=self._timeout_s,
+                        workdir=str(self.workdir),
+                        emit=emit,
+                        evaluation_split="search",
+                    ),
                 )
-                if "ModuleNotFoundError" in result.stderr:
+            except (FileNotFoundError, ValueError) as exc:
+                # Trigger: a command argv is missing/invalid or contains an unsafe workspace path.
+                return PlanFailure(
+                    kind="execution_failed",
+                    detail=f"stage=command[{index}] argv={argv!r}; {type(exc).__name__}: {exc}",
+                )
+            except Exception as exc:  # noqa: BLE001 - backend/process infrastructure
+                return PlanFailure(
+                    kind="execution_infrastructure_failed",
+                    detail=f"stage=command[{index}] argv={argv!r}; {type(exc).__name__}: {exc}",
+                )
+            if not result.ok:
+                phase = (
+                    "timeout"
+                    if result.error == "timeout"
+                    else f"exit={result.exit_code}"
+                )
+                output = "\n".join(
+                    part
+                    for part in (result.stdout, result.stderr, result.error or "")
+                    if part
+                )
+                tail = (
+                    bounded_redacted_tail(output, 550)
+                    or "(no stdout/stderr was captured)"
+                )
+                error = (
+                    f"stage=command[{index}] {phase}; argv={str(argv)[:150]}; "
+                    f"output_tail={tail}"
+                )
+                if "ModuleNotFoundError" in output:
                     error += (
                         ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '
                         "declared dependencies into the environment venv, then retry."
                     )
-                return PlanFailure(kind="execution_failed", detail=error)
+                kind = (
+                    "execution_infrastructure_failed"
+                    if result.exit_code < 0 and result.error not in (None, "timeout")
+                    else "execution_failed"
+                )
+                return PlanFailure(kind=kind, detail=error)
 
-        await self._execution.collect_outputs(tuple(manifest.outputs.values()))
+        try:
+            await self._execution.collect_outputs(tuple(manifest.outputs.values()))
+        except Exception as exc:  # noqa: BLE001 - remote collection/backend fault
+            return PlanFailure(
+                kind="execution_infrastructure_failed",
+                detail=f"stage=collect_outputs; {type(exc).__name__}: {exc}",
+            )
         required = {"predictions"}
         if state.kind == "PREPARE":
             required.add("report")
@@ -456,9 +517,50 @@ class PlanRunner:
         evaluator_dir = await self._load_evaluator_dir(plan_input.evaluator_ref)
         if evaluator_dir is None:
             return PlanFailure(
-                kind="scoring_failed",
+                kind="evaluator_infrastructure_failed",
                 detail="evaluator descriptor is invalid or its directory is missing",
             )
+        try:
+            spec = (
+                load_evaluator_spec(evaluator_dir)
+                if (evaluator_dir / "metric.json").is_file()
+                else None
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            # Trigger: the frozen evaluator descriptor or metric spec cannot be loaded or validated.
+            return PlanFailure(
+                kind="evaluator_infrastructure_failed",
+                detail=f"frozen evaluator contract is invalid: {exc}",
+            )
+        if self._context.predict_features is not None:
+            prediction_file = spec.prediction_file if spec is not None else None
+            # Match TrustedEvaluator's existing single-CSV legacy filename alias.
+            csv_files = [
+                name for name in predictions if Path(name).suffix.lower() == ".csv"
+            ]
+            if prediction_file not in predictions and len(csv_files) == 1:
+                prediction_file = csv_files[0]
+            try:
+                assert_predictions_cover(
+                    self.workdir / predictions_root,
+                    self._context.predict_features,
+                    prediction_file=prediction_file,
+                    prediction_id_column=spec.prediction_id_column if spec else None,
+                    prediction_format=spec.prediction_format if spec else "tabular_csv",
+                )
+            except PredictionInputError as exc:
+                # Trigger: declared prediction inputs do not satisfy frozen feature/ID coverage.
+                return PlanFailure(
+                    kind="execution_infrastructure_failed", detail=str(exc)
+                )
+            except (ValueError, UnicodeError) as exc:
+                # Trigger: prediction output files are malformed or violate the declared format contract.
+                return PlanFailure(kind="scoring_failed", detail=str(exc))
+            except OSError as exc:
+                # Trigger: prediction files are inaccessible despite a valid output contract.
+                return PlanFailure(
+                    kind="execution_infrastructure_failed", detail=str(exc)
+                )
         try:
             evaluation = await self._evaluator.score(
                 evaluator_dir=evaluator_dir,
@@ -483,7 +585,7 @@ class PlanRunner:
         predictions_ref: ArtifactRef | None = None,
     ) -> PlanTurnResult:
         """Persist a normalized Plan failure and return its non-scored result."""
-        cleaned = redact(" ".join(failure.detail.split()))[:1000]
+        cleaned = bounded_redacted_tail(failure.detail, 1000)
         append_experiment_log(
             self.workdir,
             f"## {plan_id}: {failure.kind}\n\n- Error: {cleaned}",
@@ -518,10 +620,12 @@ class PlanRunner:
         try:
             text = await self._store.get_text(evaluator_ref)
         except (OSError, ValueError):
+            # Trigger: the evaluator descriptor artifact cannot be read from the store.
             return None
         try:
             descriptor = EvaluatorDescriptor.model_validate_json(text)
         except ValueError:
+            # Trigger: the stored evaluator descriptor is malformed or violates its schema.
             return None
         path = Path(descriptor.dir_path)
         if not path.is_dir() or not (path / "README.md").is_file():

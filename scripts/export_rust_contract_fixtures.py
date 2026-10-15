@@ -47,6 +47,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def default_output() -> Path:
+    """Return the repository's canonical Rust fixture directory."""
     return PROJECT_ROOT / "athena-rust" / "tests" / "fixtures"
 
 
@@ -183,6 +184,7 @@ def export_domain_fixtures() -> dict:
         )
         fixtures["hypothesis_validation_error"] = {"error": "should have raised"}
     except ValueError as e:
+        # This invalid DTO is an intentional fixture for Rust-side validation tests.
         fixtures["hypothesis_validation_error"] = {"error": str(e)}
 
     # 指标规格
@@ -311,6 +313,7 @@ def export_rollout_fixtures() -> dict:
 
 
 def main():
+    """Export protocol, domain, message, and rollout fixtures as JSON files."""
     parser = argparse.ArgumentParser(description="Export Rust contract fixtures")
     parser.add_argument(
         "--output",

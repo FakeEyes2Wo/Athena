@@ -69,6 +69,7 @@ async def _emitted(client, model: str, cap: int) -> int:
 
 
 async def main() -> int:
+    """Probe the configured model's accepted and emitted output-token limits."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=None, help="默认取 settings.model_name()")
     args = parser.parse_args()

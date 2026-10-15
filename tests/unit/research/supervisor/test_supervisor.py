@@ -9,11 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
+import athena.research.supervisor.plan_runtime as plan_runtime_module
 import athena.research.supervisor.search_loop as search_loop_module
+from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
@@ -33,7 +36,12 @@ from athena.research.supervisor.deps import (
 from athena.research.supervisor.experiment import PlanTurnResult, SettlementDecision
 from athena.research.supervisor.phases import _final_report_text
 from athena.research.supervisor.plan_runtime import CompletedPlanTurn
-from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
+from athena.research.supervisor.plans import (
+    PlanBest,
+    PlanDecision,
+    PlanInput,
+    PlanState,
+)
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -84,8 +92,9 @@ class _SubmitProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("turn_limit,expected_limit", [(None, MAX_PLAN_TURNS), (4, 4)])
 async def test_new_plan_freezes_evaluator_tree_and_human_context(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, turn_limit: int | None, expected_limit: int
 ) -> None:
     try:
         Supervisor = import_module("athena.research.supervisor.supervisor").Supervisor
@@ -148,7 +157,7 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
             intervention="use ViT",
             expected_effect="improve score",
             priority=1000.0,
-            turn_limit=4,
+            turn_limit=turn_limit,
             patience=2,
         )
     )
@@ -223,6 +232,9 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
     await supervisor.record_guidance("use ViT next", scope="next")
     await supervisor.start_plan("hyp_vit")
 
+    assert supervisor.state.plans["hyp_vit"].turn_limit == expected_limit
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert persisted.plans["hyp_vit"].turn_limit == expected_limit
     frozen = await supervisor.plan_input("hyp_vit")
     assert frozen.hypothesis is not None
     assert frozen.hypothesis.id == "hyp_vit"
@@ -357,6 +369,14 @@ async def _supervisor_with_frozen_plan(
         turns_used=0,
         turn_limit=4,
         patience=2,
+    )
+    supervisor._run.add_branch(
+        "hyp_failure",
+        GitWorkBranch(
+            path=str(tmp_path / "workspaces" / "hyp_failure"),
+            branch="hyp_failure",
+            base_commit="baseline-commit",
+        ),
     )
     return supervisor
 
@@ -596,17 +616,22 @@ async def test_skip_policy_settles_waiting_plan_without_auto_validate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stage", "diagnostic"),
+    ("stage", "diagnostic", "failure_kind"),
     [
-        ("followup", "RuntimeError: followup unavailable"),
-        ("wait_run", "RuntimeError: wait unavailable"),
-        ("parse", "JSONDecodeError:"),
+        (
+            "followup",
+            "RuntimeError: followup unavailable",
+            "turn_infrastructure_failed",
+        ),
+        ("wait_run", "RuntimeError: wait unavailable", "turn_infrastructure_failed"),
+        ("parse", "JSONDecodeError:", "turn_output_invalid"),
     ],
 )
-async def test_plan_turn_infrastructure_failure_is_durable(
+async def test_plan_turn_failure_classification_is_durable(
     tmp_path: Path,
     stage: str,
     diagnostic: str,
+    failure_kind: str,
 ) -> None:
     agents = _InfrastructureFailureAgents(stage)
     supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
@@ -616,13 +641,74 @@ async def test_plan_turn_infrastructure_failure_is_durable(
     assert completed.decision is None
     assert completed.result is None
     assert completed.failure is not None
-    assert completed.failure.kind == "turn_infrastructure_failed"
+    assert completed.failure.kind == failure_kind
     assert diagnostic in completed.failure.detail
     persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
     failure = persisted.plans["hyp_failure"].last_failure
     assert failure is not None
-    assert failure.startswith("turn_infrastructure_failed: ")
+    assert failure.startswith(f"{failure_kind}: ")
     assert diagnostic in failure
+    if failure_kind == "turn_output_invalid":
+        await supervisor._search._apply_completed_turn(completed)
+        assert supervisor.state.status == "RUNNING"
+        assert "hyp_failure" in supervisor.state.plans
+
+
+@pytest.mark.asyncio
+async def test_agent_pause_rejection_does_not_consume_plan_turn(
+    tmp_path: Path,
+) -> None:
+    class PausedAgents:
+        supervisor: Supervisor
+
+        async def followup(self, _plan_id: str, _task: dict[str, object]) -> str:
+            self.supervisor.state.status = "WAITING"
+            raise AgentCommandError(ErrorCode.CLOSED, "runtime paused")
+
+    agents = PausedAgents()
+    supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
+    agents.supervisor = supervisor
+
+    completed = await supervisor._plans.run_turn("hyp_failure")
+
+    assert completed.decision is None
+    assert completed.result is None
+    assert completed.failure is None
+    assert supervisor.state.status == "WAITING"
+    assert supervisor.state.plans["hyp_failure"].turns_used == 0
+    assert supervisor.state.plans["hyp_failure"].last_failure is None
+
+
+@pytest.mark.asyncio
+async def test_abandon_decision_reason_is_persisted_for_failed_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class CompletedAgents:
+        async def followup(self, _plan_id: str, _task: dict[str, object]) -> str:
+            return "run-1"
+
+        async def wait_run(self, _run_id: str):
+            return SimpleNamespace(status="completed", response_ref=None)
+
+    agents = CompletedAgents()
+    supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
+    reason = "candidate could not load api_key=private-value; root cause persisted"
+
+    async def abandoned(_summary, _store, _model):
+        return PlanDecision(decision="abandon", reason=reason)
+
+    monkeypatch.setattr(plan_runtime_module, "load_agent_result", abandoned)
+    completed = await supervisor._plans.run_turn("hyp_failure")
+
+    assert completed.decision is not None
+    assert completed.decision.decision == "abandon"
+    assert completed.decision.reason == reason
+    failure = supervisor.state.plans["hyp_failure"].last_failure
+    assert failure is not None
+    assert failure.startswith("agent_abandoned: ")
+    assert "private-value" not in failure
+    assert "api_key=[REDACTED]" in failure
+    assert "root cause persisted" in failure
 
 
 @pytest.mark.asyncio
@@ -642,6 +728,139 @@ async def test_plan_turn_separates_confirmed_context_from_turn_header(
     assert "stale rounds: 0.\n\n--- Confirmed task contract (authoritative) ---" in str(
         agents.task["content"]
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_with_trusted_best_settles_saved_score_without_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SubmitAgents:
+        task: dict[str, object] | None = None
+
+        async def followup(self, _plan_id: str, task: dict[str, object]) -> str:
+            self.task = task
+            return "run-1"
+
+        async def wait_run(self, _run_id: str):
+            return SimpleNamespace(status="completed", response_ref="decision")
+
+    agents = SubmitAgents()
+    supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
+    store = supervisor._deps.runtime.store
+    state = supervisor.state.plans["hyp_failure"]
+    plan_input = await supervisor._plans.plan_input("hyp_failure")
+    plan_input = plan_input.model_copy(
+        update={
+            "reference_metric": 0.7147502579080955,
+            "direction": "maximize",
+            "tolerance": 0.005,
+        }
+    )
+    context_ref = await store.put_text(plan_input.model_dump_json())
+    best = PlanBest(
+        metric=0.7348974079432975,
+        commit="a" * 40,
+        evidence_ref=await store.put_text("trusted evidence"),
+    )
+    best_ref = await store.put_text(best.model_dump_json())
+    supervisor.state.plans["hyp_failure"] = state.model_copy(
+        update={
+            "context_ref": context_ref,
+            "best_ref": best_ref,
+            "stale_rounds": 2,
+            "last_failure": "diff_rejected: previous proposal had no source change",
+        }
+    )
+    workspace = Path(supervisor.workspace_path("hyp_failure"))
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "unscored-edit.py").write_text("# deliberately unscored\n")
+
+    async def load_decision(_summary, _store, _model):
+        return PlanDecision(decision="submit", reason="settle trusted result")
+
+    monkeypatch.setattr(plan_runtime_module, "load_agent_result", load_decision)
+    settled: list[tuple[str, object, object]] = []
+
+    async def capture_settle(plan_id, selected_best_ref, result):
+        settled.append((plan_id, selected_best_ref, result))
+
+    monkeypatch.setattr(supervisor._plans, "settle_plan", capture_settle)
+    completed = await supervisor._plans.run_turn("hyp_failure")
+
+    assert completed.decision is not None
+    assert completed.decision.decision == "submit"
+    assert completed.result is None
+    assert completed.failure is None
+    assert agents.task is not None
+    prompt = str(agents.task["content"])
+    assert "Frozen reference metric: 0.71475026" in prompt
+    assert "Historical best trusted SEARCH metric: 0.73489741" in prompt
+    assert "scored commit: " + "a" * 40 in prompt
+    assert "OOF/CV scores are diagnostics" in prompt
+    assert "current unscored edits cannot become the best" in prompt
+    assert "Previous attempt failed" in prompt
+    assert "previous proposal had no source change" in prompt
+
+    await supervisor._search._apply_completed_turn(completed)
+
+    assert settled == [("hyp_failure", best_ref, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "response_ref", "error"),
+    [
+        ("failed", None, "provider disconnected"),
+        ("cancelled", None, "run interrupted"),
+        ("completed", None, None),
+        ("completed", "{}", None),
+    ],
+)
+async def test_missing_plan_result_leaves_diagnostic_for_next_turn(
+    tmp_path, monkeypatch, status, response_ref, error
+):
+    agents = _InfrastructureFailureAgents("missing_result")
+
+    async def wait_run(_run_id):
+        return SimpleNamespace(status=status, response_ref=response_ref, error=error)
+
+    monkeypatch.setattr(agents, "wait_run", wait_run)
+    supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
+    completed = await supervisor._plans.run_turn("hyp_failure")
+    assert completed.failure is not None
+    expected_kind = (
+        "turn_output_invalid" if status == "completed" else "turn_infrastructure_failed"
+    )
+    assert completed.failure.kind == expected_kind
+    if status != "completed":
+        assert status in completed.failure.detail
+    else:
+        assert "missing structured PlanDecision" in completed.failure.detail
+    if error:
+        assert error in completed.failure.detail
+    failure = supervisor.state.plans["hyp_failure"].last_failure
+    assert failure is not None
+    await supervisor._plans.run_turn("hyp_failure")
+    assert "Previous attempt failed" in agents.task["content"]
+    assert completed.failure.detail in agents.task["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["auto", "skip"])
+async def test_search_parked_after_crash_cannot_advance_phase(
+    tmp_path, monkeypatch, mode
+):
+    supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.state.phase = "SEARCH"
+    supervisor.configure_options(validation_mode=mode)
+
+    async def park_search():
+        supervisor.state.status = "WAITING"
+
+    monkeypatch.setattr(supervisor._search, "run_search", park_search)
+    await supervisor._phases.continue_phase()
+    assert supervisor.state.phase == "SEARCH"
+    assert supervisor.state.status == "WAITING"
 
 
 @pytest.mark.asyncio
@@ -949,7 +1168,9 @@ async def test_search_turn_crash_is_durable_and_observable(tmp_path: Path) -> No
     )
 
     async def fail_turn():
-        raise RuntimeError("worker disconnected")
+        raise RuntimeError(
+            "earlier diagnostic " * 100 + "api_key=do-not-leak worker disconnected"
+        )
 
     async def no_fill() -> bool:
         return False
@@ -962,13 +1183,18 @@ async def test_search_turn_crash_is_durable_and_observable(tmp_path: Path) -> No
 
     restored = ResearchState.load(tmp_path / ".athena" / "state.json")
     assert restored.status == "WAITING"
-    assert restored.plans["hyp_crash"].last_failure == (
-        "turn_crashed: RuntimeError: worker disconnected"
-    )
+    failure = restored.plans["hyp_crash"].last_failure
+    assert failure is not None
+    assert failure.startswith("turn_crashed: ")
+    assert len(failure) <= 1200
+    assert "do-not-leak" not in failure
+    assert failure.endswith("worker disconnected")
     assert any(
         kind == "output"
         and payload.get("channel") == "error"
         and "worker disconnected" in str(payload.get("text"))
+        and "do-not-leak" not in str(payload.get("text"))
+        and "api_key=[REDACTED]" in str(payload.get("text"))
         for kind, payload in events
     )
 

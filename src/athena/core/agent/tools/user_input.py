@@ -9,20 +9,20 @@ Athena 的 typed broker 以 ``HumanRequest`` / ``HumanOutcome`` 表达同一交�
 ``(prompt) -> 回答文本`` 回调仍可直接使用。
 """
 
-from __future__ import annotations
-
 from datetime import UTC, datetime, timedelta
 
+from athena.core.contracts import new_id
 from athena.core.human_request import (
+    ChoiceReply,
     HumanChoice,
     HumanOutcome,
     HumanRequest,
-    HumanReply,
+    SkipReply,
+    TextReply,
     parse_human_reply,
 )
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolSpec
-from athena.core.contracts import new_id
 
 
 class RequestUserInputTool(BaseTool):
@@ -69,6 +69,7 @@ class RequestUserInputTool(BaseTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> str:
+        """Ask within the current session and render typed or legacy replies as text."""
         if ctx.ask_user is None:
             raise RuntimeError("ask_user 未注入，无法请求用户输入")
         choices = input.get("choices")
@@ -113,7 +114,7 @@ class RequestUserInputTool(BaseTool):
             return outcome.to_tool_text()
         if outcome is None:
             return "[用户未在超时内回答]"
-        if isinstance(outcome, HumanReply):
+        if isinstance(outcome, (ChoiceReply, TextReply, SkipReply)):
             parsed = parse_human_reply(outcome)
             if parsed.kind == "skip":
                 return "Skipped by user"

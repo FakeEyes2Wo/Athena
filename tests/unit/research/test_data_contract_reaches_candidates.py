@@ -113,6 +113,7 @@ async def test_every_search_turn_carries_the_data_contract() -> None:
 
     def plan_state():
         state = SimpleNamespace(
+            kind="SEARCH",
             turns_used=0,
             turn_limit=4,
             patience=2,
@@ -154,6 +155,7 @@ async def test_no_contract_means_no_block_in_the_turn() -> None:
             return SimpleNamespace(status="completed", response_ref=None)
 
     state = SimpleNamespace(
+        kind="SEARCH",
         turns_used=0,
         turn_limit=4,
         patience=2,
@@ -207,6 +209,10 @@ def _supervisor(tree, state, agents) -> Supervisor:
         ),
     )
     supervisor._plans.persist_state = _noop
+    for plan_id in state.plans:
+        supervisor._run.add_branch(
+            plan_id, SimpleNamespace(path=str(Path("worktrees") / plan_id))
+        )
 
     async def plan_input(plan_id: str):
         return SimpleNamespace(
@@ -214,6 +220,9 @@ def _supervisor(tree, state, agents) -> Supervisor:
             human_context="",
             hypothesis=tree.get_hypothesis(plan_id),
             eval_handoff=await _handoff(plan_id),
+            reference_metric=0.5,
+            direction="maximize",
+            tolerance=0.0,
         )
 
     supervisor._plans.plan_input = plan_input

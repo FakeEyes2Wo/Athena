@@ -183,7 +183,7 @@ impl FairMux {
             };
 
             if ready.is_empty() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 continue;
             }
 
@@ -203,7 +203,9 @@ impl FairMux {
                     data: event.data,
                 }),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    tokio::task::yield_now().await;
+                    // Yield the worker while idle without delaying newly queued events
+                    // enough to make subscription delivery feel stalled.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                     None
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
@@ -250,5 +252,130 @@ mod tests {
             .expect("no timeout")
             .expect("joined");
         assert_eq!(event.sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn fair_mux_delivers_queued_subscriptions_round_robin() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(8);
+        let mux = Arc::new(FairMux::new(out_tx));
+        let (a_tx, a_rx) = tokio::sync::mpsc::channel(4);
+        let (b_tx, b_rx) = tokio::sync::mpsc::channel(4);
+        mux.add(Arc::new(Subscription::new("a".into(), a_rx)));
+        mux.add(Arc::new(Subscription::new("b".into(), b_rx)));
+        for sequence in 1..=3 {
+            let event = Event {
+                thread_id: "thread".into(),
+                turn_id: None,
+                sequence,
+                kind: "delta".into(),
+                event_ref: format!("event:{sequence}"),
+                data: None,
+            };
+            a_tx.send(event.clone()).await.expect("send a");
+            b_tx.send(event).await.expect("send b");
+        }
+        a_tx.send(Event {
+            thread_id: "thread".into(),
+            turn_id: None,
+            sequence: 4,
+            kind: "delta".into(),
+            event_ref: "event:4".into(),
+            data: None,
+        })
+        .await
+        .expect("queue event to observe closed outgoing channel");
+
+        let mux_task = tokio::spawn(mux.clone().run());
+        let mut delivered = Vec::new();
+        for _ in 0..6 {
+            delivered.push(
+                tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+                    .await
+                    .expect("mux delivery timed out")
+                    .expect("notification channel closed")
+                    .subscription_id,
+            );
+        }
+        assert_eq!(delivered.iter().filter(|id| *id == "a").count(), 3);
+        assert_eq!(delivered.iter().filter(|id| *id == "b").count(), 3);
+        assert_ne!(delivered[0], delivered[1]);
+        assert_ne!(delivered[1], delivered[2]);
+
+        mux_task.abort();
+        let _ = mux_task.await;
+    }
+
+    #[tokio::test]
+    async fn fair_mux_wakes_quickly_when_subscription_is_added() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(2);
+        let mux = Arc::new(FairMux::new(out_tx));
+        let mux_task = tokio::spawn(mux.clone().run());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        mux.add(Arc::new(Subscription::new("late".into(), event_rx)));
+        event_tx
+            .send(Event {
+                thread_id: "thread".into(),
+                turn_id: None,
+                sequence: 1,
+                kind: "delta".into(),
+                event_ref: "event:1".into(),
+                data: None,
+            })
+            .await
+            .expect("send event");
+        event_tx
+            .send(Event {
+                thread_id: "thread".into(),
+                turn_id: None,
+                sequence: 2,
+                kind: "delta".into(),
+                event_ref: "event:2".into(),
+                data: None,
+            })
+            .await
+            .expect("queue event to observe closed outgoing channel");
+
+        let notification = tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+            .await
+            .expect("late subscription was not polled promptly")
+            .expect("notification channel closed");
+        assert_eq!(notification.subscription_id, "late");
+        mux_task.abort();
+        let _ = mux_task.await;
+    }
+
+    #[tokio::test]
+    async fn fair_mux_stops_when_outgoing_receiver_closes() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(1);
+        let mux = Arc::new(FairMux::new(out_tx));
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+        mux.add(Arc::new(Subscription::new("sub".into(), event_rx)));
+        for sequence in 1..=8 {
+            event_tx
+                .send(Event {
+                    thread_id: "thread".into(),
+                    turn_id: None,
+                    sequence,
+                    kind: "delta".into(),
+                    event_ref: format!("event:{sequence}"),
+                    data: None,
+                })
+                .await
+                .expect("queue event");
+        }
+
+        let mux_task = tokio::spawn(mux.run());
+        tokio::time::timeout(Duration::from_millis(100), out_rx.recv())
+            .await
+            .expect("mux did not send first notification")
+            .expect("notification channel closed too early");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        out_rx.close();
+        tokio::time::timeout(Duration::from_millis(100), mux_task)
+            .await
+            .expect("mux did not stop after outgoing close")
+            .expect("mux task panicked");
     }
 }

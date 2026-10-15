@@ -154,8 +154,7 @@ def mask_macro_scan_source(source: str) -> str:
         )
         for match in pattern.finditer(source):
             for index in range(match.start(), match.end()):
-                if masked[index] != "\n":
-                    masked[index] = " "
+                masked[index] = "\n" if masked[index] == "\n" else " "
     offset = 0
     masked_text = "".join(masked)
     for line in masked_text.splitlines(keepends=True):
@@ -685,48 +684,54 @@ class TexPaperParser:
 
     def author_values(self, nodes: Iterable[LatexNode]) -> list[str]:
         """优先读取显式加粗作者名，否则按常见 ``and`` 作者组恢复。"""
-        for node in walk_nodes(nodes):
-            if not isinstance(node, LatexMacroNode) or node.macroname != "author":
-                continue
-            argument = last_argument(node)
-            if argument is None:
-                return []
-            bold_names = [
-                clean_author_name(self.renderer.argument(last_argument(child)))
-                for child in walk_nodes(getattr(argument, "nodelist", []))
-                if isinstance(child, LatexMacroNode) and child.macroname == "textbf"
+        author = next(
+            (
+                node
+                for node in walk_nodes(nodes)
+                if isinstance(node, LatexMacroNode) and node.macroname == "author"
+            ),
+            None,
+        )
+        if author is None:
+            return []
+        argument = last_argument(author)
+        if argument is None:
+            return []
+        bold_names = [
+            clean_author_name(self.renderer.argument(last_argument(child)))
+            for child in walk_nodes(getattr(argument, "nodelist", []))
+            if isinstance(child, LatexMacroNode) and child.macroname == "textbf"
+        ]
+        bold_names = list(dict.fromkeys(name for name in bold_names if name))
+        if bold_names:
+            return bold_names
+        raw = self.raw(argument)
+        if isinstance(argument, LatexGroupNode) and len(raw) >= 2:
+            raw = raw[1:-1]
+        values: list[str] = []
+        groups = re.split(r"\\(?:and|And|AND)\b", raw)
+        if len(groups) == 1:
+            groups = [re.split(r"\\\\(?:\[[^]]*\])?", raw, maxsplit=1)[0]]
+        for group in groups:
+            first_line = re.split(r"\\\\(?:\[[^]]*\])?", group, maxsplit=1)[0]
+            parts = [
+                part for part in re.split(r"\\quad\b|;", first_line) if part.strip()
             ]
-            bold_names = list(dict.fromkeys(name for name in bold_names if name))
-            if bold_names:
-                return bold_names
-            raw = self.raw(argument)
-            if isinstance(argument, LatexGroupNode) and len(raw) >= 2:
-                raw = raw[1:-1]
-            values: list[str] = []
-            groups = re.split(r"\\(?:and|And|AND)\b", raw)
-            if len(groups) == 1:
-                groups = [re.split(r"\\\\(?:\[[^]]*\])?", raw, maxsplit=1)[0]]
-            for group in groups:
-                first_line = re.split(r"\\\\(?:\[[^]]*\])?", group, maxsplit=1)[0]
-                parts = re.split(r"\\quad\b|;", first_line)
-                for part in parts:
-                    if not part.strip():
-                        continue
-                    try:
-                        part_nodes, _, _ = LatexWalker(
-                            part, latex_context=self.context
-                        ).get_latex_nodes()
-                        rendered = clean_author_name(
-                            TexRenderer(part, self.context, self.custom_macros).nodes(
-                                part_nodes
-                            )
+            for part in parts:
+                try:
+                    part_nodes, _, _ = LatexWalker(
+                        part, latex_context=self.context
+                    ).get_latex_nodes()
+                    rendered = clean_author_name(
+                        TexRenderer(part, self.context, self.custom_macros).nodes(
+                            part_nodes
                         )
-                    except Exception:  # noqa: BLE001 - preserve raw author text
-                        rendered = clean_author_name(part)
-                    if rendered and "@" not in rendered:
-                        values.append(rendered)
-            return list(dict.fromkeys(values))
-        return []
+                    )
+                except Exception:  # noqa: BLE001 - preserve raw author text
+                    rendered = clean_author_name(part)
+                if rendered and "@" not in rendered:
+                    values.append(rendered)
+        return list(dict.fromkeys(values))
 
     def update_heading(self, level: int, title: str) -> None:
         """更新当前章节祖先路径。"""
@@ -1084,22 +1089,18 @@ class TexPaperParser:
                 or not element.heading_path
             ):
                 continue
-            candidates: list[tuple[int, int, list[str]]] = []
-            for label in element.labels:
-                for reference_index, path in reference_contexts.get(label, []):
-                    if (
-                        reference_index == index
-                        or not path
-                        or path[0] != element.heading_path[0]
-                    ):
-                        continue
-                    candidates.append(
-                        (
-                            abs(reference_index - index),
-                            0 if reference_index > index else 1,
-                            path,
-                        )
-                    )
+            candidates = [
+                (
+                    abs(reference_index - index),
+                    0 if reference_index > index else 1,
+                    path,
+                )
+                for label in element.labels
+                for reference_index, path in reference_contexts.get(label, [])
+                if reference_index != index
+                and path
+                and path[0] == element.heading_path[0]
+            ]
             if not candidates:
                 continue
             best_distance = min(distance for distance, _, _ in candidates)

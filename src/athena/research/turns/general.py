@@ -137,6 +137,7 @@ class GeneralTurnMixin:
                 plan=KAGGLE_HANDOFF_AGENT_ID,
             )
         except asyncio.CancelledError:
+            # Trigger: the optional Kaggle evidence handoff is cancelled; keep turn cancellation visible.
             raise
         except Exception as exc:  # noqa: BLE001 - handoff 是可选证据通道
             await rt.publish_output(

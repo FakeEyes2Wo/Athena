@@ -334,16 +334,20 @@ def supervisor_tool_registry(
         ),
         (
             "configure_kaggle",
-            "Enable or disable Kaggle tools for this run, and choose whether to download "
-            "the competition dataset locally. Enable when the task is a Kaggle competition.",
+            (
+                "Enable or disable Kaggle tools for this run, and choose whether to download "
+                "the competition dataset locally. Enable when the task is a Kaggle competition."
+            ),
             _KaggleConfiguration,
             set_kaggle,
         ),
         (
             "record_task_understanding",
-            "Record the structured task understanding (title, dataset, target, task type, "
-            "primary metric + direction, evaluation plan) for the GUI intent preview. "
-            "Call this on the first task-understanding turn.",
+            (
+                "Record the structured task understanding (title, dataset, target, task type, "
+                "primary metric + direction, evaluation plan) for the GUI intent preview. "
+                "Call this on the first task-understanding turn."
+            ),
             _TaskUnderstanding,
             record_understanding,
         ),

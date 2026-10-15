@@ -26,19 +26,23 @@ describe("HumanRequestPanel", () => {
     expect(screen.getByText("选择一项，或在下方输入框中输入其他回答")).toBeInTheDocument();
   });
 
-  it("submits a choice", () => {
+  it("submits a choice", async () => {
     const reply = vi.fn(async (_reply: HumanReply) => undefined);
     render(<HumanRequestPanel request={requestOne} onReply={reply} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "AUC" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "AUC" }));
+    });
     expect(reply).toHaveBeenCalledWith({ kind: "choice", value: "auc" });
   });
 
-  it("submits a skip only when skipping is allowed", () => {
+  it("submits a skip only when skipping is allowed", async () => {
     const reply = vi.fn(async (_reply: HumanReply) => undefined);
     const view = render(<HumanRequestPanel request={requestOne} onReply={reply} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    });
     expect(reply).toHaveBeenCalledWith({ kind: "skip" });
 
     view.rerender(
@@ -47,7 +51,7 @@ describe("HumanRequestPanel", () => {
     expect(screen.queryByRole("button", { name: "跳过" })).not.toBeInTheDocument();
   });
 
-  it("supports arrow-key navigation and number shortcuts between choices", () => {
+  it("supports arrow-key navigation and number shortcuts between choices", async () => {
     const reply = vi.fn(async (_reply: HumanReply) => undefined);
     render(<HumanRequestPanel request={requestOne} onReply={reply} />);
 
@@ -58,7 +62,9 @@ describe("HumanRequestPanel", () => {
     expect(second).toHaveFocus();
     fireEvent.keyDown(second, { key: "ArrowUp" });
     expect(first).toHaveFocus();
-    fireEvent.keyDown(first, { key: "2" });
+    await act(async () => {
+      fireEvent.keyDown(first, { key: "2" });
+    });
     expect(reply).toHaveBeenCalledWith({ kind: "choice", value: "auc" });
   });
 
@@ -69,7 +75,7 @@ describe("HumanRequestPanel", () => {
     expect(screen.getByRole("button", { name: "跳过" })).toBeDisabled();
   });
 
-  it("submits exactly one reply per request even on rapid double clicks", () => {
+  it("submits exactly one reply per request even on rapid double clicks", async () => {
     let resolveReply: (() => void) | undefined;
     const reply = vi.fn(
       (_reply: HumanReply) =>
@@ -84,8 +90,34 @@ describe("HumanRequestPanel", () => {
     fireEvent.click(choiceButton);
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenCalledWith({ kind: "choice", value: "f1" });
-    resolveReply?.();
+    await act(async () => resolveReply?.());
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a previous request's late %s while the new reply is pending",
+    async (outcome) => {
+      let settleOld!: () => void;
+      let finishNew!: () => void;
+      const reply = vi.fn()
+        .mockImplementationOnce(() => new Promise<void>((resolve, reject) => {
+          settleOld = outcome === "resolve" ? resolve : () => reject(new Error("old request expired"));
+        }))
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { finishNew = resolve; }));
+      const view = render(<HumanRequestPanel request={requestOne} onReply={reply} />);
+      fireEvent.click(screen.getByRole("button", { name: "F1" }));
+      view.rerender(<HumanRequestPanel request={{ ...requestOne, request_id: "req-2" }} onReply={reply} />);
+      fireEvent.click(screen.getByRole("button", { name: "AUC" }));
+
+      await act(async () => settleOld());
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "AUC" })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "F1" }));
+      expect(reply).toHaveBeenCalledTimes(2);
+
+      await act(async () => finishNew());
+      expect(screen.getByRole("button", { name: "AUC" })).toBeEnabled();
+    },
+  );
 
   it("shows a rejected reply and the transport error without dismissing", async () => {
     const reply = vi.fn(async () => {

@@ -1309,6 +1309,7 @@ def test_verified_carrier_rejects_mismatched_canonical_verification_bytes(
 
 class PrepareRuntime:
     def __init__(self, authority: Any) -> None:
+        self.state = SimpleNamespace(experiment_timeout_s=120)
         self.registry = SimpleNamespace(contains=lambda _agent_type: True)
         self.provider = object()
         self.store = SimpleNamespace(put_text=self._put_text)
@@ -1521,6 +1522,7 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
 
     assert result == expected
     assert order == ["checked", "registered", "checked"]
+    assert captured["timeout_s"] == 120
     assert callable(captured["assert_baseline"])
     assert captured["task"].startswith("task\n\nPlatform-verified baseline artifacts:")
     for filename in (

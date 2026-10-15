@@ -28,6 +28,7 @@ from urllib.request import Request, urlopen
 try:
     import fitz  # PyMuPDF
 except ImportError:
+    # The standalone PDF preparation script needs the optional local PyMuPDF install.
     print("missing dependency: pip install pymupdf", file=sys.stderr)
     raise
 
@@ -39,16 +40,19 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
 def fetch(url: str) -> bytes:
+    """Fetch one arXiv page or PDF with the script's required User-Agent."""
     req = Request(url, headers=UA)
     with urlopen(req, timeout=60) as resp:
         return resp.read()
 
 
 def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file's complete contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def strip_tags(html: str) -> str:
+    """Remove markup and collapse whitespace from an HTML fragment."""
     text = re.sub(r"<script.*?</script>", " ", html, flags=re.S)
     text = re.sub(r"<style.*?</style>", " ", text, flags=re.S)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -56,6 +60,7 @@ def strip_tags(html: str) -> str:
 
 
 def parse_abs(html: str, arxiv_id: str) -> dict:
+    """Extract title, authors, abstract, comments, and latest version metadata."""
     title = re.search(r'<h1 class="title mathjax">(.*?)</h1>', html, flags=re.S)
     authors = re.search(r'<div class="authors">(.*?)</div>', html, flags=re.S)
     abstract = re.search(
@@ -67,7 +72,8 @@ def parse_abs(html: str, arxiv_id: str) -> dict:
     versions = re.findall(re.escape(arxiv_id) + r"v(\d+)", html)
 
     def clean(x: str) -> str:
-        return re.sub(r"\s+", " ", strip_tags(x)).strip()
+        """Normalize a matched metadata fragment after stripping its markup."""
+        return strip_tags(x)
 
     title = clean(title.group(1)) if title else ""
     if title.startswith("Title:"):
@@ -90,6 +96,7 @@ def parse_abs(html: str, arxiv_id: str) -> dict:
 
 
 def write_manifest(out_dir: Path, meta_obj: dict) -> None:
+    """Write a manifest containing hashes for the dataset files that exist."""
     manifest = {
         "dataset": "examples_articles",
         "entry": {
@@ -129,6 +136,7 @@ def write_manifest(out_dir: Path, meta_obj: dict) -> None:
 
 
 def main() -> None:
+    """Download and extract one arXiv paper, or refresh its existing manifest."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--arxiv-id", required=True)
     parser.add_argument("--out", required=True)
@@ -176,11 +184,10 @@ def main() -> None:
     pdf_path.write_bytes(pdf_bytes)
 
     print("[3/5] extract text with PyMuPDF")
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = []
-    for page in doc:
-        pages.append(f"<!-- page {page.number + 1} -->\n" + page.get_text("text"))
-    doc.close()
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page in doc:
+            pages.append(f"<!-- page {page.number + 1} -->\n" + page.get_text("text"))
     paper_text = (
         f"# {meta['title']}\n\n"
         f"arXiv: {arxiv_id}v{meta['version']}\n\n"

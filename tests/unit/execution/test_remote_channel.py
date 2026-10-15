@@ -588,3 +588,312 @@ async def test_reading_a_file_returns_exactly_what_was_written(channel, tmp_path
     target = tmp_path / "blob.bin"
     await channel.write_file(str(target), payload)
     assert await channel.read_file(str(target)) == payload
+
+
+@pytest.mark.asyncio
+async def test_open_cancellation_stops_transport_during_bootstrap() -> None:
+    class _BlockingWriter:
+        def __init__(self) -> None:
+            self.draining = asyncio.Event()
+
+        def write(self, data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            self.draining.set()
+            await asyncio.Event().wait()
+
+        def can_write_eof(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    class _Transport:
+        description = "fake:bootstrap"
+
+        def __init__(self) -> None:
+            self.writer = _BlockingWriter()
+            self.stopped = False
+
+        async def start(self):
+            return self.writer, asyncio.StreamReader()
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        def diagnostics(self) -> str:
+            return ""
+
+    transport = _Transport()
+    channel = RemoteChannel(transport)
+    task = asyncio.create_task(channel.open())
+    await transport.writer.draining.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert transport.stopped
+
+
+@pytest.mark.asyncio
+async def test_probe_cancellation_closes_established_transport(monkeypatch) -> None:
+    class _Writer:
+        def write(self, data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+        def can_write_eof(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    class _Transport:
+        description = "fake:probe"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def start(self):
+            return _Writer(), asyncio.StreamReader()
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        def diagnostics(self) -> str:
+            return ""
+
+    transport = _Transport()
+    channel = RemoteChannel(transport)
+
+    async def ready_loop():
+        channel._dispatch({"op": "ready", "id": "@ready"})
+
+    async def cancelled_probe(_op, **_fields):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(channel, "_read_loop", ready_loop)
+    monkeypatch.setattr(channel, "request", cancelled_probe)
+    with pytest.raises(asyncio.CancelledError):
+        await channel.open()
+    assert transport.stopped
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_clears_state_and_sends_remote_cancel(
+    channel, monkeypatch, tmp_path
+) -> None:
+    sent: list[dict] = []
+    spawn_sent = asyncio.Event()
+
+    async def record_send(payload):
+        sent.append(payload)
+        if payload["op"] == "spawn":
+            spawn_sent.set()
+
+    monkeypatch.setattr(channel, "_send", record_send)
+    task = asyncio.create_task(
+        channel.spawn(
+            command=[sys.executable, "-c", "pass"],
+            cwd=str(tmp_path),
+            env={},
+            on_output=lambda _fd, _block: None,
+        )
+    )
+    await spawn_sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [message["op"] for message in sent] == ["spawn", "cancel"]
+    assert sent[1]["target"] == sent[0]["id"]
+    assert not channel._pending
+    assert not channel._jobs
+
+
+@pytest.mark.asyncio
+async def test_close_after_remote_eof_still_stops_transport() -> None:
+    class _Transport:
+        description = "fake:eof"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        def diagnostics(self) -> str:
+            return ""
+
+    transport = _Transport()
+    channel = RemoteChannel(transport)
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    channel._reader = reader
+    channel._pump = asyncio.create_task(channel._read_loop())
+    await channel._pump
+    assert channel._closed
+
+    await channel.close()
+    assert transport.stopped
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_finishes_cleanup_and_remains_idempotent() -> None:
+    class _Transport:
+        description = "fake:close"
+
+        def __init__(self) -> None:
+            self.stopping = asyncio.Event()
+            self.finish_stop = asyncio.Event()
+            self.stop_calls = 0
+
+        async def stop(self) -> None:
+            self.stop_calls += 1
+            self.stopping.set()
+            await self.finish_stop.wait()
+
+        def diagnostics(self) -> str:
+            return ""
+
+    transport = _Transport()
+    channel = RemoteChannel(transport)
+    close_task = asyncio.create_task(channel.close())
+    await transport.stopping.wait()
+    close_task.cancel()
+    await asyncio.sleep(0)
+    close_task.cancel()
+    await asyncio.sleep(0)
+    close_task.cancel()
+    await asyncio.sleep(0)
+    cleanup_was_protected = not close_task.done()
+
+    transport.finish_stop.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+    await channel.close()
+    assert cleanup_was_protected
+    assert transport.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_bounds_best_effort_cancel_send(
+    channel, monkeypatch, tmp_path
+) -> None:
+    from athena.execution.remote import channel as channel_module
+
+    monkeypatch.setattr(channel_module, "SPAWN_CANCEL_TIMEOUT_S", 0.02, raising=False)
+    spawn_started = asyncio.Event()
+    cancel_started = asyncio.Event()
+
+    async def blocked_send(payload):
+        if payload["op"] == "spawn":
+            spawn_started.set()
+        else:
+            cancel_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(channel, "_send", blocked_send)
+    task = asyncio.create_task(
+        channel.spawn(
+            command=[sys.executable, "-c", "pass"],
+            cwd=str(tmp_path),
+            env={},
+            on_output=lambda _fd, _block: None,
+        )
+    )
+    await spawn_started.wait()
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=0.2)
+    cleanup_was_bounded = bool(done)
+    if not done:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancel_started.is_set()
+    assert cleanup_was_bounded
+    assert not channel._pending
+    assert not channel._jobs
+
+
+@pytest.mark.asyncio
+async def test_spawn_cancel_send_consumes_late_exception(
+    channel, monkeypatch, tmp_path
+) -> None:
+    from athena.execution.remote import channel as channel_module
+
+    monkeypatch.setattr(channel_module, "SPAWN_CANCEL_TIMEOUT_S", 0.01)
+    spawn_started = asyncio.Event()
+    cancel_started = asyncio.Event()
+    release_cancel = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+    async def delayed_cancel_failure(payload):
+        if payload["op"] == "spawn":
+            spawn_started.set()
+            await asyncio.Event().wait()
+        cancel_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_cancel.wait()
+            raise OSError("late cancel write failure")
+
+    monkeypatch.setattr(channel, "_send", delayed_cancel_failure)
+    task = asyncio.create_task(
+        channel.spawn(
+            command=[sys.executable, "-c", "pass"],
+            cwd=str(tmp_path),
+            env={},
+            on_output=lambda _fd, _block: None,
+        )
+    )
+    try:
+        await spawn_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await cancel_started.wait()
+        release_cancel.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert unhandled == []
+    finally:
+        release_cancel.set()
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_failed_send_removes_pending_request(channel, monkeypatch) -> None:
+    async def fail_send(_payload):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(channel, "_send", fail_send)
+    with pytest.raises(OSError, match="write failed"):
+        await channel._send_request("probe")
+    assert not channel._pending
+
+
+@pytest.mark.asyncio
+async def test_failed_spawn_send_removes_job_state(
+    channel, monkeypatch, tmp_path
+) -> None:
+    async def fail_send(_payload):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(channel, "_send", fail_send)
+    with pytest.raises(OSError, match="write failed"):
+        await channel.spawn(
+            command=[sys.executable, "-c", "pass"],
+            cwd=str(tmp_path),
+            env={},
+            on_output=lambda _fd, _block: None,
+        )
+    assert not channel._pending
+    assert not channel._jobs

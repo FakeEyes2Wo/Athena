@@ -110,6 +110,7 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
     """第二个 evaluator 必须拿到自己的 workspace，而不是继续用第一个的。"""
     bound: list[Path] = []
     frozen: list[Path] = []
+    feature_paths: list[Path | None] = []
 
     class Registry:
         def __init__(self) -> None:
@@ -129,16 +130,26 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         reg._types.add("evaluator")
         bound.append(Path(workspace))
 
-    async def fake_plan(runtime, evaluator_dir, task, plan_id, max_turns):
+    async def fake_plan(
+        runtime, evaluator_dir, task, plan_id, max_turns, *, expected_features=None
+    ):
         del runtime, task, plan_id, max_turns
+        feature_paths.append(expected_features)
         frozen.append(Path(evaluator_dir))
         return "sha256:" + "a" * 64
 
     monkeypatch.setattr(evaluator_module, "register_evaluator_agent", fake_register)
     monkeypatch.setattr(evaluator_module, "run_evaluator_plan", fake_plan)
 
+    data_root = tmp_path / "platform-split"
+    data_root.mkdir()
+    search_features = data_root / "search_features.csv"
+    final_features = data_root / "final_features.csv"
+    search_features.write_text("id,x\ns1,1\n", encoding="utf-8")
+    final_features.write_text("id,x\nf1,1\n", encoding="utf-8")
     rt = SimpleNamespace(
         workspaces_root=tmp_path / "workspaces",
+        state=SimpleNamespace(data_root=str(data_root), data_contract="platform CSV"),
         registry=registry,
         provider=object(),
         store=object(),
@@ -160,6 +171,7 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         tmp_path / "workspaces" / "evaluator",
         tmp_path / "workspaces" / "final_evaluator",
     ]
+    assert feature_paths == [search_features, final_features]
     assert frozen == [path / "evaluate" for path in bound]
 
 

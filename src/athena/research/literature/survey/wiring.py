@@ -125,6 +125,7 @@ class PaperSurveyTool(StackTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Run one configured survey request and return its artifact reference."""
         query = input.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")

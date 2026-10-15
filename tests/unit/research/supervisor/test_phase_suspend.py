@@ -9,8 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.support import RecordingDocumentProjector
-
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_tree import ResearchTree
 from athena.research.supervisor.deps import (
@@ -25,6 +23,7 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from tests.support import RecordingDocumentProjector
 
 
 def _supervisor(tmp_path: Path, *, status: str) -> Supervisor:

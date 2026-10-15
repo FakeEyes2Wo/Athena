@@ -1,6 +1,6 @@
-﻿import json
 import hashlib
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -201,7 +201,7 @@ async def test_repository_success_does_not_require_openalex(
 ) -> None:
     git = FakeGit(GitCloneEvidence("https://github.com/pytorch/vision.git", "b" * 40))
     openalex = FakeOpenAlex(error=AssertionError("OpenAlex must not be called"))
-    verified_at = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    verified_at = datetime(2026, 9, 2, tzinfo=UTC)
 
     result = await BaselineSourceVerifier(
         git=git, openalex=openalex, now=lambda: verified_at
@@ -269,10 +269,12 @@ async def test_openalex_rejects_a_mismatched_title(
     valid_artifacts: BaselineArtifacts,
 ) -> None:
     valid_artifacts.research.candidates[0].repository_url = None
+    valid_artifacts.selected.title = "An Unrelated Paper: XGBoost"
+    authoritative_title = "XGBoost"
     openalex = FakeOpenAlex(
         work=OpenAlexWork(
             openalex_id="W123",
-            title="An unrelated paper about another subject entirely",
+            title=authoritative_title,
             publication_year=2016,
             cited_by_count=1000,
         )
@@ -283,9 +285,118 @@ async def test_openalex_rejects_a_mismatched_title(
             valid_artifacts
         )
 
-    assert caught.value.diagnostics == (
-        "OpenAlex title does not match selected source",
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.startswith("OpenAlex title does not match selected source")
+    assert valid_artifacts.selected.title in diagnostic
+    assert authoritative_title in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_openalex_accepts_exact_colon_main_title_match(
+    valid_artifacts: BaselineArtifacts,
+) -> None:
+    """A full cited title may name the exact short title indexed by OpenAlex."""
+    valid_artifacts.research.candidates[0].repository_url = None
+    valid_artifacts.selected.title = "XGBoost: A Scalable Tree Boosting System"
+    work = OpenAlexWork(
+        openalex_id="W2295598076",
+        title="XGBoost",
+        publication_year=2016,
+        cited_by_count=53_129,
     )
+
+    result = await BaselineSourceVerifier(
+        git=FakeGit(), openalex=FakeOpenAlex(work=work)
+    ).verify(valid_artifacts)
+
+    assert result.title == "XGBoost"
+    assert result.publication_year == 2016
+    assert result.paper_locator == valid_artifacts.selected.paper_locator
+    assert result.cited_by_count == 53_129
+
+
+@pytest.mark.asyncio
+async def test_openalex_accepts_authority_full_title_for_candidate_main_title(
+    valid_artifacts: BaselineArtifacts,
+) -> None:
+    """The same exact colon rule works when the authority has the full title."""
+    valid_artifacts.research.candidates[0].repository_url = None
+    valid_artifacts.selected.title = "XGBoost"
+    authoritative_title = "XGBoost: A Scalable Tree Boosting System"
+    work = OpenAlexWork(
+        openalex_id="W2295598076",
+        title=authoritative_title,
+        publication_year=2016,
+        cited_by_count=53_129,
+    )
+
+    result = await BaselineSourceVerifier(
+        git=FakeGit(), openalex=FakeOpenAlex(work=work)
+    ).verify(valid_artifacts)
+
+    assert result.title == authoritative_title
+    assert result.paper_locator == valid_artifacts.selected.paper_locator
+
+
+@pytest.mark.parametrize(
+    ("selected_title", "authoritative_title"),
+    [
+        ("An Unrelated Paper: XGBoost", "XGBoost"),
+        ("XGBoosting Methods: GPU acceleration", "XGBoost"),
+        ("XGB: A Scalable Tree Boosting System", "XGBoost"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openalex_colon_exception_rejects_substring_or_different_main_title(
+    valid_artifacts: BaselineArtifacts,
+    selected_title: str,
+    authoritative_title: str,
+) -> None:
+    valid_artifacts.research.candidates[0].repository_url = None
+    valid_artifacts.selected.title = selected_title
+    openalex = FakeOpenAlex(
+        work=OpenAlexWork(
+            openalex_id="W2295598076",
+            title=authoritative_title,
+            publication_year=2016,
+            cited_by_count=53_129,
+        )
+    )
+
+    with pytest.raises(BaselineResearchError, match="no qualifying source"):
+        await BaselineSourceVerifier(git=FakeGit(), openalex=openalex).verify(
+            valid_artifacts
+        )
+
+
+@pytest.mark.asyncio
+async def test_openalex_title_mismatch_feedback_is_bounded_and_redacted(
+    valid_artifacts: BaselineArtifacts,
+) -> None:
+    valid_artifacts.research.candidates[0].repository_url = None
+    secret = "private-title-token-value"
+    valid_artifacts.selected.title = f"Requested method token={secret} " + "x" * 5000
+    resolved_title = "Canonical paper title"
+    openalex = FakeOpenAlex(
+        work=OpenAlexWork(
+            openalex_id="W123",
+            title=resolved_title,
+            publication_year=2016,
+            cited_by_count=1000,
+        )
+    )
+
+    with pytest.raises(BaselineResearchError, match="no qualifying source") as caught:
+        await BaselineSourceVerifier(git=FakeGit(), openalex=openalex).verify(
+            valid_artifacts
+        )
+
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.startswith("OpenAlex title does not match selected source")
+    assert len(diagnostic) <= 4000
+    assert "token=[REDACTED]" in diagnostic
+    assert secret not in diagnostic
+    assert resolved_title in diagnostic
 
 
 @pytest.mark.asyncio

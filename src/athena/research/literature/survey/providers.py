@@ -79,6 +79,7 @@ class OpenAIEmbedder:
                     model=self.model, input=batch
                 )
             except RateLimitError:
+                # Trigger: an embeddings batch receives a rate-limit response and may be retried.
                 if attempt == EMBED_MAX_RETRIES - 1:
                     raise
                 self.retries += 1
@@ -156,6 +157,7 @@ class VisionInterpreter:
             try:
                 loaded = json.loads(match.group(0))
             except json.JSONDecodeError:
+                # Trigger: the judge response's extracted JSON is malformed; treat its verdict as absent.
                 loaded = None
             if isinstance(loaded, dict):
                 payload = loaded

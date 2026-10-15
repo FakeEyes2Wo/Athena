@@ -66,8 +66,10 @@ def test_fresh_import_ignores_agent_writable_cwd_and_path(
         [
             sys.executable,
             "-c",
-            "from athena.research.prepare.source_verification import "
-            "_GIT_EXECUTABLE; print(_GIT_EXECUTABLE or '')",
+            (
+                "from athena.research.prepare.source_verification import "
+                "_GIT_EXECUTABLE; print(_GIT_EXECUTABLE or '')"
+            ),
         ],
         cwd=fake_bin,
         env=environment,
@@ -659,7 +661,7 @@ class TimeoutRunner:
 @pytest.mark.parametrize(
     "error",
     [
-        asyncio.TimeoutError("operation took too long"),
+        TimeoutError("operation took too long"),
         subprocess.TimeoutExpired(["git"], 1),
     ],
 )

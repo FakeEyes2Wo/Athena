@@ -71,6 +71,7 @@ def _error_message(response: HttpResponse) -> str:
                 if payload.get(key):
                     return str(payload[key])
     except (json.JSONDecodeError, UnicodeDecodeError):
+        # Error pages can be plain text or HTML; retain a bounded readable preview.
         pass
     return response.body.decode("utf-8", errors="replace").strip()[:300] or "no body"
 
@@ -79,6 +80,7 @@ def _response_json(response: HttpResponse, error_message: str = "not JSON") -> A
     try:
         return json.loads(response.body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        # A successful API response must still contain valid UTF-8 JSON.
         raise KaggleApiError(response.status, error_message, response.url) from error
 
 
@@ -272,6 +274,7 @@ class KaggleApiClient:
                         headers=lower_headers(response.headers.items()),
                     )
             except urllib.error.HTTPError as error:
+                # Non-2xx uploads still carry a response body useful to callers.
                 return HttpResponse(
                     status=error.code,
                     url=url,
@@ -279,6 +282,7 @@ class KaggleApiClient:
                     headers=lower_headers(error.headers.items()),
                 )
             except urllib.error.URLError as error:
+                # DNS, connection, or TLS failure prevented an HTTP response.
                 raise KaggleApiError(0, f"POST failed: {error.reason}", url) from error
 
         return await asyncio.to_thread(_do_post)
@@ -347,7 +351,9 @@ def _discussion_source_from_body(body: bytes) -> str:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError):
+        # Discussion endpoints sometimes return rendered text instead of JSON.
         return body.decode("utf-8", errors="replace")
+    # Kaggle wraps discussion responses in one of these API-version envelopes.
     if isinstance(payload, dict):
         for key in ("thread", "discussion", "result"):
             nested = payload.get(key)
@@ -356,6 +362,7 @@ def _discussion_source_from_body(body: bytes) -> str:
                 break
     if not isinstance(payload, dict):
         return json.dumps(payload, ensure_ascii=False)
+    # Preserve the root post and each reply in their original response order.
     parts: list[str] = []
     title = payload.get("title")
     if isinstance(title, str) and title.strip():
@@ -366,22 +373,21 @@ def _discussion_source_from_body(body: bytes) -> str:
             parts.append(value.strip())
             break
     comments = payload.get("comments") or payload.get("replies")
-    if isinstance(comments, list):
-        for comment in comments:
-            if not isinstance(comment, dict):
-                continue
-            author = comment.get("author")
-            if isinstance(author, dict):
-                author = author.get("name", "")
-            text = ""
-            for key in ("body", "content", "text", "commentText"):
-                value = comment.get(key)
-                if isinstance(value, str) and value.strip():
-                    text = value.strip()
-                    break
-            prefix = f"**{author}:**" if author else "**comment:**"
-            if text:
-                parts.append(f"{prefix} {text}")
+    for comment in comments if isinstance(comments, list) else []:
+        if not isinstance(comment, dict):
+            continue
+        author = comment.get("author")
+        if isinstance(author, dict):
+            author = author.get("name", "")
+        text = ""
+        for key in ("body", "content", "text", "commentText"):
+            value = comment.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+        prefix = f"**{author}:**" if author else "**comment:**"
+        if text:
+            parts.append(f"{prefix} {text}")
     return "\n\n".join(parts) if parts else body.decode("utf-8", errors="replace")
 
 
@@ -402,14 +408,23 @@ def _notebook_source_from_body(body: bytes) -> str:
             if isinstance(source, str) and source.strip():
                 return source
     except (json.JSONDecodeError, UnicodeDecodeError):
+        # Notebook downloads may be archives or raw source rather than JSON wrappers.
         pass
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             names = archive.namelist()
-            for suffix in (".ipynb", ".py"):
-                for name in names:
-                    if name.endswith(suffix):
-                        return archive.read(name).decode("utf-8", errors="replace")
+            name = next(
+                (
+                    name
+                    for suffix in (".ipynb", ".py")
+                    for name in names
+                    if name.endswith(suffix)
+                ),
+                None,
+            )
+            if name is not None:
+                return archive.read(name).decode("utf-8", errors="replace")
     except (zipfile.BadZipFile, OSError):
+        # The body is not a readable notebook archive; preserve its raw text instead.
         pass
     return body.decode("utf-8", errors="replace")

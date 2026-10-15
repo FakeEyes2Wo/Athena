@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_GUI_SETTINGS } from "../../lib/tauri-bridge";
 import { SettingsPanel } from "../SettingsPanel";
@@ -78,6 +78,39 @@ describe("SettingsPanel validation controls", () => {
     expect(automatic).toBeDisabled();
     expect(automatic).toBeChecked();
     expect(screen.getByText(/SEARCH.*Final/)).toBeVisible();
+  });
+
+  it("ignores a settings snapshot from an earlier session load", async () => {
+    let resolveEarlier!: (value: ReturnType<typeof settings>) => void;
+    let resolveCurrent!: (value: ReturnType<typeof settings>) => void;
+    bridgeMocks.settingsGet
+      .mockReturnValueOnce(
+        new Promise<ReturnType<typeof settings>>((resolve) => {
+          resolveEarlier = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<ReturnType<typeof settings>>((resolve) => {
+          resolveCurrent = resolve;
+        }),
+      );
+
+    const panel = render(<SettingsPanel open onClose={vi.fn()} />);
+    await waitFor(() => expect(bridgeMocks.settingsGet).toHaveBeenCalledTimes(1));
+    panel.rerender(<SettingsPanel open={false} onClose={vi.fn()} />);
+    panel.rerender(<SettingsPanel open onClose={vi.fn()} />);
+    await waitFor(() => expect(bridgeMocks.settingsGet).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      resolveCurrent(settings({ project_root: "C:/session-b", search_limit: 4 }));
+    });
+    expect(screen.getAllByRole("spinbutton")[0]).toHaveValue(4);
+
+    await act(async () => {
+      resolveEarlier(settings({ project_root: "C:/session-a", search_limit: 0 }));
+    });
+
+    expect(screen.getAllByRole("spinbutton")[0]).toHaveValue(4);
   });
 
   it("does not submit a loaded masked API key", async () => {

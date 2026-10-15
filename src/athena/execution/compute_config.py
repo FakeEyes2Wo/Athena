@@ -120,5 +120,6 @@ def load_compute_config(path: Path | None = None) -> ComputeConfig:
     try:
         payload = tomllib.loads(target.read_bytes().decode("utf-8-sig"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        # Missing, unreadable, non-UTF-8, or malformed TOML cannot define a usable device.
         raise ComputeConfigError(f"cannot read {target}: {exc}") from exc
     return parse_compute_config(payload.get("compute"))

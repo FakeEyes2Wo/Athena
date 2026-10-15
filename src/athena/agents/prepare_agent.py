@@ -91,6 +91,7 @@ def register_prepare_eda_agent(
         agent_type=PREPARE_EDA_AGENT_TYPE,
         output_type=HandoffResult,
         extra_tools=extra_tools,
+        restrict_shell_workdir=True,
     )
     register_prompt_agent(
         registry,

@@ -31,6 +31,8 @@ _SETTLED_LEDGER_SIZE = 256
 
 @dataclass(frozen=True)
 class PendingRequest:
+    """Pair a GUI-visible request with the supervisor's waiting future."""
+
     request: HumanRequest
     future: asyncio.Future[HumanOutcome]
 
@@ -60,9 +62,8 @@ class HumanRequestBroker:
 
     @property
     def active_session_id(self) -> str:
+        """Return the session currently used for legacy ask calls."""
         return self._active_scope.session_id
-
-    # ── typed ask / legacy ask ───────────────────────────────────────────
 
     async def ask(
         self,
@@ -141,10 +142,9 @@ class HumanRequestBroker:
         try:
             return await asyncio.wait_for(asyncio.shield(future), timeout)
         except TimeoutError:
+            # The operation exceeded its configured deadline.
             async with self._lock:
                 return self._settle_timeout_locked(request.request_id)
-
-    # ── settlement API ───────────────────────────────────────────────────
 
     async def reply(
         self,
@@ -179,8 +179,6 @@ class HumanRequestBroker:
             return self._cancel_matching_locked(
                 lambda req: req.session_id == session_id
             )
-
-    # ── locked helpers ───────────────────────────────────────────────────
 
     def _settle_reply_locked(
         self, session_id: str, request_id: str, reply: HumanReply

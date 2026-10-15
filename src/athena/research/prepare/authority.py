@@ -21,6 +21,7 @@ def _exact_bytes(value: bytes | bytearray | memoryview, *, field: str) -> bytes:
     try:
         copied = bytes(value)
     except (TypeError, ValueError) as exc:
+        # Trigger: copying the caller's bytes-like baseline payload rejects its underlying buffer.
         raise BaselineAuthorityError(f"{field} must be readable bytes-like") from exc
     if not copied:
         raise BaselineAuthorityError(f"{field} must not be empty")

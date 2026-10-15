@@ -170,48 +170,49 @@ class Agent(BaseAgent):
             if ctx.cancel.is_set():
                 break
             outcome = await _sampling_loop(self, ctx)
-            if outcome.kind == "done":
-                if self._output_type is not None:
-                    try:
-                        instance = self._output_type.model_validate_json(
-                            _unfenced(outcome.text)
-                        )
-                    except ValidationError as exc:
-                        if retries >= _MAX_STRUCTURED_RETRIES:
-                            raise RuntimeError(
-                                f"structured output invalid after retries: {exc}"
-                            ) from exc
-                        retries += 1
-                        mem.append(
-                            ModelRequest(
-                                parts=[
-                                    UserPromptPart(
-                                        content=(
-                                            "Previous JSON output was invalid: "
-                                            f"{exc}\nReturn JSON matching the schema."
-                                        )
-                                    )
-                                ]
-                            )
-                        )
-                        continue
-                    json_text = instance.model_dump_json()
-                    ref = (
-                        await self._artifacts.put_text(json_text)
-                        if self._artifacts is not None
-                        else f"result://{ctx.turn.turn_id}"
-                    )
-                    return AgentOutcome(
-                        result_ref=ref,
-                        next_context_ref=f"context://{ctx.turn.turn_id}/next",
-                    )
-                ref = f"result://{ctx.turn.turn_id}"
-                return AgentOutcome(
-                    result_ref=ref,
-                    next_context_ref=f"context://{ctx.turn.turn_id}/next",
-                )
             if outcome.kind == "error":
                 raise RuntimeError(outcome.text or "provider stream failed")
+            if outcome.kind != "done":
+                continue
+            if self._output_type is None:
+                return AgentOutcome(
+                    result_ref=f"result://{ctx.turn.turn_id}",
+                    next_context_ref=f"context://{ctx.turn.turn_id}/next",
+                )
+            try:
+                instance = self._output_type.model_validate_json(
+                    _unfenced(outcome.text)
+                )
+            except ValidationError as exc:
+                # Invalid model JSON gets bounded schema feedback before surfacing failure.
+                if retries >= _MAX_STRUCTURED_RETRIES:
+                    raise RuntimeError(
+                        f"structured output invalid after retries: {exc}"
+                    ) from exc
+                retries += 1
+                mem.append(
+                    ModelRequest(
+                        parts=[
+                            UserPromptPart(
+                                content=(
+                                    "Previous JSON output was invalid: "
+                                    f"{exc}\nReturn JSON matching the schema."
+                                )
+                            )
+                        ]
+                    )
+                )
+                continue
+            json_text = instance.model_dump_json()
+            ref = (
+                await self._artifacts.put_text(json_text)
+                if self._artifacts is not None
+                else f"result://{ctx.turn.turn_id}"
+            )
+            return AgentOutcome(
+                result_ref=ref,
+                next_context_ref=f"context://{ctx.turn.turn_id}/next",
+            )
 
         if self._output_type is not None:
             raise RuntimeError("max turns exhausted without structured output")

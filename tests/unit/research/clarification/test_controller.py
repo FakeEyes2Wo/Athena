@@ -288,6 +288,110 @@ async def test_cancel_sets_cancelled_and_settles_scope(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_pending_question_cannot_be_overwritten_by_start(
+    tmp_path,
+) -> None:
+    store = ClarificationStore(tmp_path)
+    asking = asyncio.Event()
+    release = asyncio.Event()
+
+    class DeferredBroker:
+        async def ask(self, request: HumanRequest) -> HumanOutcome:
+            asking.set()
+            await release.wait()
+            return HumanOutcome(
+                request_id=request.request_id,
+                kind="cancelled",
+                settled_at=datetime(2026, 9, 1, 10, tzinfo=UTC),
+            )
+
+        async def cancel_scope(self, session_id: str, scope_id: str):
+            del session_id, scope_id
+            release.set()
+            return []
+
+    calls = 0
+
+    def generator(draft: ClarificationDraft):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ClarificationQuestionStep(
+                kind="question",
+                field="dataset",
+                prompt="Which dataset?",
+                choices=[
+                    HumanChoice(label="A", value="a"),
+                    HumanChoice(label="B", value="b"),
+                ],
+                allow_custom=False,
+                allow_skip=False,
+            )
+        return ClarificationFinalStep(
+            kind="final",
+            understanding=DraftUnderstanding(
+                title="Predict churn", task_type="classification"
+            ),
+            unresolved=[],
+        )
+
+    controller = ClarificationController(
+        store,
+        DeferredBroker(),
+        generator,
+        ClarificationOptions(session_id="s1"),
+    )
+    starting = asyncio.create_task(controller.start_or_resume("predict churn"))
+    await asking.wait()
+    pending = store.load()
+
+    cancelled = await controller.cancel(pending.draft_id, pending.revision)
+    result = await starting
+
+    assert cancelled.status == "CANCELLED"
+    assert result.status == "CANCELLED"
+    assert store.load().status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_generator_failure_cannot_be_overwritten(tmp_path) -> None:
+    store = ClarificationStore(tmp_path)
+    generating = asyncio.Event()
+    fail_generator = asyncio.Event()
+
+    class ImmediateBroker:
+        async def ask(self, request: HumanRequest) -> HumanOutcome:
+            raise AssertionError("this generator never asks a human")
+
+        async def cancel_scope(self, session_id: str, scope_id: str):
+            return []
+
+    async def generator(draft: ClarificationDraft):
+        del draft
+        generating.set()
+        await fail_generator.wait()
+        raise RuntimeError("controlled generator failure")
+
+    controller = ClarificationController(
+        store,
+        ImmediateBroker(),
+        generator,
+        ClarificationOptions(session_id="s1"),
+    )
+    starting = asyncio.create_task(controller.start_or_resume("predict churn"))
+    await generating.wait()
+    draft = store.load()
+
+    cancelled = await controller.cancel(draft.draft_id, draft.revision)
+    fail_generator.set()
+    result = await starting
+
+    assert cancelled.status == "CANCELLED"
+    assert result.status == "CANCELLED"
+    assert store.load().status == "CANCELLED"
+
+
+@pytest.mark.asyncio
 async def test_cancel_scope_failure_is_not_silently_flattened(tmp_path) -> None:
     store, broker, controller = _controller(tmp_path)
     ready = await controller.start_or_resume("predict churn")
@@ -414,6 +518,135 @@ async def test_cancel_persists_pending_request_as_cancelled(tmp_path) -> None:
 
     assert cancelled.status == "CANCELLED"
     assert cancelled.answers[-1].outcome == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_pending_recovery_cannot_be_overwritten(tmp_path) -> None:
+    store = ClarificationStore(tmp_path)
+    entered = asyncio.Event()
+    release_recovery = asyncio.Event()
+    calls = 0
+
+    class BlockingRecoveryBroker(AutoBroker):
+        async def cancel_scope(self, session_id: str, scope_id: str):
+            nonlocal calls
+            calls += 1
+            self.cancelled.append((session_id, scope_id))
+            if calls == 1:
+                entered.set()
+                await release_recovery.wait()
+            return []
+
+    broker = BlockingRecoveryBroker()
+    controller = ClarificationController(
+        store,
+        broker,
+        AlwaysQuestionGenerator(),
+        ClarificationOptions(session_id="s-1"),
+    )
+    now = datetime(2026, 9, 1, 10, tzinfo=UTC)
+    draft = new_draft("predict churn", "s-1", "recover-cancel", now)
+    request = HumanRequest(
+        request_id="req-recover-cancel",
+        session_id="s-1",
+        scope_id=draft.draft_id,
+        scope_kind="clarification",
+        prompt="Which dataset?",
+        choices=[
+            HumanChoice(label="A", value="a"),
+            HumanChoice(label="B", value="b"),
+        ],
+        allow_custom=True,
+        allow_skip=True,
+        created_at=now,
+        expires_at=datetime(2026, 9, 1, 10, 2, tzinfo=UTC),
+    )
+    draft = set_pending(draft, request, now)
+    store.save(draft)
+
+    restoring = asyncio.create_task(controller.run(draft))
+    await entered.wait()
+    cancelled = await controller.cancel(draft.draft_id, draft.revision)
+    release_recovery.set()
+    restored = await restoring
+
+    assert cancelled.status == "CANCELLED"
+    assert restored.status == "CANCELLED"
+    assert store.load().status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pending_recovery_only_settles_canonical_revision_once(
+    tmp_path,
+) -> None:
+    store = ClarificationStore(tmp_path)
+    recovery_entered = [asyncio.Event(), asyncio.Event()]
+    release_recovery = [asyncio.Event(), asyncio.Event()]
+    generator_entered = [asyncio.Event(), asyncio.Event()]
+    release_generator = asyncio.Event()
+    calls = 0
+
+    class ConcurrentRecoveryBroker(AutoBroker):
+        async def cancel_scope(self, session_id: str, scope_id: str):
+            nonlocal calls
+            index = calls
+            calls += 1
+            self.cancelled.append((session_id, scope_id))
+            recovery_entered[index].set()
+            await release_recovery[index].wait()
+            return []
+
+    generation_calls = 0
+
+    async def blocked_generator(_draft):
+        nonlocal generation_calls
+        index = generation_calls
+        generation_calls += 1
+        generator_entered[index].set()
+        await release_generator.wait()
+        raise asyncio.CancelledError
+
+    broker = ConcurrentRecoveryBroker()
+    controller = ClarificationController(
+        store,
+        broker,
+        blocked_generator,
+        ClarificationOptions(session_id="s-1"),
+    )
+    now = datetime(2026, 9, 1, 10, tzinfo=UTC)
+    draft = new_draft("predict churn", "s-1", "recover-duplicate", now)
+    request = HumanRequest(
+        request_id="req-recover-duplicate",
+        session_id="s-1",
+        scope_id=draft.draft_id,
+        scope_kind="clarification",
+        prompt="Which dataset?",
+        choices=[
+            HumanChoice(label="A", value="a"),
+            HumanChoice(label="B", value="b"),
+        ],
+        allow_custom=True,
+        allow_skip=True,
+        created_at=now,
+        expires_at=datetime(2026, 9, 1, 10, 2, tzinfo=UTC),
+    )
+    draft = set_pending(draft, request, now)
+    store.save(draft)
+
+    first = asyncio.create_task(controller.run(draft))
+    second = asyncio.create_task(controller.run(draft))
+    await asyncio.gather(*(event.wait() for event in recovery_entered))
+    release_recovery[0].set()
+    await generator_entered[0].wait()
+    release_recovery[1].set()
+    await generator_entered[1].wait()
+
+    saved = store.load()
+    assert saved.revision == draft.revision + 1
+    assert [answer.request_id for answer in saved.answers] == [request.request_id]
+    for task in (first, second):
+        task.cancel()
+    await asyncio.gather(first, second, return_exceptions=True)
 
 
 @pytest.mark.asyncio

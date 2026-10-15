@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from athena.research.clarification.errors import ClarificationPersistenceError
 from athena.research.supervisor.state import ResearchState
 from gui_gateway.handler import GuiRequestHandler, _session_state_root
 from gui_gateway.human import HumanRequestBroker
@@ -59,6 +60,9 @@ class RecordingRuntime:
 
     def replay_output_events(self) -> list[dict]:
         return []
+
+    def task_clarification_current(self) -> None:
+        return None
 
 
 class SettingsRuntime(RecordingRuntime):
@@ -173,7 +177,12 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
 
     result = await handler.dispatch("session_switch", {"session_id": "s-1"})
 
-    assert result == {"session_id": "s-1", "records": [], "sessions": ["s-1"]}
+    assert result == {
+        "session_id": "s-1",
+        "records": [],
+        "sessions": ["s-1"],
+        "clarification": None,
+    }
     assert len(created) == 1
     assert created[0] == (str(tmp_path), tmp_path / ".athena" / "conversations" / "s-1")
 
@@ -483,13 +492,26 @@ async def test_handler_swap_survives_a_failed_state_persist(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_handler_sessions_list_lists_namespaces(tmp_path) -> None:
     handler = _handler_at(tmp_path)
-    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
+    _touch(tmp_path / ".athena" / "clarification.json")
     for sid in ("s-1", "s-2"):
         (tmp_path / ".athena" / "conversations" / sid).mkdir(parents=True)
 
     result = await handler.dispatch("sessions_list", {})
 
     assert set(result["sessions"]) == {"default", "s-1", "s-2"}
+
+
+@pytest.mark.asyncio
+async def test_switching_away_preserves_clarification_only_session(tmp_path) -> None:
+    handler = _handler_at(tmp_path, lambda _root, _state_root: RecordingRuntime())
+    state_root = tmp_path / ".athena" / "conversations" / "s-1"
+    state_root.mkdir(parents=True)
+    _touch(state_root / "clarification.json")
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    await handler.dispatch("session_switch", {"session_id": "default"})
+
+    assert (state_root / "clarification.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -880,6 +902,32 @@ class _ClarificationRuntime(RecordingRuntime):
         return {"draft_id": draft_id, "revision": revision, "status": "RUNNING"}
 
 
+class _CorruptClarificationRuntime(_ClarificationRuntime):
+    def task_clarification_current(self):
+        raise ClarificationPersistenceError("draft_corrupt: invalid json")
+
+
+@pytest.mark.asyncio
+async def test_session_attach_survives_corrupt_draft_and_reports_recovery(
+    tmp_path,
+) -> None:
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = _CorruptClarificationRuntime()
+        runtime.project_root = root
+        return runtime
+
+    runtime = _CorruptClarificationRuntime()
+    runtime.project_root = str(tmp_path)
+    handler = GuiRequestHandler(runtime, factory)
+    handler._project_root = tmp_path
+
+    result = await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert result["session_id"] == "s-1"
+    assert result["clarification"] is None
+    assert result["clarification_error"]["code"] == "draft_corrupt"
+
+
 @pytest.mark.asyncio
 async def test_handler_dispatches_task_clarification_methods() -> None:
     runtime = _ClarificationRuntime()
@@ -906,6 +954,72 @@ async def test_handler_dispatches_task_clarification_methods() -> None:
         ("revise", ("draft-1", 1, "add target")),
         ("cancel", ("draft-1", 1)),
     ]
+
+
+@pytest.mark.asyncio
+async def test_clarification_call_accounting_recovers_after_rpc_failure() -> None:
+    class FailingOnceRuntime(_ClarificationRuntime):
+        fail_next = True
+
+        async def task_clarification_start(self, task: str) -> dict:
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("generator failed")
+            return await super().task_clarification_start(task)
+
+    handler = GuiRequestHandler(FailingOnceRuntime())
+
+    with pytest.raises(RuntimeError, match="generator failed"):
+        await handler.dispatch("task_clarification_start", {"task": "first"})
+
+    assert handler._clarification_calls == 0
+    result = await handler.dispatch(
+        "task_clarification_start", {"task": "retry after failure"}
+    )
+
+    assert result["status"] == "CLARIFYING"
+    assert handler._clarification_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_switch_is_rejected_while_clarification_is_in_flight(
+    tmp_path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingRuntime(_ClarificationRuntime):
+        async def task_clarification_start(self, task: str) -> dict:
+            entered.set()
+            await release.wait()
+            return {"draft_id": "draft-1", "revision": 1, "status": "CLARIFYING"}
+
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = BlockingRuntime()
+        runtime.project_root = root
+        created.append(runtime)
+        return runtime
+
+    runtime = BlockingRuntime()
+    runtime.project_root = str(tmp_path)
+    handler = GuiRequestHandler(runtime, factory)
+    handler._project_root = tmp_path
+    start = asyncio.create_task(
+        handler.dispatch("task_clarification_start", {"task": "predict churn"})
+    )
+    await entered.wait()
+
+    with pytest.raises(ValueError, match="task understanding is active"):
+        await handler.dispatch("session_switch", {"session_id": "other"})
+    assert len(created) == 0
+
+    release.set()
+    assert (await start)["status"] == "CLARIFYING"
+    result = await handler.dispatch("session_switch", {"session_id": "other"})
+    assert result["session_id"] == "other"
+    assert len(created) == 1
 
 
 @pytest.mark.asyncio

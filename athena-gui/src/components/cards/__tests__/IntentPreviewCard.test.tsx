@@ -85,6 +85,7 @@ describe("IntentPreviewCard", () => {
       />,
     );
 
+    expect(screen.getByText("已启动")).toBeInTheDocument();
     expect(screen.getByText(/版本 4/)).toBeInTheDocument();
     expect(screen.getByText(/研究已启动/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认并开始研究" })).not.toBeInTheDocument();

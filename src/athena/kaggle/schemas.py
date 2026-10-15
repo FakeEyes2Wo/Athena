@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 
 
 class Competition(BaseModel):
+    """Competition metadata retained as task context, separate from downloaded data."""
+
     ref: str
     title: str = ""
     description: str = ""
@@ -23,6 +25,8 @@ class Competition(BaseModel):
 
 
 class NotebookSummary(BaseModel):
+    """Discoverable notebook evidence without executing third-party notebook code."""
+
     ref: str
     title: str = ""
     author: str = ""
@@ -33,6 +37,8 @@ class NotebookSummary(BaseModel):
 
 
 class KaggleRunRequest(BaseModel):
+    """Bounded acquisition request; downstream agents own analysis and experiments."""
+
     competition: str = Field(min_length=1)
     download_subdir: str = ""
     max_notebooks: int = Field(default=10, ge=0, le=50)
@@ -40,6 +46,8 @@ class KaggleRunRequest(BaseModel):
 
 
 class KaggleRunReport(BaseModel):
+    """Persisted acquisition evidence, including partial results and fetch warnings."""
+
     schema_version: Literal["1.0"] = "1.0"
     competition_ref: str
     status: str = "empty"

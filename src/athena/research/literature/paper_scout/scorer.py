@@ -183,6 +183,7 @@ class DashScopeReranker:
                 try:
                     payload = await asyncio.to_thread(self._post, query, documents)
                 except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                    # Trigger: reranking request times out, cannot connect, or returns invalid JSON/data.
                     self.seconds += time.monotonic() - started
                     # 网络故障、超时或响应不是 JSON → 再试一次，仍失败才按 0 分降级
                     if attempt == RERANK_ATTEMPTS - 1:

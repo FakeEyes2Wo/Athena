@@ -6,8 +6,6 @@ import shutil
 
 import pytest
 
-from tests.support import RecordingDocumentProjector
-
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, JsonCodec
@@ -22,9 +20,8 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.experiment import load_best
 from athena.research.supervisor.plans import PlanInput
-from athena.research.supervisor.scheduling import EloPolicy
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduling import Scheduler
+from athena.research.supervisor.scheduling import EloPolicy, Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 from tests.integration.research.test_rolling_search import (
@@ -33,6 +30,7 @@ from tests.integration.research.test_rolling_search import (
     _Harness,
     harness,
 )
+from tests.support import RecordingDocumentProjector
 
 assert harness
 
@@ -138,15 +136,184 @@ async def test_execution_provider_and_infrastructure_failures_do_not_consume_pat
     await _start_one(harness)
     await harness.finish("h1", 0.81, decision="continue")
     await _wait_next_turn(harness, "h1", 2)
-    for turn, kind in enumerate(
-        ("execution_failed", "evaluator_infrastructure_failed"), start=2
-    ):
+    for turn, kind in enumerate(("execution_failed", "scoring_failed"), start=2):
         await harness.finish("h1", None, decision="continue", kind=kind)
         await _wait_next_turn(harness, "h1", turn + 1)
 
     assert harness.state.plans["h1"].stale_rounds == 0
     best = await load_best(harness.state.plans["h1"].best_ref, harness.store)
     assert best.metric == 0.81
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "execution_failed",
+        "scoring_failed",
+        "output_failed",
+        "manifest_invalid",
+        "no_change",
+        "diff_rejected",
+    ],
+)
+async def test_failed_submit_repairs_same_plan_before_settlement(harness, kind):
+    await _start_one(harness)
+    context_ref = harness.state.plans["h1"].context_ref
+    workspace = harness.supervisor.workspace_path("h1")
+    await harness.finish("h1", None, decision="submit", kind=kind)
+    await _eventually(
+        lambda: harness.started_turns["h1"] == 2 or "h1" not in harness.state.plans
+    )
+
+    assert "h1" in harness.state.plans, "a failed submit must get a repair turn"
+    assert harness.state.plans["h1"].context_ref == context_ref
+    assert harness.supervisor.workspace_path("h1") == workspace
+    assert f"controlled {kind}" in harness.prompts["h1"][-1]
+    assert harness.state.plans["h1"].last_failure == f"{kind}: controlled {kind}"
+    assert harness.state.plans["h1"].stale_rounds == 0
+    await harness.finish("h1", 0.84, decision="submit")
+    await _eventually(lambda: "h1" not in harness.state.plans)
+    experiment = harness.tree.get_experiment("exp_h1")
+    assert experiment.status.value == "SUCCEEDED"
+    assert experiment.eval.primary == 0.84
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["manual", "auto", "skip"])
+async def test_rejected_diff_at_limit_has_explicit_outcome(harness, mode):
+    harness.supervisor.configure_options(validation_mode=mode)
+    harness.tree.get_hypothesis("h1").turn_limit = 1
+    await _start_one(harness)
+    await harness.finish("h1", None, decision="submit", kind="diff_rejected")
+    await _eventually(
+        lambda: harness.state.status == "WAITING" or "h1" not in harness.state.plans
+    )
+    assert harness.started_turns["h1"] == 1
+    if mode == "manual":
+        assert harness.state.status == "WAITING"
+        assert "h1" in harness.state.plans
+    else:
+        assert "h1" not in harness.state.plans
+        assert harness.tree.get_experiment("exp_h1").status.value == "FAILED"
+        assert harness.tree.get_hypothesis("h1").status == "INCONCLUSIVE"
+    assert harness.state.phase == "SEARCH"
+
+
+@pytest.mark.asyncio
+async def test_failed_continue_preserves_best_then_submit_settles_it(harness):
+    harness.tree.get_hypothesis("h1").turn_limit = 3
+    await _start_one(harness)
+    await harness.finish("h1", 0.85, decision="continue")
+    await _wait_next_turn(harness, "h1", 2)
+    await harness.finish("h1", None, decision="continue", kind="execution_failed")
+    await _eventually(
+        lambda: harness.started_turns["h1"] == 3 or "h1" not in harness.state.plans
+    )
+    assert "h1" in harness.state.plans
+    assert harness.state.plans["h1"].stale_rounds == 0
+    await harness.finish("h1", None, decision="submit", kind="scoring_failed")
+    await _eventually(lambda: "h1" not in harness.state.plans)
+    experiment = harness.tree.get_experiment("exp_h1")
+    assert experiment.commit == "commit-0.85"
+    assert experiment.eval.primary == 0.85
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind", ["evaluator_infrastructure_failed", "execution_infrastructure_failed"]
+)
+async def test_infrastructure_failure_parks_search_and_preserves_plan(harness, kind):
+    harness.supervisor.configure_options(validation_mode="auto")
+    await _start_one(harness)
+    await harness.finish("h1", None, decision="submit", kind=kind)
+    await _eventually(lambda: not harness.supervisor.running_plan_ids)
+    assert harness.state.status == "WAITING"
+    assert harness.state.phase == "SEARCH"
+    assert "h1" in harness.state.plans
+    assert kind in harness.state.plans["h1"].last_failure
+    assert harness.started_turns["h1"] == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_infrastructure_failure_pauses_then_resumes_same_plan(
+    harness, monkeypatch
+):
+    harness.tree.get_hypothesis("h1").turn_limit = 3
+    original_followup = harness.agents.followup
+    failed_once = True
+
+    async def fail_first_followup(plan_id, task):
+        nonlocal failed_once
+        if failed_once:
+            failed_once = False
+            raise RuntimeError("temporary Agent service outage")
+        return await original_followup(plan_id, task)
+
+    monkeypatch.setattr(harness.agents, "followup", fail_first_followup)
+    harness.state.search_limit = 1
+    harness.state.concurrency = 1
+    harness.task = asyncio.create_task(harness.supervisor.run_search())
+    await _eventually(lambda: harness.state.status == "WAITING")
+
+    state = harness.state.plans["h1"]
+    context_ref = state.context_ref
+    assert state.turns_used == 1
+    assert state.last_failure.startswith("turn_infrastructure_failed:")
+    assert harness.tree.get_experiment("exp_h1").status.value == "RUNNING"
+
+    harness.decisions["h1"].append("submit")
+    harness.outcomes["h1"].append(("scored", 0.86))
+    await harness.supervisor.resume()
+    await _eventually(lambda: harness.started_turns["h1"] == 1)
+    assert harness.state.plans["h1"].context_ref == context_ref
+    assert harness.state.plans["h1"].turns_used == 2
+    assert "temporary Agent service outage" in harness.prompts["h1"][-1]
+    harness.gates["h1"].set()
+    await _eventually(lambda: "h1" not in harness.state.plans)
+    experiment = harness.tree.get_experiment("exp_h1")
+    assert experiment.status.value == "SUCCEEDED"
+    assert experiment.eval.primary == 0.86
+    assert harness.started_turns["h1"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paused_search_drains_other_completed_plans_before_restart(harness):
+    harness.state.search_limit = 2
+    harness.state.concurrency = 2
+    harness.task = asyncio.create_task(harness.supervisor.run_search())
+    await _eventually(lambda: "h1" in harness.gates and "h2" in harness.gates)
+    await harness.finish("h1", None, kind="evaluator_infrastructure_failed")
+    await _eventually(lambda: harness.state.status == "WAITING")
+    await harness.finish("h2", 0.87)
+    await _eventually(lambda: "h2" not in harness.state.plans)
+    # The Plan is removed durably before settlement finishes document projection
+    # and agent cleanup; wait for the post-settlement state event before stopping.
+    await _eventually(
+        lambda: any(
+            kind == "state" and "h2" not in payload.get("plans", {})
+            for kind, payload in harness.events
+        )
+    )
+    persisted = ResearchState.load(harness.root / ".athena" / "state.json")
+    assert persisted.status == "WAITING"
+    assert "h1" in persisted.plans
+    assert "h2" not in persisted.plans
+    assert harness.tree.get_experiment("exp_h2").eval.primary == 0.87
+
+    # Non-terminal shutdown must finish without changing the durable WAITING
+    # checkpoint, then the same checkpoint must still resume in a fresh loop.
+    await asyncio.wait_for(harness.supervisor.stop(), timeout=2)
+    assert harness.state.status == "WAITING"
+    await harness.supervisor.recover()
+    harness.task = None
+    await harness.supervisor.resume()
+    harness.task = harness.supervisor._search._task
+    await _eventually(lambda: harness.started_turns["h1"] == 2)
+    await harness.finish("h1", 0.86)
+    await _eventually(lambda: "h1" not in harness.state.plans)
+    await _eventually(lambda: harness.task is not None and harness.task.done())
+    assert harness.tree.get_experiment("exp_h1").eval.primary == 0.86
 
 
 @pytest.mark.asyncio

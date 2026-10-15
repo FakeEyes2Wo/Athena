@@ -83,6 +83,75 @@ def test_materialize_csv_split_rejects_missing_target(tmp_path: Path) -> None:
         materialize_csv_split(source, tmp_path / "out", "missing", SplitSpec())
 
 
+def test_materialize_csv_split_rejects_reserved_row_id_column(tmp_path: Path) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text(
+        "__athena_row_id,feature,target\nsource-id,1,yes\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="reserved column '__athena_row_id'"):
+        materialize_csv_split(source, tmp_path / "out", "target", SplitSpec())
+
+
+@pytest.mark.parametrize(
+    ("header", "message"),
+    [
+        ("feature, targetish,other", "target column"),
+        ("feature,target,target", "duplicate column"),
+        ("feature,,target", "empty column"),
+    ],
+)
+def test_materialize_csv_split_rejects_invalid_headers(
+    tmp_path: Path, header: str, message: str
+) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text(f"{header}\n1,2,3\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        materialize_csv_split(source, tmp_path / "out", "target", SplitSpec())
+
+
+def test_materialize_csv_split_maps_trimmed_header_to_values(tmp_path: Path) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text(
+        " feature , target \n" + "\n".join(f"{i},label{i % 2}" for i in range(10)),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    materialize_csv_split(source, out, "target", SplitSpec())
+
+    with (out / "train.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    assert all(row["feature"] and row["target"].startswith("label") for row in rows)
+
+
+@pytest.mark.parametrize("contents", ["", "feature,target\n", "feature,target\n1,\n"])
+def test_materialize_csv_split_rejects_empty_data_or_target(
+    tmp_path: Path, contents: str
+) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="empty|no data rows"):
+        materialize_csv_split(source, tmp_path / "out", "target", SplitSpec())
+
+
+@pytest.mark.parametrize("row_count", [1, 2, 3, 4])
+def test_materialize_csv_split_rejects_splits_without_required_rows(
+    tmp_path: Path, row_count: int
+) -> None:
+    source = tmp_path / "data.csv"
+    source.write_text(
+        "feature,target\n" + "\n".join(f"{i},x" for i in range(row_count)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="leave .* empty"):
+        materialize_csv_split(source, tmp_path / "out", "target", SplitSpec())
+
+
 # --------------------------------------------------------------------------- #
 # grouped splitting
 #

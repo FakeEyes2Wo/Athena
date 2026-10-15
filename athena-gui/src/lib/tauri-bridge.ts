@@ -267,11 +267,18 @@ export function sessionsListFor(path: string): Promise<{ sessions: string[] }> {
   * (the backend recycles the blank session being left behind). */
 export function sessionSwitch(
   sessionId: string,
-): Promise<{ records: SessionRecord[]; sessions?: string[] }> {
+): Promise<{
+  records: SessionRecord[];
+  sessions?: string[];
+  clarification?: ClarificationDraftDto | null;
+  clarification_error?: { code: string; message: string } | null;
+}> {
   if (hasTauri) return invoke("session_switch", { sessionId });
   return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{
     records: SessionRecord[];
     sessions?: string[];
+    clarification?: ClarificationDraftDto | null;
+    clarification_error?: { code: string; message: string } | null;
   }>;
 }
 

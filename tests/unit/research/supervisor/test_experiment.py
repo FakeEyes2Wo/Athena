@@ -1,5 +1,6 @@
 ﻿"""Experiment manifest validation and trusted patience logic tests."""
 
+import asyncio
 import json
 import shutil
 import sys
@@ -69,6 +70,19 @@ def test_failed_turn_result_rejects_state_payload() -> None:
     ):
         with pytest.raises(ValidationError):
             PlanTurnResult(kind="execution_failed", error="boom", **state_payload)
+
+
+def test_failure_block_keeps_root_cause_when_truncating_and_redacts_secrets() -> None:
+    from athena.research.supervisor.prompt_context import failure_block
+
+    block = failure_block(
+        "execution_failed",
+        "prefix " * 500 + "RuntimeError: access_token=private-value",
+    )
+
+    assert "RuntimeError" in block
+    assert "private-value" not in block
+    assert "[REDACTED]" in block
 
 
 class _FakeExecution:
@@ -562,6 +576,27 @@ def test_patience_exhaustion_settles_historical_best() -> None:
     assert settlement.best_ref == _OTHER_REF
 
 
+@pytest.mark.parametrize("stale_rounds", [0, 3])
+def test_zero_patience_disables_early_settlement_but_keeps_turn_budget(
+    stale_rounds: int,
+) -> None:
+    state = PlanState(
+        kind="SEARCH",
+        context_ref=_REF,
+        turns_used=4,
+        turn_limit=12,
+        patience=0,
+        stale_rounds=stale_rounds,
+        best_ref=_OTHER_REF,
+    )
+    assert decide_settlement(state, _decision("continue")).action == "continue"
+    exhausted = state.model_copy(update={"turns_used": 12})
+    settled = decide_settlement(exhausted, _decision("continue"))
+    assert settled.action == "settle"
+    assert settled.best_ref == _OTHER_REF
+    assert settled.reason == "turn budget exhausted"
+
+
 def test_turn_exhaustion_with_best_settles() -> None:
     state = PlanState(
         kind="SEARCH",
@@ -779,10 +814,140 @@ async def test_run_turn_execution_failure_does_not_increment_stale(tmp_path) -> 
         encoding="utf-8"
     )
     assert "## h1: execution_failed" in experiment_log
-    assert "- Error: command failed (exit 1): boom" in experiment_log
+    assert "stage=command[1]" in experiment_log
+    assert "exit=1" in experiment_log
+    assert "boom" in experiment_log
     assert result.evidence_ref is not None
     evidence = json.loads(await store.get_text(result.evidence_ref))
     assert await store.get_text(evidence["exploration_ref"]) == exploration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "error", "expected"),
+    [
+        (
+            "",
+            "Traceback (most recent call last):\nValueError: late root cause",
+            None,
+            "late root cause",
+        ),
+        (
+            "Traceback (most recent call last):\nRuntimeError: stdout cause",
+            "",
+            None,
+            "stdout cause",
+        ),
+        ("", "", "timeout", "timeout"),
+    ],
+)
+async def test_command_failure_feedback_keeps_tail_and_timeout(
+    tmp_path, stdout: str, stderr: str, error: str | None, expected: str
+) -> None:
+    execution = _FakeExecution(
+        [
+            CommandResult(
+                ok=False,
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=-1 if error else 1,
+                error=error,
+            )
+        ]
+    )
+    runner, plan_input, _, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_failed"
+    assert expected in (result.error or "")
+    assert result.evidence_ref is not None
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert expected in evidence["error"]
+
+
+@pytest.mark.asyncio
+async def test_execution_cancellation_is_not_converted_to_candidate_failure(
+    tmp_path,
+) -> None:
+    class CancelledExecution(_FakeExecution):
+        async def run(self, context, request):
+            raise asyncio.CancelledError
+
+    runner, plan_input, _, branch, _store = await _runner_setup(
+        tmp_path,
+        execution=CancelledExecution([]),
+        evaluator=_FakeEvaluator(),
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run_turn("h1", state, plan_input)
+
+
+@pytest.mark.asyncio
+async def test_collect_outputs_failure_is_evidenced_as_infrastructure(tmp_path) -> None:
+    class BrokenCollection(_FakeExecution):
+        async def collect_outputs(self, _subdirs: tuple[str, ...]) -> None:
+            raise OSError("remote worker disconnected")
+
+    execution = BrokenCollection(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_infrastructure_failed"
+    assert "stage=collect_outputs" in (result.error or "")
+    assert "remote worker disconnected" in (result.error or "")
+    assert result.evidence_ref is not None
+    assert workspace.messages == []
+
+
+@pytest.mark.asyncio
+async def test_prediction_pack_failure_is_evidenced_as_infrastructure(
+    tmp_path, monkeypatch
+) -> None:
+    import athena.research.supervisor.experiment as experiment_module
+
+    async def fail_pack(_store, _root):
+        raise OSError("artifact store unavailable")
+
+    monkeypatch.setattr(experiment_module, "pack_directory", fail_pack)
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_infrastructure_failed"
+    assert "stage=pack_predictions" in (result.error or "")
+    assert "artifact store unavailable" in (result.error or "")
+    assert result.evidence_ref is not None
+    assert workspace.messages == []
 
 
 @pytest.mark.asyncio
@@ -1065,3 +1230,146 @@ async def test_prepare_baseline_may_legitimately_produce_an_empty_diff(
 
     assert result.kind == "scored"
     assert result.metric == 0.88
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("predictions", "diagnostic"),
+    [
+        ("id,prediction\nrow_1,1\n", "no prediction"),
+        ("id,prediction\nrow_1,1\nrow_1,0\nrow_2,0\n", "duplicate"),
+        ("id,prediction\nrow_1,1\nrow_2,0\nrow_extra,1\n", "absent"),
+        ("id,prediction\n", "no identity rows"),
+    ],
+)
+async def test_prediction_coverage_rejects_candidate_rows_before_scoring(
+    tmp_path, predictions: str, diagnostic: str
+) -> None:
+    expected_features = tmp_path / "search_features.csv"
+    expected_features.write_text("id,feature\nrow_1,a\nrow_2,b\n", encoding="utf-8")
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, _, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    runner._context = ExecutionContext(
+        project_root=tmp_path,
+        workspace_root=Path(branch.path),
+        environment_root=tmp_path,
+        predict_features=expected_features,
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "predict.py"]],
+        predictions=predictions,
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=8, patience=3
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "scoring_failed"
+    assert diagnostic in (result.error or "")
+    assert runner._evaluator.directions == []
+    assert result.evidence_ref is not None
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert evidence["kind"] == "scoring_failed"
+
+
+@pytest.mark.asyncio
+async def test_prediction_coverage_accepts_explicit_nonfirst_identity_column(
+    tmp_path,
+) -> None:
+    expected_features = tmp_path / "search_features.csv"
+    expected_features.write_text(
+        "feature,row_key\na,row_1\nb,row_2\n", encoding="utf-8"
+    )
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, _, branch, _ = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    evaluator_dir = tmp_path / "eval"
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 2,
+                "task_id": "nonfirst",
+                "task_type": "binary_classification",
+                "primary_metric": "accuracy",
+                "class_labels": ["0", "1"],
+                "prediction_file": "predictions__nonfirst.csv",
+                "prediction_id_column": "row_key",
+                "prediction_column": "prediction",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner._context = ExecutionContext(
+        project_root=tmp_path,
+        workspace_root=Path(branch.path),
+        environment_root=tmp_path,
+        predict_features=expected_features,
+    )
+    _write_manifest(branch, commands=[[sys.executable, "predict.py"]])
+    prediction_dir = Path(branch.path) / "outputs" / "predictions"
+    (prediction_dir / "predictions.csv").unlink()
+    (prediction_dir / "predictions__nonfirst.csv").write_text(
+        "confidence,row_key,prediction\n0.9,row_1,1\n0.1,row_2,0\n",
+        encoding="utf-8",
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=8, patience=3
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "scored"
+    assert runner._evaluator.directions == ["maximize"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["expected", "evaluator"])
+async def test_missing_frozen_prediction_input_or_evaluator_is_infrastructure(
+    tmp_path, missing: str
+) -> None:
+    expected_features = tmp_path / "search_features.csv"
+    if missing != "expected":
+        expected_features.write_text("id,feature\nrow_1,a\nrow_2,b\n", encoding="utf-8")
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, _, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    if missing == "evaluator":
+        (tmp_path / "eval" / "README.md").unlink()
+    runner._context = ExecutionContext(
+        project_root=tmp_path,
+        workspace_root=Path(branch.path),
+        environment_root=tmp_path,
+        predict_features=expected_features,
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "predict.py"]],
+        predictions="id,prediction\nrow_1,1\nrow_2,0\n",
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=8, patience=3
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == (
+        "execution_infrastructure_failed"
+        if missing == "expected"
+        else "evaluator_infrastructure_failed"
+    )
+    assert result.evidence_ref is not None
+    assert runner._evaluator.directions == []
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert evidence["kind"] == result.kind

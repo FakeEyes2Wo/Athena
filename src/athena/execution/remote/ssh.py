@@ -118,6 +118,7 @@ class SshTransport:
             try:
                 proc.kill()
             except ProcessLookupError:
+                # The process exited between lookup and the signal or termination request.
                 pass
         await proc.wait()
 
@@ -249,6 +250,7 @@ class SshBackend:
             relative = workdir.resolve().relative_to(Path(workspace_root).resolve())
             cwd = str(self._workspace / PurePosixPath(relative.as_posix()))
         except (ValueError, OSError):
+            # Invalid relative paths or filesystem errors fall back to the workspace root.
             cwd = str(self._workspace)
         # Ensure the remote working directory exists before spawning; this also
         # makes a backend usable without an explicitly bound local root.
@@ -294,6 +296,7 @@ class SshBackend:
                 shell=self._channel.ready.get("shell"),
             )
         except RemoteError as exc:
+            # The remote agent reported that the requested operation failed.
             return CommandResult(
                 ok=False, stdout="", stderr=str(exc), exit_code=-1, error=str(exc)
             )
@@ -302,9 +305,11 @@ class SshBackend:
             code = await asyncio.wait_for(exited, timeout=request.timeout_s)
             error = None
         except asyncio.TimeoutError:
+            # The operation exceeded its configured deadline.
             await self._channel.cancel(job_id)
             code, error = -1, "timeout"
         except asyncio.CancelledError:
+            # The caller cancelled the remote command → kill its process group, then propagate.
             await self._channel.cancel(job_id)
             raise
         if pending:

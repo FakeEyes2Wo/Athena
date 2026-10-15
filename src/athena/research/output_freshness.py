@@ -23,7 +23,10 @@ class OutputFreshnessError(RuntimeError):
         super().__init__(
             f"{name} output produced no new artifact: {path}. "
             "The command exited successfully but did not write any file; "
-            "the previous version was archived under .output-history."
+            "the previous version was archived before this run. "
+            "Make the manifest commands regenerate every declared output, "
+            "including the report, on every execution. Writing an output only "
+            "with an Agent file tool before submission does not satisfy this check."
         )
 
 
@@ -54,11 +57,10 @@ def archive_output_roots(
         if root.exists():
             target = history / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                if target.is_dir():
-                    shutil.rmtree(target)
-                else:
-                    target.unlink()
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
             shutil.move(str(root), str(target))
         if was_directory:
             root.mkdir(parents=True, exist_ok=True)

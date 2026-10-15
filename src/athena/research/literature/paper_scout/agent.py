@@ -114,6 +114,7 @@ class PaperScoutSearchTool(PaperScoutTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Search the current paper pool with one validated query."""
         query = input.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
@@ -149,6 +150,7 @@ class PaperScoutExpandTool(PaperScoutTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Expand the current paper pool from one cited paper locator."""
         locator = input.get("locator")
         if not isinstance(locator, str) or not locator.strip():
             raise ValueError("locator must be a non-empty string.")

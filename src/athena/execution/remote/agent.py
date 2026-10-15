@@ -13,6 +13,7 @@ import threading
 try:
     import importlib.metadata as metadata
 except ImportError:
+    # Python versions before 3.8 do not provide importlib.metadata.
     metadata = None  # python3 < 3.8：报不出包版本，其余功能照常
 
 PROTOCOL_VERSION = 1
@@ -58,6 +59,7 @@ def _pump(job_id, stream, fd):
         try:
             stream.close()
         except OSError:
+            # The operating system rejected this filesystem or transport operation.
             pass
 
 
@@ -110,6 +112,7 @@ def _spawn(message):
             **group,
         )
     except OSError as exc:
+        # The operating system rejected this filesystem or transport operation.
         _fail(job_id, exc)
         _send({"op": "exit", "id": job_id, "code": -1})
         return
@@ -143,6 +146,7 @@ def _kill(proc):
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (OSError, ProcessLookupError):
+            # The child may have exited or lost its process group during termination.
             pass
         return
     try:
@@ -152,6 +156,7 @@ def _kill(proc):
             stderr=subprocess.DEVNULL,
         )
     except OSError:
+        # The operating system rejected this filesystem or transport operation.
         pass
 
 
@@ -171,6 +176,7 @@ def _put(message):
         try:
             os.makedirs(parent, exist_ok=True)
         except OSError as exc:
+            # The operating system rejected this filesystem or transport operation.
             _fail(message["id"], exc)
             return
     data = base64.b64decode(message.get("b64") or "")
@@ -181,6 +187,7 @@ def _put(message):
         if message.get("executable"):
             os.chmod(path, 0o755)
     except OSError as exc:
+        # The operating system rejected this filesystem or transport operation.
         _fail(message["id"], exc)
         return
     _send({"op": "ok", "id": message["id"]})
@@ -203,6 +210,7 @@ def _get(message):
                     }
                 )
     except OSError as exc:
+        # The operating system rejected this filesystem or transport operation.
         _fail(message["id"], exc)
         return
     _send({"op": "ok", "id": message["id"]})
@@ -235,6 +243,7 @@ def _manifest(message):
                         [relative, os.path.getsize(absolute), _digest(absolute)]
                     )
                 except OSError:
+                    # The operating system rejected this filesystem or transport operation.
                     continue
     _send({"op": "manifest", "id": message["id"], "entries": sorted(entries)})
 
@@ -247,6 +256,7 @@ def _remove(message):
             try:
                 os.remove(path)
             except OSError:
+                # The operating system rejected this filesystem or transport operation.
                 pass
     _send({"op": "ok", "id": message["id"]})
 
@@ -255,6 +265,7 @@ def _mkdir(message):
     try:
         os.makedirs(message["path"], exist_ok=True)
     except OSError as exc:
+        # The operating system rejected this filesystem or transport operation.
         _fail(message["id"], exc)
         return
     _send({"op": "ok", "id": message["id"]})
@@ -306,6 +317,7 @@ def _tree_size(root):
                 total += os.lstat(os.path.join(base, name)).st_size
                 files += 1
             except OSError:
+                # The operating system rejected this filesystem or transport operation.
                 continue
     return total, files
 
@@ -323,6 +335,7 @@ def _space(message):
         usage = shutil.disk_usage(probe or os.getcwd())
         total, free = usage.total, usage.free
     except OSError:
+        # The operating system rejected this filesystem or transport operation.
         total, free = 0, 0
 
     entries = []
@@ -335,6 +348,7 @@ def _space(message):
             try:
                 mtime = os.lstat(path).st_mtime
             except OSError:
+                # The operating system rejected this filesystem or transport operation.
                 mtime = 0.0
             entries.append(
                 {"name": name, "bytes": size, "files": files, "mtime": mtime}
@@ -379,6 +393,7 @@ def _probe(message):
                         }
                     )
         except (OSError, ValueError, subprocess.SubprocessError):
+            # GPU discovery is optional when the host lacks a usable driver or command.
             gpus = []
 
     shell = shutil.which("bash") or shutil.which("sh")
@@ -431,6 +446,7 @@ def main():
             try:
                 message = json.loads(raw.decode("utf-8"))
             except ValueError:
+                # The supplied value cannot be parsed or is invalid for the requested operation.
                 _send({"op": "error", "id": None, "error": "malformed request"})
                 continue
             handler = _HANDLERS.get(message.get("op"))

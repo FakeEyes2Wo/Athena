@@ -133,6 +133,7 @@ async def run_survey(runtime: Any) -> None:
             ),
         )
     except asyncio.CancelledError:
+        # Trigger: corpus materialization is cancelled; preserve cancellation during cleanup.
         raise
     except Exception as exc:  # noqa: BLE001 - survey failure must not stop SEARCH
         await runtime.publish_output(

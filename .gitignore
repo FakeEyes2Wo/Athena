@@ -11,6 +11,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+/.pytest-tmp-*/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -23,6 +24,7 @@ env/
 
 # Build and packaging artifacts
 /submission/
+/release-artifacts/
 build/
 dist/
 *.egg-info/
@@ -66,6 +68,7 @@ XH-202619.pdf
 
 # Example research-loop run outputs (scratch)
 /examples/*
+/newdata/
 .athena/
 workspaces/
 

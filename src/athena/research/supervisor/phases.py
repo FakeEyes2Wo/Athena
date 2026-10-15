@@ -147,7 +147,12 @@ class PhaseMachine:
         """
         if self._state.phase == "SEARCH":
             await self._search.run_search()
-            if self._run.is_stopped():
+            if self._run.is_stopped() or self._state.status != "RUNNING":
+                return
+            if any(plan.kind == "SEARCH" for plan in self._state.plans.values()):
+                # An exhausted/recovered Plan still needs an explicit outcome.
+                self._state.status = "WAITING"
+                await self._plans.persist_state()
                 return
             if self._deps.phases.validation_mode == "skip":
                 await self._finalize_without_validation()
@@ -187,6 +192,7 @@ class PhaseMachine:
         try:
             self._plans.save_state()
         except BaseException:
+            # Trigger: an operation failed inside a cleanup boundary and must be re-raised after cleanup.
             self._state.phase, self._state.status, self._state.validation_skipped = (
                 snapshot
             )

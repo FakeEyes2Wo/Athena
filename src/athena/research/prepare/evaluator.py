@@ -23,10 +23,15 @@ FINAL_EVALUATOR_PLAN_ID = "final_evaluator"
 
 @dataclass(frozen=True)
 class EvaluatorBundle:
-    """Frozen evaluator references for SEARCH and FINAL."""
+    """Frozen evaluator references available after PREPARE.
+
+    FINAL is deliberately absent here.  It is created only when an authorized
+    VALIDATE phase has a frozen SOTA, so a SEARCH-only run never provisions or
+    touches the held-out evaluator.
+    """
 
     search_ref: Any
-    final_ref: Any
+    final_ref: Any = None
 
 
 DIRECTORY_EVALUATOR_CONTRACT = (
@@ -59,6 +64,19 @@ DIRECTORY_EVALUATOR_CONTRACT = (
     "multiclass tasks, describe the declared class list and any one-vs-rest or "
     "folded-binary TSS/HSS rows in metrics_public_test.csv; macro/micro F1 notes "
     "must match eval_metrics.py."
+)
+
+PLATFORM_EVALUATOR_CONTRACT = (
+    "The platform has already split the dataset into train, SEARCH, and FINAL; "
+    "do not create another split. Build the complete evaluator under evaluate/ "
+    "with metric.json, eval_metrics.py, labels.csv (or labels/), HANDOFF.md, "
+    "and pyproject.toml. Declare contract_version=2, task_id, task_type, "
+    "primary_metric, the complete class_labels for classification, "
+    "prediction_file=predictions__{task_id}.csv, prediction_id_column, "
+    "prediction_column, optional probability_columns, "
+    "metrics_file=metrics_public_test.csv, and eval_script in metric.json. "
+    "SEARCH and FINAL must use the same complete class_labels; macro-F1 must "
+    "not drop classes absent from one split. Keep final labels hidden from SEARCH."
 )
 
 
@@ -146,15 +164,33 @@ async def reusable_ref(runtime: Any, ref: Any) -> Any:
 def evaluator_tasks(runtime: Any, task: str) -> tuple[str, str]:
     """Render SEARCH and FINAL tasks for CSV or directory data."""
     final_labels = runtime.workspaces_root / "data_split" / "final_labels.csv"
-    if final_labels.is_file():
-        final_rule = (
-            "Take the final labels from final_labels.csv in the platform's "
-            "data_split directory, and copy them into your workspace."
-        )
+    # GUI may reference an existing external split. Its durable contract is
+    # sufficient; do not require a second copy in the local workspace.
+    state = getattr(runtime, "state", None)
+    if final_labels.is_file() or getattr(state, "data_contract", None):
+        search = task
+        if (
+            getattr(state, "data_contract", None)
+            and "Build the complete evaluator under evaluate/" not in task
+        ):
+            search = f"{task}\n\n{PLATFORM_EVALUATOR_CONTRACT}"
+        configured_root = getattr(state, "data_root", None)
+        if configured_root:
+            final_source = Path(configured_root).resolve() / "final_labels.csv"
+            final_rule = (
+                f"Take the final labels from the platform-owned {final_source}; "
+                "copy them only into your FINAL evaluator workspace, never into "
+                "the SEARCH or training workspace."
+            )
+        else:
+            final_rule = (
+                "Take the final labels from final_labels.csv in the platform's "
+                "data_split directory, and copy them into your workspace."
+            )
         # ``DataContract.evaluator_task`` already carries the full generic
         # contract in the platform-split path.  Keep direct legacy callers
         # unchanged while adding the contract there in production.
-        return task, final_rule
+        return search, final_rule
     search = (
         f"{task}\n\n{DIRECTORY_EVALUATOR_CONTRACT}\n\n"
         "You are building the SEARCH evaluator. Use only the SEARCH partition. "
@@ -202,7 +238,38 @@ async def run_evaluator_agent(
     )
 
     # The supervisor plan validates and freezes the evaluator bundle.
-    return await run_evaluator_plan(runtime, evaluator_dir, task, name, MAX_PLAN_TURNS)
+    split_name = (
+        "final_features.csv"
+        if name == FINAL_EVALUATOR_PLAN_ID
+        else "search_features.csv"
+    )
+    split_root = runtime.workspaces_root / "data_split"
+    data_root = getattr(getattr(runtime, "state", None), "data_root", None)
+    expected_features = (
+        Path(data_root).resolve() / split_name if data_root else split_root / split_name
+    )
+    # Directory datasets and legacy callers have no platform CSV split. When a
+    # platform data contract exists, the matching phase feature file is required.
+    has_platform_split = bool(
+        getattr(getattr(runtime, "state", None), "data_contract", None)
+    )
+    if expected_features.is_file():
+        features_arg: Path | None = expected_features
+    elif has_platform_split:
+        raise ValueError(
+            f"platform {name} evaluator cannot freeze without its corresponding "
+            f"feature split: {expected_features}"
+        )
+    else:
+        features_arg = None
+    return await run_evaluator_plan(
+        runtime,
+        evaluator_dir,
+        task,
+        name,
+        MAX_PLAN_TURNS,
+        expected_features=features_arg,
+    )
 
 
 async def _search_evaluator(runtime: Any, task: str) -> Any:
@@ -313,10 +380,28 @@ async def prepare_evaluators(
     runtime: Any,
     task: str,
 ) -> EvaluatorBundle:
-    """Freeze the visible SEARCH and hidden FINAL evaluator bundles."""
-    # Build matching role prompts from one data-source contract.
-    search_task, final_rule = evaluator_tasks(runtime, task)
+    """Freeze only the visible SEARCH evaluator during PREPARE."""
+    search_task, _final_rule = evaluator_tasks(runtime, task)
+    search_task += (
+        "\nBuild SEARCH only. Do not read FINAL features or labels, and do not "
+        "copy FINAL data into this workspace."
+    )
     search_ref = await _search_evaluator(runtime, search_task)
+    return EvaluatorBundle(search_ref=search_ref)
+
+
+async def prepare_final_evaluator(runtime: Any, task: str) -> Any:
+    """Provision FINAL after model selection, immediately before VALIDATE.
+
+    The caller must invoke this only after a frozen SOTA exists.  Reusing a
+    valid checkpoint keeps interrupted VALIDATE runs safe and avoids creating
+    a second evaluator.  This function is intentionally not called by
+    ``run_prepare_phase``.
+    """
+    search_ref = await reusable_ref(runtime, runtime.supervisor.evaluator_ref)
+    if search_ref is None:
+        raise RuntimeError("FINAL evaluator requires a valid frozen SEARCH evaluator")
+    _, final_rule = evaluator_tasks(runtime, task)
     search_root = runtime.workspaces_root / "evaluator" / "evaluate"
     if not search_root.is_dir():
         search_root = runtime.workspaces_root / "evaluator"
@@ -330,8 +415,7 @@ async def prepare_evaluators(
             f"primary_metric={search_spec.primary_metric}, class_labels="
             f"{json.dumps(search_spec.class_labels, ensure_ascii=False)}."
         )
-    # Freeze FINAL only after SEARCH so overlap can be checked immediately.
     final_ref = await _final_evaluator(runtime, final_task)
     _validate_evaluator_pair(runtime)
     await runtime.supervisor.checkpoint_final_evaluator(final_ref)
-    return EvaluatorBundle(search_ref=search_ref, final_ref=final_ref)
+    return final_ref

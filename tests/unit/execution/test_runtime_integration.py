@@ -9,6 +9,9 @@ import asyncio
 import pytest
 
 from athena.agents.prompt_agent import build_llm_agent
+from athena.agents.task_agents import PLAN_AGENT_TYPE, register_plan_agent
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool_types import ToolContext
 from athena.execution.runtime import ExecutionRuntime
 
@@ -60,3 +63,50 @@ async def test_wired_agent_shell_command_runs(tmp_path) -> None:
     assert result.data["ok"] is True
     assert result.data["exit_code"] == 0
     assert "42" in result.data["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_plan_tools_share_isolated_worktree_and_reject_external_workdir(
+    tmp_path,
+) -> None:
+    """Each Plan's read/write/shell tools use its own worktree, not task root."""
+    task_root = tmp_path / "task-workspace"
+    plan_roots = {
+        "hyp-a": task_root / "workspaces" / "hyp-a",
+        "hyp-b": task_root / "workspaces" / "hyp-b",
+    }
+    for plan_id, root in plan_roots.items():
+        root.mkdir(parents=True)
+        (root / "subdir").mkdir()
+        (root / "marker.txt").write_text(plan_id, encoding="utf-8")
+
+    runtime = ExecutionRuntime(project_root=task_root, environment_root=task_root)
+    registry = AgentTypeRegistry()
+    register_plan_agent(
+        registry,
+        provider=object(),
+        artifacts=LocalArtifactStore(tmp_path / "artifacts"),
+        workspace_for=lambda agent_id: plan_roots[agent_id],
+        execution=runtime,
+    )
+
+    ctx = _ctx()
+    for plan_id, root in plan_roots.items():
+        tools = registry.require_spec(
+            PLAN_AGENT_TYPE, agent_id=plan_id
+        ).runner._base_tools
+        read = await tools.resolve("read_file").ainvoke(ctx, path="marker.txt")
+        assert read.success and read.data["content"] == plan_id
+
+        shell = tools.resolve("shell_command")
+        command = 'python -c "import os; print(os.getcwd())"'
+        default = await shell.ainvoke(ctx, command=command)
+        nested = await shell.ainvoke(ctx, command=command, workdir="subdir")
+        assert default.success and str(root.resolve()) in default.data["stdout"]
+        assert (
+            nested.success and str((root / "subdir").resolve()) in nested.data["stdout"]
+        )
+
+        escaped = await shell.ainvoke(ctx, command="pwd", workdir=str(task_root))
+        assert not escaped.success
+        assert "isolated workspace" in escaped.error

@@ -78,6 +78,7 @@ def _run(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=_COMMAND_TIMEOUT_S,
+        check=False,
     )
     if completed.returncode:
         raise ScriptCommandError(
@@ -141,6 +142,7 @@ def _read_output(output_path: Path, stdout: str) -> dict[str, object]:
     try:
         return json.loads(lines[-1])
     except ValueError:
+        # Trigger: the final evaluator stdout line is not valid JSON output.
         raise RuntimeError("bundle produced no parseable eval output") from None
 
 
@@ -328,6 +330,7 @@ class DataScriptRunner:
             spec = json.loads(metric_path.read_text(encoding="utf-8"))
             evaluator_rel = spec["eval_script"]
         except (OSError, ValueError, KeyError) as exc:
+            # Trigger: metric.json is unreadable/malformed or lacks its required eval_script field.
             raise ValueError("metric.json must declare eval_script") from exc
         eval_path = evaluator_dir / evaluator_rel
         if eval_path.is_dir():

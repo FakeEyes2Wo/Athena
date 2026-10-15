@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.research.runtime.phase_runner import PhaseRunner
-from athena.research.runtime.events import RuntimeEvents
 from athena.core.agent.types import RunStatus
+from athena.research.runtime.events import RuntimeEvents
+from athena.research.runtime.phase_runner import PhaseRunner
 
 
 class _Events:

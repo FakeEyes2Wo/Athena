@@ -24,6 +24,7 @@ def list_traces(rollout_dir: Path) -> list[dict[str, Any]]:
             with path.open("r", encoding="utf-8", errors="replace") as fd:
                 messages = sum(1 for line in fd if line.strip() and '"msg"' in line)
         except OSError:
+            # A trace can disappear or become unreadable while the directory is listed.
             continue
         traces.append(
             {
@@ -41,10 +42,29 @@ def _tool_args(args: Any) -> Any:
     """PydanticAI stores tool-call args as a JSON string; show them as an object."""
     if isinstance(args, str):
         try:
-            return json.loads(args)
+            args = json.loads(args)
         except json.JSONDecodeError:
-            return args
-    return args if args is not None else {}
+            # Older providers may send plain text instead of JSON-encoded arguments.
+            return redact(args)
+    return _redact_tool_value(args)
+
+
+def _redact_tool_value(value: Any) -> Any:
+    """Redact a decoded tool value without interpreting its string contents."""
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            key_parts = str(key).lower().replace("-", "_").split("_")
+            if {"key", "token", "password", "secret"}.intersection(key_parts):
+                sanitized[key] = "[REDACTED]"
+            else:
+                sanitized[key] = _redact_tool_value(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_redact_tool_value(item) for item in value]
+    if isinstance(value, str):
+        return redact(value)
+    return value if value is not None else {}
 
 
 def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
@@ -109,7 +129,10 @@ def _normalize_msg(msg: dict[str, Any]) -> list[dict[str, Any]]:
 
 def read_trace(rollout_dir: Path, agent_id: str) -> dict[str, Any]:
     """Read one agent rollout and return its normalized messages in order."""
-    path = rollout_dir / f"{agent_id}.jsonl"
+    trace_root = rollout_dir.resolve()
+    path = (trace_root / f"{agent_id}.jsonl").resolve()
+    if path.parent != trace_root:
+        raise KeyError(f"unknown agent trace: {agent_id}")
     if not path.is_file():
         raise KeyError(f"unknown agent trace: {agent_id}")
 
@@ -121,6 +144,7 @@ def read_trace(rollout_dir: Path, agent_id: str) -> dict[str, Any]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                # Ignore a torn or malformed rollout line and continue with later records.
                 continue
             if not isinstance(record, dict):
                 continue
@@ -133,7 +157,7 @@ def read_trace(rollout_dir: Path, agent_id: str) -> dict[str, Any]:
                         "ts": ts,
                         "role": "system",
                         "kind": "compaction",
-                        "content": record.get("summary", ""),
+                        "content": redact(str(record.get("summary", ""))),
                     }
                 )
                 continue

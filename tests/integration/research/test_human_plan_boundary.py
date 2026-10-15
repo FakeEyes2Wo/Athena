@@ -14,6 +14,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.research.config import RuntimeAdapters, RuntimeDependencies
 from athena.research.contracts import ValidationResult
+from athena.research.prepare.authority_local import LocalBaselineAuthorityStore
 from athena.research.runtime import ResearchRuntime
 
 
@@ -126,7 +127,12 @@ async def runtime(tmp_path: Path, monkeypatch):
 
     instance = ResearchRuntime(
         project_root=tmp_path,
-        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(validation=validate)),
+        dependencies=RuntimeDependencies(
+            adapters=RuntimeAdapters(validation=validate),
+            baseline_authority=LocalBaselineAuthorityStore(
+                tmp_path / "controller", tmp_path, "default"
+            ),
+        ),
     )
     instance.register_supervisor(provider=provider)
     await _persist_confirmed_task_context(instance)
@@ -234,9 +240,9 @@ async def test_cancel_plan_is_durable_and_discards_late_completion(
     runtime, monkeypatch
 ):
     from athena.core.research_tree import ResearchTree
-    from athena.research.supervisor.state import ResearchState
-    from athena.research.supervisor.recovery import reconcile
     from athena.research.supervisor.plan_runtime import CompletedPlanTurn
+    from athena.research.supervisor.recovery import reconcile
+    from athena.research.supervisor.state import ResearchState
 
     await runtime.supervisor.start_plan("h_existing")
     await runtime.supervisor.start_plan("h_other")

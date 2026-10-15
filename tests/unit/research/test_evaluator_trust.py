@@ -6,7 +6,9 @@ import io
 import pytest
 
 from athena.research.evaluation.trust import (
+    _build_predictions,
     _parse_labels,
+    extract_label_column_from_source,
     extract_prediction_column,
     extract_prediction_column_from_source,
     validate_evaluator_properties,
@@ -69,6 +71,43 @@ def test_parse_labels_extracts_ids_and_targets() -> None:
     assert ids == ["0", "1", "2", "3", "4", "5"]
     assert values == ["0", "1", "0", "1", "0", "1"]
     assert id_column == "__athena_row_id"
+
+
+def test_parse_labels_requires_explicit_target_when_extra_columns_exist() -> None:
+    labels = "sample_key,sample_id,target\na,S-1,0\nb,S-2,1\n"
+    with pytest.raises(ValueError, match="declare label_column"):
+        _parse_labels(labels, id_column="sample_key")
+    assert _parse_labels(labels, id_column="sample_key", target_column="target")[1] == [
+        "0",
+        "1",
+    ]
+
+
+def test_parse_labels_trims_headers_and_predictions_quote_csv_values() -> None:
+    labels = ' sample_key , outcome\n"key,one","high, risk"\n"key\n two",low\n'
+    ids, values, identity = _parse_labels(
+        labels, id_column="sample_key", target_column="outcome"
+    )
+    assert identity == "sample_key"
+    assert ids == ["key,one", "key\n two"]
+    assert values == ["high, risk", "low"]
+
+    predictions = _build_predictions(
+        ids,
+        values,
+        prediction_column="pred,label",
+        prediction_id_column="sample_key",
+    )
+    assert list(csv.reader(io.StringIO(predictions))) == [
+        ["sample_key", "pred,label"],
+        ["key,one", "high, risk"],
+        ["key\n two", "low"],
+    ]
+
+
+def test_extract_label_column_from_source_reads_explicit_constant() -> None:
+    assert extract_label_column_from_source("LABEL_COLUMN = 'outcome'\n") == "outcome"
+    assert extract_label_column_from_source("label = 'outcome'\n") is None
 
 
 def test_extract_prediction_column_returns_none_when_not_declared() -> None:
@@ -195,3 +234,28 @@ async def test_property_probe_uses_declared_dataset_columns() -> None:
 
     assert outcome["ok"] is True
     assert seen[0].splitlines()[0] == "sample_key,pred_label,prob_0,prob_1"
+
+
+@pytest.mark.asyncio
+async def test_property_probe_uses_declared_target_after_extra_sample_id() -> None:
+    labels = "sample_key,sample_id,outcome\na,S-1,0\nb,S-2,1\nc,S-3,0\nd,S-4,1\n"
+    observed: list[str] = []
+
+    async def score(predictions_csv: str) -> float:
+        observed.append(predictions_csv)
+        preds = {
+            row["sample_key"]: row["pred_label"]
+            for row in csv.DictReader(io.StringIO(predictions_csv))
+        }
+        truth = {"a": "0", "b": "1", "c": "0", "d": "1"}
+        return sum(preds[key] == value for key, value in truth.items()) / len(truth)
+
+    result = await validate_evaluator_properties(
+        labels,
+        score,
+        prediction_id_column="sample_key",
+        prediction_column="pred_label",
+        label_column="outcome",
+    )
+    assert result["ok"] is True
+    assert observed[0].splitlines()[1].endswith(",0")

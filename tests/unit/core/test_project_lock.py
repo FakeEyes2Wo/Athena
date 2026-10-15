@@ -63,9 +63,13 @@ def test_a_second_holder_is_refused(tmp_path: Path) -> None:
     athena.mkdir(parents=True)
     holder = _spawn_holder(athena)
     try:
-        with pytest.raises(ProjectBusyError, match="already being run"):
-            with project_lock(athena):
-                pass
+        pid_path = athena / "run.pid"
+        owner = pid_path.read_text(encoding="utf-8")
+        for _ in range(2):
+            with pytest.raises(ProjectBusyError, match="already being run"):
+                with project_lock(athena):
+                    pass
+            assert pid_path.read_text(encoding="utf-8") == owner
     finally:
         holder.kill()
         holder.wait(timeout=10)

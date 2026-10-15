@@ -167,7 +167,12 @@ export class WsBackend {
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject });
     });
-    ws.send(JSON.stringify({ request_id: requestId, method, params }));
+    try {
+      ws.send(JSON.stringify({ request_id: requestId, method, params }));
+    } catch (error) {
+      this.pending.delete(requestId);
+      throw error;
+    }
     return promise;
   }
 

@@ -173,14 +173,17 @@ def fill_by_coverage(
         for paper in ordered:
             if paper.paper_key in taken:
                 continue
-            if facet in facets_by_paper.get(paper.paper_key, []):
-                chosen.append(paper)
-                taken.add(paper.paper_key)
-                covered[facet] = paper.paper_key
-                # 这一篇可能同时覆盖别的面，一并记上，免得再为它们各挑一篇
-                for other in facets_by_paper.get(paper.paper_key, []):
-                    covered.setdefault(other, paper.paper_key)
-                break
+            paper_facets = facets_by_paper.get(paper.paper_key, [])
+            if facet not in paper_facets:
+                continue
+            chosen.append(paper)
+            taken.add(paper.paper_key)
+            covered[facet] = paper.paper_key
+            # Record extra facets without replacing the paper that first covered them.
+            covered |= {
+                other: covered.get(other, paper.paper_key) for other in paper_facets
+            }
+            break
     for paper in ordered:
         if len(chosen) >= slots:
             break

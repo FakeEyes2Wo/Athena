@@ -49,6 +49,7 @@ class _ControlledRunner:
 
     async def run(self, _request, *, session, emit):
         del session, emit
+        self._harness.prompts[self._plan_id].append(_request["content"])
         self._harness.started.add(self._plan_id)
         self._harness.started_turns[self._plan_id] += 1
         if self._plan_id in self._harness.crash_ids:
@@ -87,6 +88,7 @@ class _Harness:
         self.started: set[str] = set()
         self.gates: dict[str, asyncio.Event] = {}
         self.started_turns: dict[str, int] = defaultdict(int)
+        self.prompts: dict[str, list[str]] = defaultdict(list)
         self.decisions: dict[str, deque[str]] = defaultdict(deque)
         self.outcomes: dict[str, deque[tuple[str, float | None]]] = defaultdict(deque)
         self.crash_ids: set[str] = set()

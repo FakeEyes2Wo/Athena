@@ -3,13 +3,16 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Protocol
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.core.agent.types import AgentCommandError, ErrorCode
+from athena.core.contracts import ArtifactRef
+from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
-from athena.research.supervisor.experiment import decide_settlement
+from athena.research.supervisor.events import bounded_redacted_tail
+from athena.research.supervisor.experiment import PlanTurnResult, decide_settlement
 from athena.research.supervisor.plan_runtime import CompletedPlanTurn
 from athena.research.supervisor.plans import PlanFailure
 from athena.research.supervisor.run_state import SupervisorRunState
@@ -38,12 +41,14 @@ class PlanCallbacks(Protocol):
         ...
 
     async def settle_plan(
-        self, plan_id: str, best_ref: str | None, result: Any
+        self, plan_id: str, best_ref: ArtifactRef | None, result: PlanTurnResult | None
     ) -> None:
         """Settle one completed Plan."""
         ...
 
-    async def register_hypotheses(self, hypotheses: list) -> dict[str, object]:
+    async def register_hypotheses(
+        self, hypotheses: list[Hypothesis]
+    ) -> dict[str, object]:
         """Register hypotheses produced by an Ideator."""
         ...
 
@@ -66,6 +71,8 @@ class SearchLoop:
         self._plans = plans
         self._run_turn = run_turn
         self._task: asyncio.Task | None = None
+        self._cancel_requested = False
+        self._waiting_for_control = False
 
     @property
     def _state(self):
@@ -87,6 +94,7 @@ class SearchLoop:
             and self._state.status == "RUNNING"
             and (self._task is None or self._task.done())
         ):
+            self._cancel_requested = False
             task = asyncio.create_task(self.run_search())
             task.add_done_callback(self._on_search_done)
             self._task = task
@@ -112,26 +120,58 @@ class SearchLoop:
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""
-        self._task = asyncio.current_task()
-        while not self._run.is_stopped():
-            if self._state.status != "RUNNING":
-                # 暂停/等待人工决策：不再派发新 turn，直到 /resume 或选择操作唤醒。
-                self._run.clear_wake()
-                await self._run.wait_wake()
-                if self._run.is_stopped():
+        current = asyncio.current_task()
+        if self._task is None or self._task.done():
+            self._cancel_requested = False
+        self._task = current
+        while not self._run.is_stopped() and not self._cancel_requested:
+            if self._state.status != "RUNNING" and not self._run.running_ids():
+                # Stop dispatch while paused, but drain already-running turns
+                # first so their trusted results survive a restart.
+                self._waiting_for_control = True
+                try:
+                    self._run.clear_wake()
+                    if self._cancel_requested:
+                        return
+                    await self._run.wait_wake()
+                finally:
+                    self._waiting_for_control = False
+                if self._run.is_stopped() or self._cancel_requested:
                     return
                 continue
-            generated = await self._fill_slots()
+            try:
+                generated = (
+                    await self._fill_slots()
+                    if self._state.status == "RUNNING"
+                    else False
+                )
+            except AgentCommandError as exc:
+                # Trigger: pause closes the Agent command during slot filling; only that pause race is parked below.
+                if not self._is_pause_interruption(exc):
+                    raise
+                # pause() changes the durable status and closes the Agent
+                # dispatch gate before an in-flight ideator can follow up.
+                # That expected race should park scheduling, not fail SEARCH.
+                await self._plans.persist_state()
+                return
             if not self._run.running_ids():
                 if generated:
                     continue
                 if await self._wait_for_manual_selection():
                     continue
+                if any(
+                    plan.kind == "SEARCH"
+                    and plan.turn_limit is not None
+                    and plan.turns_used >= plan.turn_limit
+                    for plan in self._state.plans.values()
+                ):
+                    self._state.status = "WAITING"
+                    await self._plans.persist_state()
                 return
             done, _pending = await asyncio.wait(
                 self._run.running_tasks, return_when=asyncio.FIRST_COMPLETED
             )
-            if self._run.is_stopped():
+            if self._run.is_stopped() or self._cancel_requested:
                 return
             task = next(iter(done))
             # ``running_items``、不是 ``running_tasks``：后者给的是裸 Task，把它
@@ -161,11 +201,11 @@ class SearchLoop:
                 # A Plan task may fail after leaving the scheduler's task set.
                 # Park SEARCH with durable feedback so recovery can retry it.
                 plan = self._state.plans.get(plan_id)
+                diagnostic = bounded_redacted_tail(f"{type(exc).__name__}: {exc}", 1180)
                 if plan is not None:
-                    detail = f"{type(exc).__name__}: {exc}"
                     failure = PlanFailure(
-                        kind="turn_crashed", detail=detail
-                    ).to_summary()[:1200]
+                        kind="turn_crashed", detail=diagnostic
+                    ).to_summary()
                     self._state.plans[plan_id] = plan.model_copy(
                         update={"last_failure": failure}
                     )
@@ -176,18 +216,34 @@ class SearchLoop:
                     {
                         "source": "supervisor",
                         "channel": "error",
-                        "text": f"Plan {plan_id} failed: {exc}",
+                        "text": f"Plan {plan_id} failed: turn_crashed: {diagnostic}",
                     },
                 )
+                if self._run.running_ids():
+                    continue
                 return
             await self._apply_completed_turn(completed)
+
+    def _is_pause_interruption(self, error: AgentCommandError) -> bool:
+        """Recognize only AgentRuntime's explicit pause gate rejection."""
+        return (
+            self._state.status != "RUNNING"
+            and error.code is ErrorCode.CLOSED
+            and str(error) == "runtime paused"
+        )
 
     async def cancel(self) -> None:
         """Cancel the live SEARCH loop, if another task owns it."""
         task = self._task
         if task is None or task.done() or task is asyncio.current_task():
             return
-        task.cancel()
+        self._cancel_requested = True
+        self._run.wake()
+        # A paused loop has no Plan work to interrupt. Wake it and let it leave
+        # its control wait cooperatively; cancelling a waiter can strand the
+        # scheduler during shutdown on Windows event loops.
+        if not self._waiting_for_control:
+            task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if self._task is task:
             self._task = None
@@ -236,6 +292,7 @@ class SearchLoop:
                     timeout=10,
                 )
             except AgentCommandError as exc:
+                # Trigger: cancellation interrupts an already-closed Agent command; ignore only NOT_FOUND.
                 if exc.code is not ErrorCode.NOT_FOUND:
                     raise
         finally:
@@ -315,22 +372,10 @@ class SearchLoop:
             if self._run.is_stopped():
                 return generated
             if action.kind is ScheduleKind.GENERATE:
-                if self._deps.research.ideator is None:
-                    before = len(self._tree.pending_hypotheses())
-                    await self._deps.research.supervisor(
-                        f"Propose exactly {action.count} new SEARCH hypotheses."
-                    )
-                    if self._run.is_stopped():
-                        return generated
-                    generated = len(self._tree.pending_hypotheses()) > before
-                else:
-                    hypotheses = await self._deps.research.ideator(action.count)
-                    if self._run.is_stopped():
-                        return generated
-                    registered = await self._plans.register_hypotheses(hypotheses)
-                    # 以"实际入图数量"判断本轮是否产出了新候选，避免 ideator 返回
-                    # 但全部被过滤时把 SEARCH 循环拖成空转（无法推进到 VALIDATE）。
-                    generated = len(registered["hypothesis_ids"]) > 0
+                new_candidates = await self._generate_hypotheses(action.count)
+                if new_candidates is None:
+                    return generated
+                generated = new_candidates
                 continue
             plan_id = action.plan_id or action.hypothesis_id
             if plan_id is None:
@@ -356,11 +401,30 @@ class SearchLoop:
             self._launch_turn(plan_id)
         return generated
 
+    async def _generate_hypotheses(self, count: int) -> bool | None:
+        """Generate and register SEARCH candidates through the configured provider."""
+        ideator = self._deps.research.ideator
+        if ideator is None:
+            before = len(self._tree.pending_hypotheses())
+            await self._deps.research.supervisor(
+                f"Propose exactly {count} new SEARCH hypotheses."
+            )
+            if self._run.is_stopped():
+                return None
+            return len(self._tree.pending_hypotheses()) > before
+
+        hypotheses = await ideator(count)
+        if self._run.is_stopped():
+            return None
+        registered = await self._plans.register_hypotheses(hypotheses)
+        # Count newly registered graph nodes so empty proposals cannot spin SEARCH.
+        return len(registered["hypothesis_ids"]) > 0
+
     def _launch_turn(self, plan_id: str) -> None:
         if plan_id not in self._run.running_ids():
             self._run.add_running(plan_id, asyncio.create_task(self._run_turn(plan_id)))
 
-    async def _apply_completed_turn(self, completed) -> None:
+    async def _apply_completed_turn(self, completed: CompletedPlanTurn) -> None:
         plan_id = completed.plan_id
         if plan_id not in self._state.plans:
             return
@@ -368,19 +432,68 @@ class SearchLoop:
         if completed.result is not None and completed.result.next_state is not None:
             state = completed.result.next_state
             self._state.plans[plan_id] = state
-        if completed.result is not None and completed.result.kind == "diff_rejected":
-            # A diff that does not implement the intervention is not a trusted
-            # experiment; do not settle it. Let the PlanAgent repair and retry.
-            await self._plans.persist_state()
-            return
-        if completed.decision is None:
-            if state.turn_limit is not None and state.turns_used >= state.turn_limit:
-                self._state.status = "WAITING"
-            await self._plans.persist_state()
-            return
-        if completed.decision.decision == "abandon" and state.best_ref is None:
-            await self._plans.settle_plan(plan_id, None, completed.result)
+        if completed.decision is not None and completed.decision.decision == "abandon":
+            await self._plans.settle_plan(plan_id, state.best_ref, completed.result)
             await self._plans.publish_state()
+            return
+        if (
+            completed.failure is not None
+            and completed.failure.kind == "turn_infrastructure_failed"
+        ):
+            # Agent service / artifact-store failures cannot be repaired by
+            # changing candidate code. Preserve the Plan and its diagnostic for
+            # an explicit resume after the infrastructure is available again.
+            await self._pause_for_infrastructure(
+                plan_id,
+                completed.failure.detail,
+                recovery="Restore the Agent/storage service before resuming SEARCH.",
+            )
+            return
+        if completed.result is not None and completed.result.kind in {
+            "execution_infrastructure_failed",
+            "evaluator_infrastructure_failed",
+        }:
+            # Candidate code cannot repair a broken backend or frozen evaluator.
+            # Preserve the Plan for an explicit resume after the cause is fixed.
+            await self._pause_for_infrastructure(
+                plan_id,
+                completed.result.error,
+                recovery="Restore the execution/evaluator service before resuming SEARCH.",
+            )
+            return
+        if (
+            completed.decision is not None
+            and completed.decision.decision == "submit"
+            and completed.result is None
+            and completed.failure is None
+            and state.kind == "SEARCH"
+            and state.best_ref is not None
+        ):
+            # PlanRuntime short-circuits submit when a trusted historical best
+            # exists; never route that valid, result-less action through failure
+            # retry handling for missing Agent results or infrastructure faults.
+            await self._plans.settle_plan(plan_id, state.best_ref, None)
+            await self._plans.publish_state()
+            return
+        if completed.decision is None or (
+            completed.result is not None and completed.result.kind != "scored"
+        ):
+            # A submit without a trusted best still proposes an experiment; a
+            # failed run must reach another repair turn, including rejected diffs.
+            exhausted = (
+                state.turn_limit is not None and state.turns_used >= state.turn_limit
+            )
+            if exhausted:
+                if (
+                    state.best_ref is not None
+                    or self._deps.phases.validation_mode != "manual"
+                ):
+                    await self._plans.settle_plan(
+                        plan_id, state.best_ref, completed.result
+                    )
+                else:
+                    self._state.status = "WAITING"
+            await self._plans.persist_state()
             return
         settlement = decide_settlement(
             state,
@@ -402,6 +515,21 @@ class SearchLoop:
                 plan_id, settlement.best_ref, completed.result
             )
         await self._plans.publish_state()
+
+    async def _pause_for_infrastructure(
+        self, plan_id: str, detail: str | None, *, recovery: str
+    ) -> None:
+        """Persist SEARCH as WAITING and publish its infrastructure cause."""
+        self._state.status = "WAITING"
+        await self._plans.persist_state()
+        await self._deps.phases.publish(
+            "output",
+            {
+                "source": "supervisor",
+                "channel": "error",
+                "text": f"Plan {plan_id} paused: {detail}. {recovery}",
+            },
+        )
 
     async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
         """Queue one validated Hypothesis for the next manual SEARCH slot."""

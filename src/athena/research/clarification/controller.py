@@ -1,5 +1,6 @@
 """Async orchestration for the persisted clarification workflow."""
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -81,13 +82,34 @@ class ClarificationController:
         self._broker = broker
         self._generator = generator
         self._options = options or ClarificationOptions()
+        self._cancellations: dict[str, asyncio.Event] = {}
 
     async def start_or_resume(self, task: str) -> ClarificationDraft:
         """Create a fresh draft or continue the matching active draft."""
         normalized = normalize_task(task)
         if self._store.exists():
-            current = self._store.load()
-            if current.status not in {"CANCELLED", "FAILED"}:
+            try:
+                current = self._store.load()
+            except ClarificationPersistenceError as error:
+                # Trigger: an existing draft is marked corrupt; preserve it before starting a replacement draft.
+                if not str(error).startswith("draft_corrupt:"):
+                    raise
+                # Preserve damaged user data for inspection, then unblock this
+                # session so a new task can be started deliberately.
+                backup = self._store.draft_path.with_name(
+                    f"clarification.corrupt-{uuid4().hex}.json"
+                )
+                try:
+                    self._store.draft_path.replace(backup)
+                except OSError as quarantine_error:
+                    # Trigger: quarantining the corrupt draft fails, so do not overwrite it silently.
+                    raise ClarificationPersistenceError(
+                        f"draft_quarantine_failed: {quarantine_error}"
+                    ) from quarantine_error
+                current = None
+            if current is None:
+                pass
+            elif current.status not in {"CANCELLED", "FAILED"}:
                 if normalize_task(current.original_task) != normalized:
                     raise ClarificationError(
                         "different_task",
@@ -110,9 +132,15 @@ class ClarificationController:
         if draft.pending_request is not None:
             draft = await self._recover_pending(draft)
         while draft.status == "CLARIFYING":
+            cancelled = await self._cancelled_draft(draft)
+            if cancelled is not None:
+                return cancelled
             try:
                 turn = await generate_turn(self._generator, draft)
             except Exception:  # noqa: BLE001
+                cancelled = await self._cancelled_draft(draft)
+                if cancelled is not None:
+                    return cancelled
                 # Injected generators cross the model/provider boundary; any
                 # provider failure becomes a durable, retryable FAILED draft.
                 failed = self._save(fail(draft, self._options.clock()))
@@ -126,6 +154,9 @@ class ClarificationController:
                     persist=True,
                 )
                 return failed
+            cancelled = await self._cancelled_draft(draft)
+            if cancelled is not None:
+                return cancelled
             if isinstance(turn.step, ClarificationFinalStep):
                 ready = self._save(finalize(draft, turn.step, self._options.clock()))
                 await self._publish_update(ready, turn)
@@ -135,6 +166,8 @@ class ClarificationController:
                 await self._publish_update(ready, turn)
                 return ready
             draft = await self._ask(draft, turn.step, turn)
+            if draft.status == "CANCELLED":
+                return draft
         return draft
 
     def get(self, draft_id: str) -> ClarificationDraft:
@@ -173,17 +206,27 @@ class ClarificationController:
             raise ClarificationError(
                 "draft_not_cancellable", f"draft status is {draft.status}"
             )
-        outcomes = await self._cancel_scope(draft)
-        if draft.pending_request is not None:
-            draft = settle_answer(
-                draft,
-                draft.pending_request,
-                _matching_outcome(
-                    draft.pending_request, outcomes, self._options.clock()
-                ),
-                self._options.clock(),
-            )
-        return self._save(cancel_draft(draft, self._options.clock()))
+        existing = self._cancellations.get(draft_id)
+        if existing is not None:
+            await existing.wait()
+            return self._store.load(draft_id)
+        completed = asyncio.Event()
+        self._cancellations[draft_id] = completed
+        try:
+            outcomes = await self._cancel_scope(draft)
+            if draft.pending_request is not None:
+                draft = settle_answer(
+                    draft,
+                    draft.pending_request,
+                    _matching_outcome(
+                        draft.pending_request, outcomes, self._options.clock()
+                    ),
+                    self._options.clock(),
+                )
+            return self._save(cancel_draft(draft, self._options.clock()))
+        finally:
+            self._cancellations.pop(draft_id, None)
+            completed.set()
 
     async def _ask(
         self,
@@ -197,6 +240,9 @@ class ClarificationController:
         try:
             outcome = await self._broker.ask(request)
         except Exception:  # noqa: BLE001
+            cancelled = await self._cancelled_draft(draft)
+            if cancelled is not None:
+                return cancelled
             # Broker.ask crosses the human transport boundary. Preserve the
             # interrupted question as cancelled before exposing FAILED.
             outcomes = await self._cancel_scope(draft)
@@ -208,6 +254,9 @@ class ClarificationController:
                 field=step.field,
             )
             return self._save(fail(draft, self._options.clock()))
+        cancelled = await self._cancelled_draft(draft)
+        if cancelled is not None:
+            return cancelled
         return self._save(
             settle_answer(
                 draft, request, outcome, self._options.clock(), field=step.field
@@ -235,6 +284,19 @@ class ClarificationController:
         request = draft.pending_request
         assert request is not None
         outcomes = await self._cancel_scope(draft)
+        cancelled = await self._cancelled_draft(draft)
+        if cancelled is not None:
+            return cancelled
+        # A second restore (or another canonical transition) may have settled
+        # this request while cancel_scope was in flight. Never apply an old
+        # broker response over a newer persisted revision.
+        latest = self._store.load(draft.draft_id)
+        if (
+            latest.revision != draft.revision
+            or latest.status != "CLARIFYING"
+            or latest.pending_request != request
+        ):
+            return latest
         return self._save(
             settle_answer(
                 draft,
@@ -246,6 +308,16 @@ class ClarificationController:
 
     async def _cancel_scope(self, draft: ClarificationDraft) -> list[HumanOutcome]:
         return await self._broker.cancel_scope(draft.session_id, draft.draft_id)
+
+    async def _cancelled_draft(
+        self, draft: ClarificationDraft
+    ) -> ClarificationDraft | None:
+        """Fence an in-flight generator/broker continuation behind cancel."""
+        completed = self._cancellations.get(draft.draft_id)
+        if completed is not None:
+            await completed.wait()
+        latest = self._store.load(draft.draft_id)
+        return latest if latest.status == "CANCELLED" else None
 
     def _request(
         self, draft: ClarificationDraft, step: ClarificationQuestionStep

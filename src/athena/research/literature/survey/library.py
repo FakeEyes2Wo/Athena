@@ -191,8 +191,10 @@ class PaperLibrary:
         try:
             payload = json.loads(self._index_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            # Trigger: the survey index has not been created yet; start with an empty index.
             return {}
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # Trigger: an existing survey index is unreadable or corrupt; rebuild from an empty index.
             return {}
         return {
             key: value
@@ -267,6 +269,7 @@ class PaperLibrary:
         try:
             data = await self.store.get_bytes(ref)
         except (ArtifactNotFoundError, FileNotFoundError):
+            # Trigger: a cached binary artifact was evicted or is missing from its source store.
             return None
         await target.put_bytes(data)
         return data
@@ -285,6 +288,7 @@ class PaperLibrary:
         try:
             return await self.store.get_text(ref)
         except (ArtifactNotFoundError, FileNotFoundError):
+            # Trigger: a cached text artifact was evicted or is missing from its source store.
             return None
 
     async def save_text(self, key: str, text: str) -> ArtifactRef:

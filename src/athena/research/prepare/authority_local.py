@@ -117,8 +117,10 @@ class LocalBaselineAuthorityStore:
         try:
             raw = self.record_path.read_text(encoding="utf-8")
         except FileNotFoundError:
+            # Trigger: no authority record exists yet, so the caller treats this as an unsealed baseline.
             return None
         except OSError as exc:
+            # Trigger: the authority record exists but cannot be read from local storage.
             raise BaselineAuthorityError(
                 "local baseline authority record is unavailable"
             ) from exc
@@ -131,6 +133,7 @@ class LocalBaselineAuthorityStore:
             json.JSONDecodeError,
             BaselineAuthorityError,
         ) as exc:
+            # Trigger: persisted authority JSON cannot be parsed or fails its sealed-record invariants.
             raise BaselineAuthorityError(
                 "local baseline authority record is invalid"
             ) from exc
@@ -147,9 +150,11 @@ class LocalBaselineAuthorityStore:
                 os.fsync(stream.fileno())
             os.replace(temporary_name, self.record_path)
         except OSError as exc:
+            # Trigger: writing, syncing, or atomically replacing the sealed record fails.
             try:
                 os.unlink(temporary_name)
             except OSError:
+                # Trigger: the temporary record cannot be removed after the atomic save fails.
                 pass
             raise BaselineAuthorityError(
                 "local baseline authority record could not be saved"
@@ -227,4 +232,5 @@ class LocalBaselineAuthorityStore:
         try:
             return base64.b64decode(value.encode("ascii"), validate=True)
         except (UnicodeEncodeError, ValueError) as exc:
+            # Trigger: a persisted base64 field contains non-ASCII or invalid base64 characters.
             raise BaselineAuthorityError(f"{field} is invalid") from exc

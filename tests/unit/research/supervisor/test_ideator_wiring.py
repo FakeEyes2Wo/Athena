@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support import RecordingDocumentProjector
-
+from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
@@ -22,6 +21,7 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from tests.support import RecordingDocumentProjector
 
 
 async def _make_supervisor(tmp_path: Path, *, run_ideator_turn=None) -> Supervisor:
@@ -199,6 +199,44 @@ async def test_generate_without_ideator_falls_back_to_supervisor(
     supervisor = await _make_supervisor(tmp_path)
     with pytest.raises(AssertionError, match="Supervisor turn must not run"):
         await supervisor._search._fill_slots()
+
+
+@pytest.mark.asyncio
+async def test_pause_racing_with_ideator_followup_keeps_search_resumable(
+    tmp_path: Path,
+) -> None:
+    supervisor = None
+    paused = True
+
+    async def pause_race(_count: int) -> list[Hypothesis]:
+        if paused:
+            supervisor.state.status = "WAITING"
+            raise AgentCommandError(ErrorCode.CLOSED, "runtime paused")
+        return [
+            Hypothesis(
+                statement="resumed hypothesis",
+                intervention="change the model",
+                expected_effect="improve score",
+            )
+        ]
+
+    supervisor = await _make_supervisor(tmp_path, run_ideator_turn=pause_race)
+    supervisor.state.phase = "SEARCH"
+
+    await supervisor.run_search()
+
+    assert supervisor.state.status == "WAITING"
+    assert supervisor.state.phase == "SEARCH"
+    assert len(supervisor.tree.experiments()) == 1
+
+    paused = False
+    supervisor.state.status = "RUNNING"
+    assert await supervisor._search._fill_slots() is True
+    assert any(
+        item.statement == "resumed hypothesis"
+        for item in supervisor.tree.pending_hypotheses()
+    )
+    assert supervisor.state.status == "RUNNING"
 
 
 @pytest.mark.asyncio

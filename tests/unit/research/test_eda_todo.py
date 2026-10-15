@@ -39,6 +39,60 @@ async def _run_todos(*, agents, store, workspace: Path, **options) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_eda_coordinator_prompt_pins_reports_to_current_session_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspaces" / "conversations" / "session-b" / "eda"
+    workspace.mkdir(parents=True)
+    report = workspace / "EDA_REPORT_00_OVERVIEW.md"
+    report.write_text("current session report", encoding="utf-8")
+    handoff_calls: list[dict] = []
+
+    class Registry:
+        def contains(self, _agent_type):
+            return False
+
+    class NoopRunner:
+        def __init__(self, _agents, _store, _workspace):
+            pass
+
+        async def run(self, _options):
+            return []
+
+    async def handoff(**kwargs):
+        handoff_calls.append(kwargs)
+
+    async def publish_output(**_kwargs):
+        pass
+
+    runtime = SimpleNamespace(
+        registry=Registry(),
+        provider=object(),
+        store=object(),
+        execution=object(),
+        kaggle_tools=lambda _purpose: None,
+        agents=_FakeAgents(),
+        events=SimpleNamespace(project_agent_event=lambda *_args: None),
+        publish_output=publish_output,
+    )
+    monkeypatch.setattr(eda_todo, "register_prepare_eda_agent", lambda *_a, **_kw: None)
+    monkeypatch.setattr(eda_todo, "EdaTodoRunner", NoopRunner)
+
+    reports = await eda_todo._collect_reports(
+        runtime,
+        workspace,
+        "Shared workspace: C:/project/workspace",
+        handoff,
+    )
+
+    content = handoff_calls[0]["content"]
+    assert str(workspace.resolve()) in content
+    assert "do not search or read project-level workspaces/eda" in content
+    assert "only use reports under this exact directory" in content.lower()
+    assert reports == [report]
+
+
+@pytest.mark.asyncio
 async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     tmp_path: Path, monkeypatch
 ) -> None:

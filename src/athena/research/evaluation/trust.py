@@ -108,6 +108,20 @@ def extract_prediction_column_from_source(evaluator_source: str) -> str | None:
     return candidates[0]
 
 
+_LABEL_COLUMN_SOURCE_RE = re.compile(
+    r"^\s*LABEL_COLUMN\s*=\s*[`'\"](?P<name>[A-Za-z_][A-Za-z0-9_]*)[`'\"]",
+    re.MULTILINE,
+)
+
+
+def extract_label_column_from_source(evaluator_source: str) -> str | None:
+    """Read an explicit module-level LABEL_COLUMN declaration, if present."""
+    if not evaluator_source:
+        return None
+    match = _LABEL_COLUMN_SOURCE_RE.search(evaluator_source)
+    return match.group("name") if match else None
+
+
 def _build_predictions(
     ids: list[str],
     values: list[str],
@@ -117,13 +131,13 @@ def _build_predictions(
     probability_columns: Sequence[str] = (),
 ) -> str:
     columns = [prediction_id_column, prediction_column, *probability_columns]
-    lines = [",".join(columns)]
-    rows = []
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(columns)
     for row_id, value in zip(ids, values):
         probabilities = [_probability(value, column) for column in probability_columns]
-        rows.append(",".join([row_id, value, *probabilities]))
-    lines.extend(rows)
-    return "\n".join(lines) + "\n"
+        writer.writerow([row_id, value, *probabilities])
+    return output.getvalue()
 
 
 def _probability(value: str, column: str) -> str:
@@ -133,20 +147,49 @@ def _probability(value: str, column: str) -> str:
 
 
 def _parse_labels(
-    labels_csv: str, *, id_column: str | None = None
+    labels_csv: str,
+    *,
+    id_column: str | None = None,
+    target_column: str | None = None,
 ) -> tuple[list[str], list[str], str]:
     reader = csv.DictReader(io.StringIO(labels_csv))
-    if not reader.fieldnames:
+    raw_fields = reader.fieldnames
+    if not raw_fields:
         raise ValueError("labels CSV must contain an identity column")
-    id_column = id_column or reader.fieldnames[0]
-    if id_column not in reader.fieldnames:
+    fields = [field.strip() for field in raw_fields]
+    if any(not field for field in fields) or len(set(fields)) != len(fields):
+        raise ValueError("labels CSV has empty or duplicate column names")
+    reader.fieldnames = fields
+    id_column = id_column or fields[0]
+    if id_column not in fields:
         raise ValueError(f"labels CSV must contain {id_column!r}")
-    target_fields = [field for field in reader.fieldnames if field != id_column]
+    target_fields = [field for field in fields if field != id_column]
     if not target_fields:
         raise ValueError("labels CSV must contain a target column")
-    target_field = target_fields[0]
+    if target_column is None:
+        if len(target_fields) != 1:
+            raise ValueError(
+                "labels CSV has multiple non-ID columns "
+                f"{target_fields!r}; declare label_column in metric.json or "
+                "LABEL_COLUMN in evaluate.py so the probe uses the target field"
+            )
+        target_field = target_fields[0]
+    else:
+        if target_column not in fields:
+            raise ValueError(
+                f"labels CSV must contain declared target column {target_column!r}"
+            )
+        if target_column == id_column:
+            raise ValueError(
+                "labels CSV target column must differ from the identity column"
+            )
+        target_field = target_column
     rows = list(reader)
+    if any(None in row or None in row.values() for row in rows):
+        raise ValueError("labels CSV contains rows with inconsistent field counts")
     ids = [row[id_column].strip() for row in rows]
+    if any(not row_id for row_id in ids):
+        raise ValueError("labels CSV contains an empty identity value")
     values = [row[target_field] for row in rows]
     return ids, values, id_column
 
@@ -158,6 +201,7 @@ async def validate_evaluator_properties(
     seed: int = 0,
     prediction_column: str | None = None,
     prediction_id_column: str | None = None,
+    label_column: str | None = None,
     probability_columns: Sequence[str] = (),
 ) -> dict[str, bool | str]:
     """Run row-order and value-permutation checks against a scoring callable.
@@ -168,7 +212,9 @@ async def validate_evaluator_properties(
     if not prediction_column:
         raise ValueError("evaluator must declare a prediction column")
     ids, values, prediction_id_column = _parse_labels(
-        labels_csv, id_column=prediction_id_column
+        labels_csv,
+        id_column=prediction_id_column,
+        target_column=label_column,
     )
     if len(ids) < 2:
         return {"ok": False, "reason": "need at least two labeled rows"}

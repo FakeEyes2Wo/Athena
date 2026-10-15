@@ -1,3 +1,7 @@
+// These integration fixtures use local sockets and should fail fast on setup
+// errors; keep panic-on-fixture-failure linting scoped to this test target.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use athena_agent::{AgentConfig, LlmProvider, OpenAiProvider, ProviderEvent};
 use futures::StreamExt;
 use std::time::Duration;

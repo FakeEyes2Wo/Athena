@@ -167,3 +167,27 @@ def test_build_web_tools_shares_search_session() -> None:
     fetch = tools.resolve("web_fetch")
 
     assert search.session is fetch.session
+
+
+@pytest.mark.parametrize("limits", [(1500, 500), (500, 1500), (1500, 500, 1500)])
+async def test_cached_fetch_honors_each_requested_text_limit(limits) -> None:
+    http = _FakeHttp("<body>" + "abcdefghij " * 200 + "</body>")
+    fetch = WebFetchTool(WebSession(http))
+    first = await fetch.execute(
+        {"url": "https://example.com", "max_chars": limits[0]}, ctx=None
+    )
+    for limit in limits[1:]:
+        result = await fetch.execute(
+            {"ref_id": first.data["ref_id"], "max_chars": limit}, ctx=None
+        )
+        assert len(result.data["text"]) == limit
+        assert result.data["truncated"] is True
+    assert len(http.urls) == (2 if limits[0] < max(limits) else 1)
+
+
+async def test_search_preserves_percent_encoded_characters_in_destination() -> None:
+    destination = "https://example.com/a%2Fb?q=100%25"
+    href = "//duckduckgo.com/l/?" + urllib.parse.urlencode({"uddg": destination})
+    http = _FakeHttp(f'<a class="result__a" href="{href}">Encoded</a>')
+    results = await WebSearchTool(WebSession(http)).search("test")
+    assert results[0]["url"] == destination

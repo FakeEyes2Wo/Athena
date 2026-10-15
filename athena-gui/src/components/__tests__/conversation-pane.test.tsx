@@ -244,7 +244,7 @@ describe("ConversationPane", () => {
 
     renderUi(<ConversationPane pipeline={pipeline as never} />);
 
-    expect(screen.getByText(/已启动/)).toBeInTheDocument();
+    expect(screen.getByText("已启动")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认并开始研究" })).not.toBeInTheDocument();
   });
 

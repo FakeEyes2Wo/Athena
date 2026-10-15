@@ -74,6 +74,7 @@ async def confirmed_task_context_block(runtime: Any) -> str:
     try:
         return await ConfirmedTaskContextProvider.from_runtime(runtime).load()
     except ConfirmedTaskContextError as error:
+        # Trigger: a gated checkpoint requires confirmed context but the stored task context cannot be loaded.
         if (
             runtime.config.research.task.confirmation_gate
             or runtime.state.task_understanding is not None

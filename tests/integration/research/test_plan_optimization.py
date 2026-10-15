@@ -159,3 +159,87 @@ async def test_plan_turn_executes_manifest_scores_and_commits(
     # the trusted revision is committed on the Plan branch
     assert (workdir / "predict.py").is_file()
     assert result.commit
+
+
+@pytest.mark.asyncio
+async def test_failed_local_script_can_be_repaired_and_scored_on_same_plan(
+    tmp_path, monkeypatch
+) -> None:
+    """A traceback tail reaches the repair turn; the repaired source then scores."""
+    for name, value in {
+        "GIT_AUTHOR_NAME": "Athena Test",
+        "GIT_AUTHOR_EMAIL": "athena@example.invalid",
+        "GIT_COMMITTER_NAME": "Athena Test",
+        "GIT_COMMITTER_EMAIL": "athena@example.invalid",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    evaluator_ref = await _frozen_eval_bundle(tmp_path, store)
+    plan_input = PlanInput(evaluator_ref=evaluator_ref, tree_ref=_REF)
+    workspace = LocalGitWorkspace(
+        tmp_path / "repo",
+        tmp_path / "worktrees",
+        lambda content: store.put_bytes(content),
+    )
+    base = await workspace.init(repo_path=tmp_path / "repo")
+    branch = await workspace.create(base, "athena/plan/repair")
+    workdir = Path(branch.path)
+    model = workdir / "model.py"
+    model.write_text(
+        "print('earlier output ' * 1000)\n" "raise RuntimeError('REPAIR_ROOT_CAUSE')\n",
+        encoding="utf-8",
+    )
+    (workdir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [[sys.executable, "model.py"]],
+                "outputs": {
+                    "predictions": "outputs/predictions",
+                    "report": "report.md",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = PlanRunner(
+        execution=ExecutionRuntime(
+            project_root=tmp_path, environment_root=tmp_path, store=store
+        ),
+        store=store,
+        evaluator=TrustedEvaluator(
+            DataScriptRunner(store=store, workdir=tmp_path / "eval-run")
+        ),
+        workspace=workspace,
+        branch=branch,
+        context=ExecutionContext(
+            project_root=tmp_path,
+            workspace_root=workdir,
+            environment_root=tmp_path,
+        ),
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=4, patience=3
+    )
+
+    failed = await runner.run_turn("repair", state, plan_input)
+
+    assert failed.kind == "execution_failed"
+    assert "REPAIR_ROOT_CAUSE" in (failed.error or "")
+    assert len(failed.error or "") < 1200
+    assert failed.evidence_ref is not None
+
+    model.write_text(
+        "from pathlib import Path\n"
+        "Path('outputs/predictions').mkdir(parents=True, exist_ok=True)\n"
+        "Path('outputs/predictions/predictions.csv').write_text("
+        "'__athena_row_id,prediction\\nrow_1,1\\nrow_2,0\\n')\n",
+        encoding="utf-8",
+    )
+    scored = await runner.run_turn("repair", state, plan_input)
+
+    assert scored.kind == "scored"
+    assert scored.metric == 1.0
+    assert scored.next_state is not None
+    assert scored.next_state.best_ref is not None

@@ -26,15 +26,19 @@ if (backend !== "python") {
 
 const operation = packaging ? "release" : "build";
 
-function run(step, command, cwd) {
+function run(step, command, argv, cwd) {
   console.log(`\n=== ${step} ===`);
-  console.log(`> ${command}\n   (cwd: ${cwd})`);
-  const result = spawnSync(command, { cwd, stdio: "inherit", shell: true });
+  console.log(`> ${[command, ...argv].join(" ")}\n   (cwd: ${cwd})`);
+  // Only the fixed npm.cmd commands need cmd.exe; executable paths stay literal.
+  const shell = process.platform === "win32" && command === "npm.cmd";
+  const result = spawnSync(command, argv, { cwd, stdio: "inherit", shell });
   if (result.status !== 0) {
     console.error(`[${operation}] ${step} 失败 (exit ${result.status ?? "signal"})`);
     process.exit(result.status ?? 1);
   }
 }
+
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
 if (packaging) {
   console.log("[release] 后端打包方式: Python (PyInstaller)");
@@ -49,12 +53,21 @@ if (packaging) {
   fs.mkdirSync(outDir, { recursive: true });
   run(
     "Python 后端 · PyInstaller 打包",
-    `${python} -m PyInstaller --onefile --noconfirm --name gui_gateway --paths src --collect-all athena --collect-all gui_gateway --copy-metadata genai_prices --copy-metadata pydantic_ai_slim --copy-metadata pydantic_ai --copy-metadata logfire_api --copy-metadata logfire --copy-metadata qoder_agent_sdk --copy-metadata pydantic --copy-metadata openai --distpath "${outDir}" --workpath "${workDir}" --specpath "${workDir}" scripts/gui_gateway_entry.py`,
+    python,
+    [
+      "-m", "PyInstaller", "--onefile", "--noconfirm", "--name", "gui_gateway",
+      "--paths", "src", "--collect-all", "athena", "--collect-all", "gui_gateway",
+      ...["genai_prices", "pydantic_ai_slim", "pydantic_ai", "logfire_api",
+        "logfire", "qoder_agent_sdk", "pydantic", "openai"]
+        .flatMap((distribution) => ["--copy-metadata", distribution]),
+      "--distpath", outDir, "--workpath", workDir, "--specpath", workDir,
+      "scripts/gui_gateway_entry.py",
+    ],
     repoRoot,
   );
-  fs.rmSync(path.join(repoRoot, "build"), { recursive: true, force: true });
+  fs.rmSync(workDir, { recursive: true, force: true });
 
-  run("Tauri · release 打包", "npm run tauri build", path.join(repoRoot, "athena-gui"));
+  run("Tauri · release 打包", npm, ["run", "tauri", "build"], path.join(repoRoot, "athena-gui"));
   console.log("\n[release] 完成");
   console.log("  安装器输出目录: athena-gui/src-tauri/target/release/bundle/");
   process.exit(0);
@@ -63,20 +76,20 @@ if (packaging) {
 console.log("[build] 后端构建方式: Python");
 
 // 1. 后端
-run("Python 后端 · 安装依赖", "uv sync", repoRoot);
-run("Python 后端 · 构建产物", "uv build", repoRoot);
+run("Python 后端 · 安装依赖", "uv", ["sync"], repoRoot);
+run("Python 后端 · 构建产物", "uv", ["build"], repoRoot);
 
 // 2. 前端
 if (!skipFrontend) {
-  run("前端 · 构建", "npm run build", path.join(repoRoot, "athena-gui"));
+  run("前端 · 构建", npm, ["run", "build"], path.join(repoRoot, "athena-gui"));
 } else {
   console.log("\n[build] 跳过前端构建");
 }
 
 // 3. Rust (Tauri)
 if (!skipRust) {
-  const cargo = release ? "cargo build --release" : "cargo build";
-  run(`Rust (Tauri) · ${release ? "release" : "debug"} 构建`, cargo, path.join(repoRoot, "athena-gui", "src-tauri"));
+  const cargoArgs = release ? ["build", "--release"] : ["build"];
+  run(`Rust (Tauri) · ${release ? "release" : "debug"} 构建`, "cargo", cargoArgs, path.join(repoRoot, "athena-gui", "src-tauri"));
 } else {
   console.log("\n[build] 跳过 Rust 构建");
 }

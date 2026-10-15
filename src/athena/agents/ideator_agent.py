@@ -148,10 +148,10 @@ __all__ = [
     "BOLD_IDEATOR_PROFILE",
     "EXPLOIT_IDEATOR_PROFILE",
     "GATED_PROMPT_TYPE",
-    "HandoffResult",
     "IDEATOR_AGENT_TYPE",
-    "IdeatorProfile",
     "MOONSHOT_IDEATOR_PROFILE",
     "SEARCH_IDEATOR_PROFILES",
+    "HandoffResult",
+    "IdeatorProfile",
     "register_ideator_agent",
 ]

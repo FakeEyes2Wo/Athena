@@ -225,6 +225,7 @@ class ResponsesProvider(BaseProvider):
             try:
                 args = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
+                # Incomplete or malformed streamed tool JSON is returned as a recoverable truncated call.
                 args, truncated = {}, True
             events.append(
                 StreamEvent(
@@ -290,6 +291,7 @@ class ResponsesProvider(BaseProvider):
         try:
             stream = await self.client.chat.completions.create(**kw)
         except BadRequestError as exc:
+            # Retry without schema mode only when the endpoint explicitly rejects response_format.
             if not _response_format_unavailable(exc):
                 raise
             logger.warning(
@@ -334,34 +336,32 @@ class ResponsesProvider(BaseProvider):
                     d = c.delta
                     if c.finish_reason:
                         finish = c.finish_reason
+                    delta = ""
                     if d.content:
                         delta = (
                             dsml_filter.push(d.content)
                             if dsml_filter is not None
                             else d.content
                         )
-                        if delta:
-                            text += delta
-                            yield StreamEvent(
-                                kind="text_delta",
-                                data={"delta": delta, "accumulated": text},
-                            )
-                    if d.tool_calls:
-                        for t in d.tool_calls:
-                            i = t.index
-                            if i not in bufs:
-                                bufs[i] = {
-                                    "id": t.id or "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            if t.id:
-                                bufs[i]["id"] = t.id
-                            if t.function:
-                                if t.function.name:
-                                    bufs[i]["name"] = t.function.name
-                                if t.function.arguments:
-                                    bufs[i]["arguments"] += t.function.arguments
+                    if delta:
+                        text += delta
+                        yield StreamEvent(
+                            kind="text_delta",
+                            data={"delta": delta, "accumulated": text},
+                        )
+                    for t in d.tool_calls or []:
+                        buf = bufs.setdefault(
+                            t.index,
+                            {"id": "", "name": "", "arguments": ""},
+                        )
+                        buf["id"] = t.id or buf["id"]
+                        function = t.function
+                        buf["name"] = (
+                            function.name if function is not None else None
+                        ) or buf["name"]
+                        buf["arguments"] += (
+                            function.arguments if function is not None else None
+                        ) or ""
 
                 # tool_calls finish：组装并发出所有缓冲的函数调用。
                 # function_call 是下游投影层的消息边界，先把扣留的文本尾部放出去，
@@ -370,9 +370,7 @@ class ResponsesProvider(BaseProvider):
                     pending = release_filtered_tail()
                     if pending is not None:
                         yield pending
-                    for event in self._assemble_function_calls(
-                        bufs, finish
-                    ):
+                    for event in self._assemble_function_calls(bufs, finish):
                         yield event
                     finish = ""
                     bufs.clear()
@@ -465,10 +463,12 @@ class AnthropicProvider(BaseProvider):
 
     @property
     def model_name(self) -> str:
+        """Expose the requested model name; native Anthropic is not implemented."""
         raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
 
     @property
     def client(self) -> AsyncOpenAI:
+        """Expose the client contract; native Anthropic is not implemented."""
         raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
 
     async def stream(
@@ -480,6 +480,7 @@ class AnthropicProvider(BaseProvider):
         *,
         output_type: type | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """Stream a response; native Anthropic support is not implemented."""
         raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
 
 

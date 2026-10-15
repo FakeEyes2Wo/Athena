@@ -21,6 +21,7 @@ PATTERNS = {
 
 
 def main() -> int:
+    """Scan tracked or explicitly named text files for credential patterns."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="*")
     args = parser.parse_args()
@@ -39,6 +40,7 @@ def main() -> int:
         try:
             content = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
+            # Binary-encoded files cannot be reliably searched as plain text.
             skipped += 1
             continue
         checked += 1

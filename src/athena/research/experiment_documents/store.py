@@ -121,35 +121,38 @@ def _existing_record(content: bytes) -> StageRecord:
     try:
         payload = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Trigger: an existing run archive is not UTF-8 JSON and cannot be safely reused.
         raise RunDocumentConflict(
             "existing run archive is not valid UTF-8 JSON"
         ) from exc
     if not isinstance(payload, dict):
         raise RunDocumentConflict("existing run archive must contain an object")
+    metric = None
     if "schema_version" not in payload:
         payload = dict(payload)
         payload["schema_version"] = 1
         metric = payload.get("metric")
-        if isinstance(metric, dict):
-            metric = dict(metric)
-            for key in ("primary", "reference", "generalization_gap"):
-                value = metric.get(key)
-                if isinstance(value, int) and not isinstance(value, bool):
-                    metric[key] = float(value)
-            secondary = metric.get("secondary")
-            if isinstance(secondary, dict):
-                metric["secondary"] = {
-                    key: (
-                        float(value)
-                        if isinstance(value, int) and not isinstance(value, bool)
-                        else value
-                    )
-                    for key, value in secondary.items()
-                }
-            payload["metric"] = metric
+    if isinstance(metric, dict):
+        metric = dict(metric)
+        for key in ("primary", "reference", "generalization_gap"):
+            value = metric.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                metric[key] = float(value)
+        secondary = metric.get("secondary")
+        if isinstance(secondary, dict):
+            metric["secondary"] = {
+                key: (
+                    float(value)
+                    if isinstance(value, int) and not isinstance(value, bool)
+                    else value
+                )
+                for key, value in secondary.items()
+            }
+        payload["metric"] = metric
     try:
         return StageRecord.model_validate(payload)
     except (TypeError, ValidationError) as exc:
+        # Trigger: a parsed run archive fails StageRecord validation, including supported legacy coercions.
         raise RunDocumentConflict(
             "existing run archive does not match the schema"
         ) from exc
@@ -212,6 +215,7 @@ class DocumentStore:
         try:
             target.relative_to(self._root)
         except ValueError as exc:
+            # Trigger: resolving a projection target would move it outside the store root.
             raise ValueError("projection path escapes the store root") from exc
         return target
 
@@ -225,6 +229,7 @@ class DocumentStore:
                 stream.flush()
                 os.fsync(stream.fileno())
         except BaseException:
+            # Trigger: any write, flush, or fsync fails after creating the exclusive temporary archive.
             temporary.unlink(missing_ok=True)
             raise
         return temporary

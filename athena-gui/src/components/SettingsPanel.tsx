@@ -97,31 +97,41 @@ export function SettingsPanel({ open = true, onClose, onSaved, onSwitchWorkspace
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [section, setSection] = useState(SECTIONS[0].id);
+  const loadEpoch = useRef(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const jumpingRef = useRef(false);
   const jumpTimerRef = useRef<number | undefined>(undefined);
   const { preference, setPreference } = useTheme();
 
   const load = useCallback(async () => {
+    const epoch = ++loadEpoch.current;
     setLoading(true);
     try {
       const next = normalizeSettings(await settingsGet());
+      if (epoch !== loadEpoch.current) return;
       const nextForm = toForm(next);
       setSettings(next);
       setForm(nextForm);
       setBaseline(JSON.stringify(nextForm));
       setError(null);
     } catch (err) {
+      if (epoch !== loadEpoch.current) return;
       setError(errorMessage(err));
     } finally {
-      setLoading(false);
+      if (epoch === loadEpoch.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      loadEpoch.current += 1;
+      return;
+    }
     setSaved(false);
     void load();
+    return () => {
+      loadEpoch.current += 1;
+    };
   }, [load, open]);
 
   const errors = useMemo(() => validate(form), [form]);

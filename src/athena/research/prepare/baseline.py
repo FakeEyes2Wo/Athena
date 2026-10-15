@@ -155,6 +155,7 @@ def _remove_verification(root: Path) -> None:
     try:
         (root / VERIFICATION_FILENAME).unlink(missing_ok=True)
     except OSError as error:
+        # Trigger: a stale verification mirror cannot be removed before rechecking.
         raise BaselineResearchError(
             f"unable to remove {VERIFICATION_FILENAME}",
             (_bounded_diagnostic(error),),
@@ -182,6 +183,7 @@ def _validated_sealed_baseline(root: Path, sealed: SealedBaseline) -> VerifiedBa
         )
         assert_verification_matches_artifacts(artifacts, parsed_verification)
     except BaselineResearchError as exc:
+        # Trigger: authority bytes or their verification do not match the local artifacts.
         raise BaselineAuthorityError(
             "authority returned baseline bytes that do not match verification"
         ) from exc
@@ -215,6 +217,7 @@ def _read_required_mirror(root: Path, filename: str) -> bytes:
     try:
         return (root / filename).read_bytes()
     except OSError as exc:
+        # Trigger: a required baseline artifact cannot be read from the workspace.
         raise BaselineResearchError(f"unable to read {filename}", (str(exc),)) from exc
 
 
@@ -232,6 +235,7 @@ async def _load_authoritative_baseline_record(
     try:
         sealed = await authority.load()
     except asyncio.CancelledError:
+        # Trigger: the authority load is cancelled; preserve cancellation instead of wrapping it.
         raise
     except Exception:  # noqa: BLE001 - external capability boundary
         raise BaselineAuthorityError("baseline authority load failed") from None
@@ -248,13 +252,16 @@ async def _load_authoritative_baseline_record(
     try:
         local_verification = mirror.read_bytes()
     except FileNotFoundError:
+        # Trigger: the local verification mirror is absent and must be restored from sealed bytes.
         try:
             _write_verification_bytes(root, bundle.verification_bytes)
         except OSError as exc:
+            # Trigger: writing the missing verification mirror fails.
             raise BaselineResearchError(
                 f"unable to restore {VERIFICATION_FILENAME}", (str(exc),)
             ) from exc
     except OSError as exc:
+        # Trigger: the existing verification mirror cannot be read for comparison.
         raise BaselineResearchError(
             f"unable to read {VERIFICATION_FILENAME}", (str(exc),)
         ) from exc
@@ -282,6 +289,7 @@ async def seal_verified_baseline(
     try:
         sealed = await authority.seal(bundle, expected_generation=None)
     except asyncio.CancelledError:
+        # Trigger: sealing a verified baseline is cancelled; preserve task cancellation.
         raise
     except Exception:  # noqa: BLE001 - external capability boundary
         raise BaselineAuthorityError("baseline authority seal failed") from None
@@ -342,6 +350,7 @@ async def _attest_prepare_completion(
             expected_generation=0,
         )
     except asyncio.CancelledError:
+        # Trigger: authority completion attestation is cancelled; preserve task cancellation.
         raise
     except Exception:  # noqa: BLE001 - external capability boundary
         raise BaselineAuthorityError(
@@ -390,6 +399,7 @@ class _BaselineResearchRun:
         try:
             _write_verification_bytes(self.root, sealed.verification_bytes)
         except OSError as error:
+            # Trigger: persisting the authority's canonical verification mirror fails.
             raise BaselineAuthorityError(
                 f"unable to write authoritative mirror {VERIFICATION_FILENAME}"
             ) from error
@@ -412,6 +422,7 @@ class _BaselineResearchRun:
                 "baseline ideator response failed", (_bounded_diagnostic(error),)
             )
         except BaseException:
+            # Trigger: any ideator failure leaves a non-authoritative verification file to remove before propagation.
             try:
                 _remove_verification(self.root)
             except Exception:
@@ -425,6 +436,7 @@ class _BaselineResearchRun:
         try:
             return await self.verify()
         except BaselineResearchError as error:
+            # Trigger: artifact verification rejects the current candidate and returns it for repair.
             return _repairable(error)
 
 
@@ -462,11 +474,13 @@ async def _reap_ideator(runtime: Any) -> None:
             timeout=_IDEATOR_REAP_TIMEOUT_SECONDS,
         )
     except TimeoutError:
+        # Trigger: the shielded ideator task does not finish within the bounded reap period.
         logger.warning(
             "timed out reaping baseline ideator after %.1f seconds",
             _IDEATOR_REAP_TIMEOUT_SECONDS,
         )
     except asyncio.CancelledError:
+        # Trigger: cleanup is cancelled; propagate only when the caller itself remains cancelled.
         current = asyncio.current_task()
         if current is None or current.cancelling():
             raise
@@ -546,6 +560,7 @@ async def prepare_baseline_design(
             try:
                 return await research_run.verify()
             except BaselineResearchError as error:
+                # Trigger: existing workspace artifacts fail verification and enter the bounded repair path.
                 first_error = _repairable(error)
         else:
             first_error = None
@@ -672,6 +687,7 @@ async def run_baseline(
         ),
         predict_features=request.predict_features,
         assert_baseline=assert_baseline,
+        timeout_s=runtime.state.experiment_timeout_s,
     )
     current = await current_sealed_baseline()
     await _attest_prepare_completion(authority, request.verified, result, current)

@@ -81,3 +81,86 @@ def test_trace_projection_reads_pydantic_ai_dumps(tmp_path) -> None:
         ("tool", "tool_return", "ok"),
     ]
     assert trace["messages"][3]["args"] == {"command": "ls"}
+
+
+def test_trace_read_rejects_paths_outside_rollout_directory(tmp_path) -> None:
+    from athena.gui.traces import read_trace
+
+    rollout_dir = tmp_path / "agents"
+    rollout_dir.mkdir()
+    (tmp_path / "outside.jsonl").write_text(
+        json.dumps({"seq": 1, "msg": []}), encoding="utf-8"
+    )
+
+    try:
+        read_trace(rollout_dir, "../outside")
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("trace lookup escaped the rollout directory")
+
+
+def test_trace_tool_arguments_redact_nested_secrets(tmp_path) -> None:
+    records = [
+        {
+            "seq": 1,
+            "type": "compaction",
+            "summary": "cached password=private-value",
+        },
+        {
+            "seq": 2,
+            "msg": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "kind": "tool-call",
+                            "tool_name": "shell",
+                            "args": '{"api_key":"secret-value",'
+                            '"token":"token-value",'
+                            '"nested":["access_token=hidden"]}',
+                        }
+                    ],
+                }
+            ],
+        },
+    ]
+    (tmp_path / "plan.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records), encoding="utf-8"
+    )
+
+    messages = read_trace(tmp_path, "plan")["messages"]
+
+    assert messages[0]["content"] == "cached password=[REDACTED]"
+    assert messages[1]["args"] == {
+        "api_key": "[REDACTED]",
+        "token": "[REDACTED]",
+        "nested": ["access_token=[REDACTED]"],
+    }
+
+
+def test_tool_args_only_decode_the_outer_json_string(tmp_path) -> None:
+    record = {
+        "seq": 1,
+        "msg": [
+            {
+                "role": "model",
+                "parts": [
+                    {
+                        "kind": "tool-call",
+                        "tool_name": "query",
+                        "args": '{"query":"123","literal":"null","nested":{"secret":"token","text":"true"}}',
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "plan.jsonl").write_text(json.dumps(record), encoding="utf-8")
+
+    projected = read_trace(tmp_path, "plan")["messages"][0]["args"]
+
+    assert projected == {
+        "query": "123",
+        "literal": "null",
+        "nested": {"secret": "[REDACTED]", "text": "true"},
+    }

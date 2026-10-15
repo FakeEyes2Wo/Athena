@@ -17,9 +17,14 @@ from athena.core.workspace import GitWorkBranch, GitWorkspace, GitWorkspaceError
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.evaluation.spec import read_eval_handoff
-from athena.research.supervisor.events import wait_run_events
+from athena.research.supervisor.events import bounded_redacted_tail, wait_run_events
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
-from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
+from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
+    PlanDecision,
+    PlanInput,
+    PlanState,
+)
 from athena.research.supervisor.prompt_context import handoff_block
 
 PREPARE_AGENT_ID = "prepare"
@@ -118,8 +123,35 @@ def _consume_reap_result(task: "asyncio.Task[None]") -> None:
         task.exception()
 
 
-def _feedback_from_exception(error: BaseException | str) -> str:
-    return " ".join(str(error).split())[:_FEEDBACK_LIMIT]
+def _repair_feedback(
+    error: BaseException | str,
+    *,
+    next_turn: int,
+    max_turns: int,
+    workspace: Path,
+    repeated: bool,
+) -> str:
+    """Anchor PREPARE repair feedback to its budget, workspace, and failure."""
+    remaining = max_turns - next_turn + 1
+    attempt_word = "attempt" if remaining == 1 else "attempts"
+    repeated_note = (
+        " This exact failure also occurred on the immediately previous attempt; "
+        "the next response must make a concrete change that removes it."
+        if repeated
+        else ""
+    )
+    return (
+        f"PREPARE repair turn {next_turn}/{max_turns}; {remaining} {attempt_word} "
+        f"remain including this turn. The stable workspace root is {workspace}. "
+        "Keep working in this workspace and use relative paths for workspace files.\n\n"
+        f"Previous turn/execution failure: "
+        f"{bounded_redacted_tail(str(error), _FEEDBACK_LIMIT)}.\n\n"
+        "In this turn, use the workspace and shell tools to make a concrete repair, "
+        "run the baseline through the manifest command, and verify the required "
+        "artifacts before returning PlanDecision. Do not only describe a plan or "
+        "promise to write or run something next turn."
+        f"{repeated_note}"
+    )
 
 
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
@@ -166,8 +198,11 @@ def _assert_scored_outcome(
     outcome,
     decision: str,
 ) -> tuple[float, CommitHash, ArtifactRef, ArtifactRef, ArtifactRef]:
-    if outcome.kind == "evaluator_infrastructure_failed":
-        raise RuntimeError(outcome.error or "evaluator unavailable")
+    if outcome.kind in {
+        "evaluator_infrastructure_failed",
+        "execution_infrastructure_failed",
+    }:
+        raise RuntimeError(outcome.error or "experiment infrastructure unavailable")
     if outcome.kind != "scored":
         raise ValueError(outcome.error or f"PREPARE validation failed: {outcome.kind}")
     if outcome.commit is None:
@@ -211,6 +246,7 @@ async def run_prepare_plan(
     assert_baseline: _BaselineGuard,
     publish: EmitEvent | None = None,
     predict_features: Path | None = None,
+    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
 ) -> PrepareResult:
     """Run and repair one stable PREPARE Agent until a trusted baseline exists."""
     if max_turns < 1:
@@ -259,9 +295,11 @@ async def run_prepare_plan(
             experiment_id=PREPARE_PLAN_ID,
             predict_features=predict_features,
         ),
+        timeout_s=timeout_s,
     )
 
     feedback: str | None = None
+    last_failure_diagnostic: str | None = None
     try:
         for turn in range(max_turns):
             if turn:
@@ -275,10 +313,19 @@ async def run_prepare_plan(
             try:
                 decision = await _decision_from_summary(summary, store)
             except (OSError, RuntimeError, ValueError) as error:
-                feedback = (
-                    "previous Agent turn did not produce a valid decision: "
-                    f"{_feedback_from_exception(error)}"
+                # Trigger: the previous Agent turn has no loadable or schema-valid PlanDecision.
+                diagnostic = bounded_redacted_tail(
+                    f"previous Agent turn did not produce a valid decision: {error}",
+                    _FEEDBACK_LIMIT,
                 )
+                feedback = _repair_feedback(
+                    diagnostic,
+                    next_turn=turn + 2,
+                    max_turns=max_turns,
+                    workspace=root,
+                    repeated=diagnostic == last_failure_diagnostic,
+                )
+                last_failure_diagnostic = diagnostic
                 continue
             if decision.decision == "abandon":
                 raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
@@ -302,6 +349,7 @@ async def run_prepare_plan(
                     report_ref=report_ref,
                 )
             except _BaselineGuardAbort as error:
+                # Trigger: frozen baseline evidence validation fails after candidate execution.
                 if isinstance(error.error, RuntimeError):
                     raise error.error
                 raise RuntimeError("baseline evidence guard failed") from error.error
@@ -311,12 +359,26 @@ async def run_prepare_plan(
                 subprocess.SubprocessError,
                 GitWorkspaceError,
             ) as error:
-                feedback = _feedback_from_exception(error)
+                # Trigger: baseline execution fails on I/O, command status, input contract, or worktree setup.
+                diagnostic = bounded_redacted_tail(str(error), _FEEDBACK_LIMIT)
+                feedback = _repair_feedback(
+                    diagnostic,
+                    next_turn=turn + 2,
+                    max_turns=max_turns,
+                    workspace=root,
+                    repeated=diagnostic == last_failure_diagnostic,
+                )
+                last_failure_diagnostic = diagnostic
                 continue
     finally:
         await _reap_agent(agents, PREPARE_AGENT_ID)
 
-    raise RuntimeError("prepare turn budget exhausted without a trusted baseline")
+    detail = (
+        f"; last failure: {last_failure_diagnostic}" if last_failure_diagnostic else ""
+    )
+    raise RuntimeError(
+        "prepare turn budget exhausted without a trusted baseline" + detail
+    )
 
 
 __all__ = [

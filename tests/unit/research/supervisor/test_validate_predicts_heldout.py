@@ -1,4 +1,4 @@
-﻿"""VALIDATE must score the held-out split, not the one SEARCH already used."""
+"""VALIDATE must score the held-out split, not the one SEARCH already used."""
 
 import json
 from pathlib import Path
@@ -88,7 +88,7 @@ def _workspace(tmp_path: Path) -> tuple[Path, GitWorkBranch]:
 @pytest.mark.asyncio
 async def test_the_rerun_is_pointed_at_the_held_out_split(tmp_path: Path) -> None:
     final = _features(tmp_path / "data_split" / "final_features.csv", range(100, 110))
-    workdir, workspace = _workspace(tmp_path)
+    _workdir, workspace = _workspace(tmp_path)
     execution = _Execution(produce_ids=range(100, 110))
 
     await _execute_predictions(
@@ -112,7 +112,7 @@ async def test_a_hardcoded_path_fails_with_the_real_reason(tmp_path: Path) -> No
 
     with pytest.raises(ValueError) as caught:
         await _execute_predictions(
-            execution=_Execution(produce_ids=range(0, 10)),
+            execution=_Execution(produce_ids=range(10)),
             git=_Git(),
             workspace=workspace,
             store=LocalArtifactStore(tmp_path / "artifacts"),
@@ -142,6 +142,122 @@ async def test_full_coverage_passes(tmp_path: Path) -> None:
 
     assert run.predictions_path == "predictions"
     assert run.predictions_ref
+
+
+@pytest.mark.asyncio
+async def test_validation_coverage_uses_frozen_evaluator_identity_column(
+    tmp_path: Path,
+) -> None:
+    final = tmp_path / "data_split" / "final_features.csv"
+    final.parent.mkdir(parents=True)
+    final.write_text("feature, sample_key \n1,a\n2,b\n", encoding="utf-8")
+    _workdir, workspace = _workspace(tmp_path)
+
+    class _CustomIdExecution(_Execution):
+        async def run(self, context, command=None, *, argv=None, **kwargs):
+            del context, argv, kwargs
+            request = command
+            out = Path(request.workdir) / "predictions"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "custom.csv").write_text(
+                "sample_key,prediction\nb,1\na,0\n", encoding="utf-8"
+            )
+
+            class _Ok:
+                ok = True
+                stdout = ""
+                stderr = ""
+                exit_code = 0
+
+            return _Ok()
+
+    result = await _execute_predictions(
+        execution=_CustomIdExecution(),
+        git=_Git(),
+        workspace=workspace,
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        publish=None,
+        predict_features=final,
+        prediction_id_column="sample_key",
+    )
+
+    assert result.predictions_path == "predictions"
+
+
+@pytest.mark.asyncio
+async def test_validation_checks_only_the_declared_prediction_file(
+    tmp_path: Path,
+) -> None:
+    final = _features(tmp_path / "data_split" / "final_features.csv", range(1, 3))
+    _, workspace = _workspace(tmp_path)
+
+    class _WithDiagnosticCsv(_Execution):
+        async def run(self, context, command=None, *, argv=None, **kwargs):
+            del context, argv, kwargs
+            out = Path(command.workdir) / "predictions"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "predictions__task.csv").write_text(
+                f"{ROW_ID},prediction\n1,0\n2,1\n", encoding="utf-8"
+            )
+            (out / "diagnostics.csv").write_text(
+                "unrelated,columns\nmalformed\n", encoding="utf-8"
+            )
+
+            class _Ok:
+                ok = True
+                stdout = ""
+                stderr = ""
+                exit_code = 0
+
+            return _Ok()
+
+    await _execute_predictions(
+        execution=_WithDiagnosticCsv(),
+        git=_Git(),
+        workspace=workspace,
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        publish=None,
+        predict_features=final,
+        prediction_id_column=ROW_ID,
+        prediction_file="predictions__task.csv",
+    )
+
+
+@pytest.mark.asyncio
+async def test_validation_skips_csv_coverage_for_non_tabular_evaluator(
+    tmp_path: Path,
+) -> None:
+    final = _features(tmp_path / "data_split" / "final_features.csv", range(1, 3))
+    _, workspace = _workspace(tmp_path)
+
+    class _NonTabularExecution(_Execution):
+        async def run(self, context, command=None, *, argv=None, **kwargs):
+            del context, argv, kwargs
+            out = Path(command.workdir) / "predictions"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "payload.csv").write_text(
+                "not,a valid tabular output", encoding="utf-8"
+            )
+
+            class _Ok:
+                ok = True
+                stdout = ""
+                stderr = ""
+                exit_code = 0
+
+            return _Ok()
+
+    await _execute_predictions(
+        execution=_NonTabularExecution(),
+        git=_Git(),
+        workspace=workspace,
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        publish=None,
+        predict_features=final,
+        prediction_id_column=ROW_ID,
+        prediction_file="payload.csv",
+        prediction_format="json_lines",
+    )
 
 
 def test_prediction_coverage_uses_first_column_for_future_datasets(

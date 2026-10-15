@@ -50,36 +50,43 @@ class ChannelScore(BaseModel):
     @computed_field
     @property
     def scored(self) -> int:
+        """Count query outcomes included in this channel's score."""
         return len(self.outcomes)
 
     @computed_field
     @property
     def hit_at_1(self) -> int:
+        """Count queries whose first relevant paper ranked first."""
         return self._hits(1)
 
     @computed_field
     @property
     def hit_at_3(self) -> int:
+        """Count queries with a relevant paper in the top three."""
         return self._hits(3)
 
     @computed_field
     @property
     def hit_at_5(self) -> int:
+        """Count queries with a relevant paper in the top five."""
         return self._hits(5)
 
     @computed_field
     @property
     def hit_at_10(self) -> int:
+        """Count queries with a relevant paper in the top ten."""
         return self._hits(10)
 
     @computed_field
     @property
     def missed(self) -> int:
+        """Count queries for which the channel returned no relevant paper."""
         return sum(outcome.rank is None for outcome in self.outcomes)
 
     @computed_field
     @property
     def mrr(self) -> float:
+        """Return mean reciprocal rank, using zero for missed queries."""
         reciprocal = sum(
             1.0 / outcome.rank for outcome in self.outcomes if outcome.rank is not None
         )

@@ -1,5 +1,20 @@
 # Module-by-module simplification review
 
+2026-10-15 reconciliation: local module review and integrated validation are
+complete under the user's current whole-repository optimization scope. The
+remaining 136 extant Pending rows now link to file-level decisions; 226 missing
+baseline paths are explicitly retired, including the removed athena_ts tree.
+The original chronological notes below retain their historical test counts and
+coverage statements. New current sources and final verification are recorded in
+`docs/reviews/2026-10-15-engineering-optimization/README.md` and
+`docs/codex_docs/2026-10-15-engineering-optimization-completion.md`.
+
+This historical plan remains open only for its original remote-delivery closeout.
+The current task did not authorize publishing the combined dirty worktree; no
+new commit/push is claimed. The integrated-application part of its last task is
+verified by the completion report, while historical publishing/removal remains
+unchecked. Other active plans are not closed by this reconciliation.
+
 Baseline: `4b9dbaa`. Scope: tracked backend, TUI, gateway, GUI source, Rust bridge, Rust/TypeScript implementations, and development scripts. Tests and assets embedded in these roots remain listed so coverage cannot silently shrink.
 
 Coverage correction: the original 391-file inventory omitted 65 Rust, 138 TypeScript/JavaScript implementation and colocated test files, and 8 root development scripts. These completed or independently buildable modules belong to the user's repository-wide goal even when Python is the production entrypoint. All 211 were unchanged from the baseline when enumerated and are added as Pending, bringing the baseline ledger to 602 files. Enumeration is not review; earlier 17/391 reports covered only the original subset. New files introduced by this refactor are tracked separately and must also be verified.
@@ -15,8 +30,8 @@ Delivery rule: complete each reviewed slice on `main`, push it to `origin/main`,
 - [x] Enumerate tracked application source files and record baseline line counts.
 - [x] Read all four serving source files and trace their immediate callers.
 - [x] Resolve serving compatibility entrypoint duplication and verify callers (22 tests before and after; module CLI help exits 0).
-- [ ] Review every remaining non-TypeScript file and module; record decisions and evidence.
-- [ ] Implement the identified simplifications with scoped regression checks.
+- [x] Review every remaining non-TypeScript file and module; record decisions and evidence.
+- [x] Implement the identified simplifications with scoped regression checks.
 - [x] Resolve TypeScript recovery fixture/state-copy failures and reconcile its workspace lockfile.
 - [x] Simplify TypeScript sampling task storage/dispatch and verify concurrency/result ordering.
 - [x] Consolidate TypeScript Agent factory and single-turn sampling configuration.
@@ -999,199 +1014,199 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
 | `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
-| `athena-gui/scripts/dev-backend.cjs` | 38 | Reviewed; merge duplicate gateway launcher into dev.cjs and delete file |
-| `athena-gui/scripts/dev-web.cjs` | 46 | Reviewed; merge duplicate dual-process launcher into dev.cjs and delete file |
+| `athena-gui/scripts/dev-backend.cjs` | 38 | Retired from current workspace; historical status: Reviewed; merge duplicate gateway launcher into dev.cjs and delete file |
+| `athena-gui/scripts/dev-web.cjs` | 46 | Retired from current workspace; historical status: Reviewed; merge duplicate dual-process launcher into dev.cjs and delete file |
 | `athena-gui/scripts/dev.cjs` | New | Reviewed; one backend/preview launcher with shared monitoring and shutdown |
 | `athena-gui/scripts/ensure-generated.mjs` | 15 | Reviewed; retain the minimal build-directory precondition |
-| `athena-gui/src-tauri/src/commands/chat.rs` | 12 | Reviewed; merge pure command into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/chat.rs` | 12 | Retired from current workspace; historical status: Reviewed; merge pure command into commands/mod.rs and delete file |
 | `athena-gui/src-tauri/src/commands/clarification.rs` | 270 | Reviewed; retain typed reply boundary and delete test-only request mirror |
 | `athena-gui/src-tauri/src/commands/dialog.rs` | 103 | Reviewed; retain native fallback selection and its three tests |
-| `athena-gui/src-tauri/src/commands/experiments.rs` | 47 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/graph.rs` | 27 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/experiments.rs` | 47 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/graph.rs` | 27 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
 | `athena-gui/src-tauri/src/commands/mod.rs` | 11 | Reviewed; own the flat RPC-forwarding command surface |
-| `athena-gui/src-tauri/src/commands/research.rs` | 32 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/search.rs` | 42 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/settings.rs` | 27 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/state.rs` | 53 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/traces.rs` | 19 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/commands/validate.rs` | 18 | Reviewed; merge pure commands into commands/mod.rs and delete file |
-| `athena-gui/src-tauri/src/events.rs` | 34 | Reviewed; inline the single-consumer relay into lib.rs and delete file |
+| `athena-gui/src-tauri/src/commands/research.rs` | 32 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/search.rs` | 42 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/settings.rs` | 27 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/state.rs` | 53 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/traces.rs` | 19 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/validate.rs` | 18 | Retired from current workspace; historical status: Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/events.rs` | 34 | Retired from current workspace; historical status: Reviewed; inline the single-consumer relay into lib.rs and delete file |
 | `athena-gui/src-tauri/src/lib.rs` | 66 | Reviewed; own setup, event relay and flat command registration |
 | `athena-gui/src-tauri/src/main.rs` | 6 | Reviewed; retain the minimal platform entrypoint |
-| `athena-gui/src-tauri/src/python/bridge.rs` | 218 | Reviewed; merge transport, wire types and tests into python.rs |
-| `athena-gui/src-tauri/src/python/mod.rs` | 2 | Reviewed; remove the two-layer facade and delete file |
-| `athena-gui/src-tauri/src/python/types.rs` | 92 | Reviewed; merge live wire contracts into python.rs and delete file |
+| `athena-gui/src-tauri/src/python/bridge.rs` | 218 | Retired from current workspace; historical status: Reviewed; merge transport, wire types and tests into python.rs |
+| `athena-gui/src-tauri/src/python/mod.rs` | 2 | Retired from current workspace; historical status: Reviewed; remove the two-layer facade and delete file |
+| `athena-gui/src-tauri/src/python/types.rs` | 92 | Retired from current workspace; historical status: Reviewed; merge live wire contracts into python.rs and delete file |
 | `athena-gui/src-tauri/src/python.rs` | New | Reviewed; one four-field process/WebSocket bridge and wire boundary |
-| `athena-gui/src/App.tsx` | 49 | Pending |
-| `athena-gui/src/__tests__/App.test.tsx` | 164 | Pending |
-| `athena-gui/src/components/AlgorithmsPanel.tsx` | 127 | Pending |
-| `athena-gui/src/components/DiffViewer.tsx` | 77 | Pending |
-| `athena-gui/src/components/EDAPreview.module.css` | 111 | Pending |
-| `athena-gui/src/components/EDAPreview.tsx` | 68 | Pending |
-| `athena-gui/src/components/ExperimentLog.tsx` | 73 | Pending |
-| `athena-gui/src/components/ExperimentManager.tsx` | 303 | Pending |
-| `athena-gui/src/components/FileTree.tsx` | 68 | Pending |
-| `athena-gui/src/components/HypothesisGraphViz.module.css` | 39 | Pending |
-| `athena-gui/src/components/HypothesisGraphViz.tsx` | 210 | Pending |
-| `athena-gui/src/components/LLMIOPanel.module.css` | 68 | Pending |
-| `athena-gui/src/components/LLMIOPanel.tsx` | 144 | Pending |
-| `athena-gui/src/components/MetricChart.tsx` | 137 | Pending |
-| `athena-gui/src/components/ReportPanel.module.css` | 25 | Pending |
-| `athena-gui/src/components/ReportPanel.tsx` | 114 | Pending |
-| `athena-gui/src/components/ResearchTreeViz.tsx` | 289 | Pending |
-| `athena-gui/src/components/SettingsPanel.module.css` | 165 | Pending |
-| `athena-gui/src/components/SettingsPanel.tsx` | 506 | Pending |
-| `athena-gui/src/components/__tests__/SettingsPanel.test.tsx` | 82 | Pending |
-| `athena-gui/src/components/__tests__/app-shell.test.tsx` | 300 | Pending |
-| `athena-gui/src/components/__tests__/conversation-pane.test.tsx` | 649 | Pending |
-| `athena-gui/src/components/__tests__/function-rail.test.tsx` | 24 | Pending |
-| `athena-gui/src/components/__tests__/research-tree-viz.test.tsx` | 291 | Pending |
-| `athena-gui/src/components/cards/ErrorCard.tsx` | 13 | Reviewed; inline single consumer markup in MessageList and delete |
-| `athena-gui/src/components/cards/IntentPreviewCard.module.css` | 245 | Pending |
-| `athena-gui/src/components/cards/IntentPreviewCard.tsx` | 250 | Pending |
-| `athena-gui/src/components/cards/__tests__/IntentPreviewCard.test.tsx` | 117 | Pending |
+| `athena-gui/src/App.tsx` | 49 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/__tests__/App.test.tsx` | 164 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/AlgorithmsPanel.tsx` | 127 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/DiffViewer.tsx` | 77 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/EDAPreview.module.css` | 111 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/EDAPreview.tsx` | 68 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/ExperimentLog.tsx` | 73 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/ExperimentManager.tsx` | 303 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/FileTree.tsx` | 68 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/HypothesisGraphViz.module.css` | 39 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/HypothesisGraphViz.tsx` | 210 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/LLMIOPanel.module.css` | 68 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/LLMIOPanel.tsx` | 144 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/MetricChart.tsx` | 137 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/ReportPanel.module.css` | 25 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/ReportPanel.tsx` | 114 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/ResearchTreeViz.tsx` | 289 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/SettingsPanel.module.css` | 165 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/SettingsPanel.tsx` | 506 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/__tests__/SettingsPanel.test.tsx` | 82 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/__tests__/app-shell.test.tsx` | 300 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/__tests__/conversation-pane.test.tsx` | 649 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/__tests__/function-rail.test.tsx` | 24 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/__tests__/research-tree-viz.test.tsx` | 291 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/cards/ErrorCard.tsx` | 13 | Retired from current workspace; historical status: Reviewed; inline single consumer markup in MessageList and delete |
+| `athena-gui/src/components/cards/IntentPreviewCard.module.css` | 245 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/cards/IntentPreviewCard.tsx` | 250 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/cards/__tests__/IntentPreviewCard.test.tsx` | 117 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/components/common/EmptyState.tsx` | 18 | Reviewed; retain shared two-prop primitive used by 12 consumers |
 | `athena-gui/src/components/common/ErrorBoundary.tsx` | 33 | Reviewed; remove unused fallback prop; error containment test passes |
-| `athena-gui/src/components/common/Icon.tsx` | 166 | Pending |
+| `athena-gui/src/components/common/Icon.tsx` | 166 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/components/common/StatusBadge.tsx` | 13 | Reviewed; retain shared status display contract |
-| `athena-gui/src/components/context/panels.ts` | 45 | Pending |
-| `athena-gui/src/components/conversation/Composer.module.css` | 68 | Pending |
-| `athena-gui/src/components/conversation/Composer.tsx` | 40 | Pending |
-| `athena-gui/src/components/conversation/ConversationPane.module.css` | 6 | Pending |
-| `athena-gui/src/components/conversation/ConversationPane.tsx` | 66 | Pending |
-| `athena-gui/src/components/conversation/MessageList.module.css` | 205 | Pending |
-| `athena-gui/src/components/conversation/MessageList.tsx` | 325 | Pending |
-| `athena-gui/src/components/conversation/PendingHypotheses.module.css` | 34 | Pending |
-| `athena-gui/src/components/conversation/PendingHypotheses.tsx` | 27 | Pending |
-| `athena-gui/src/components/conversation/RunControls.module.css` | 66 | Pending |
-| `athena-gui/src/components/conversation/RunControls.tsx` | 66 | Pending |
-| `athena-gui/src/components/conversation/WelcomeHero.module.css` | 78 | Pending |
-| `athena-gui/src/components/conversation/WelcomeHero.tsx` | 36 | Pending |
-| `athena-gui/src/components/shell/AppShell.module.css` | 131 | Pending |
-| `athena-gui/src/components/shell/AppShell.tsx` | 158 | Pending |
-| `athena-gui/src/components/shell/AthenaWordmark.tsx` | 24 | Pending |
-| `athena-gui/src/components/shell/ContextDrawer.module.css` | 75 | Pending |
-| `athena-gui/src/components/shell/ContextDrawer.tsx` | 36 | Pending |
-| `athena-gui/src/components/shell/ContextSidebar.module.css` | 235 | Pending |
-| `athena-gui/src/components/shell/ContextSidebar.tsx` | 196 | Pending |
-| `athena-gui/src/components/shell/FunctionRail.module.css` | 81 | Pending |
-| `athena-gui/src/components/shell/FunctionRail.tsx` | 50 | Pending |
-| `athena-gui/src/components/shell/HumanRequestDialog.module.css` | 90 | Pending |
-| `athena-gui/src/components/shell/HumanRequestDialog.tsx` | 231 | Pending |
-| `athena-gui/src/components/shell/LogDrawer.module.css` | 160 | Pending |
-| `athena-gui/src/components/shell/LogDrawer.tsx` | 65 | Pending |
-| `athena-gui/src/components/shell/ThemeToggle.module.css` | 19 | Reviewed; identical global icon-btn rules exist; delete duplicate |
+| `athena-gui/src/components/context/panels.ts` | 45 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/conversation/Composer.module.css` | 68 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/Composer.tsx` | 40 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/ConversationPane.module.css` | 6 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/ConversationPane.tsx` | 66 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/MessageList.module.css` | 205 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/MessageList.tsx` | 325 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/PendingHypotheses.module.css` | 34 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/PendingHypotheses.tsx` | 27 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/RunControls.module.css` | 66 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/RunControls.tsx` | 66 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/WelcomeHero.module.css` | 78 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/conversation/WelcomeHero.tsx` | 36 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/AppShell.module.css` | 131 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/AppShell.tsx` | 158 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/AthenaWordmark.tsx` | 24 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/ContextDrawer.module.css` | 75 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/ContextDrawer.tsx` | 36 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/ContextSidebar.module.css` | 235 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/ContextSidebar.tsx` | 196 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/FunctionRail.module.css` | 81 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/FunctionRail.tsx` | 50 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/HumanRequestDialog.module.css` | 90 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/HumanRequestDialog.tsx` | 231 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/LogDrawer.module.css` | 160 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/LogDrawer.tsx` | 65 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/ThemeToggle.module.css` | 19 | Retired from current workspace; historical status: Reviewed; identical global icon-btn rules exist; delete duplicate |
 | `athena-gui/src/components/shell/ThemeToggle.tsx` | 25 | Reviewed; use global icon-btn style; both theme transitions tested |
-| `athena-gui/src/components/shell/WorkspacePicker.module.css` | 123 | Pending |
-| `athena-gui/src/components/shell/WorkspacePicker.tsx` | 119 | Pending |
-| `athena-gui/src/components/shell/WorkspaceSwitcher.module.css` | 33 | Pending |
-| `athena-gui/src/components/shell/WorkspaceSwitcher.tsx` | 20 | Pending |
-| `athena-gui/src/components/shell/__tests__/HumanRequestDialog.test.tsx` | 128 | Pending |
-| `athena-gui/src/components/shell/__tests__/WorkspacePicker.test.tsx` | 100 | Pending |
-| `athena-gui/src/components/shell/navigation.ts` | 69 | Pending |
-| `athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx` | 856 | Pending |
-| `athena-gui/src/hooks/__tests__/usePipeline.identity.test.tsx` | 696 | Pending |
-| `athena-gui/src/hooks/__tests__/usePipeline.test.tsx` | 1529 | Pending |
-| `athena-gui/src/hooks/__tests__/useWorkspace.test.tsx` | 358 | Pending |
-| `athena-gui/src/hooks/useEvents.ts` | 26 | Reviewed; no source/test callers; delete unused event window |
-| `athena-gui/src/hooks/usePipeline.ts` | 1708 | Pending |
+| `athena-gui/src/components/shell/WorkspacePicker.module.css` | 123 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/WorkspacePicker.tsx` | 119 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/WorkspaceSwitcher.module.css` | 33 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/WorkspaceSwitcher.tsx` | 20 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/__tests__/HumanRequestDialog.test.tsx` | 128 | Retired from current workspace; historical status: Pending |
+| `athena-gui/src/components/shell/__tests__/WorkspacePicker.test.tsx` | 100 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/components/shell/navigation.ts` | 69 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx` | 856 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/hooks/__tests__/usePipeline.identity.test.tsx` | 696 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/hooks/__tests__/usePipeline.test.tsx` | 1529 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/hooks/__tests__/useWorkspace.test.tsx` | 358 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/hooks/useEvents.ts` | 26 | Retired from current workspace; historical status: Reviewed; no source/test callers; delete unused event window |
+| `athena-gui/src/hooks/usePipeline.ts` | 1708 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/hooks/useTheme.ts` | 40 | Reviewed; retain initial paint side effect and mount-time persisted preference |
-| `athena-gui/src/hooks/useWorkspace.ts` | 174 | Pending |
-| `athena-gui/src/lib/__tests__/graphLayout.test.ts` | 46 | Pending |
+| `athena-gui/src/hooks/useWorkspace.ts` | 174 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/lib/__tests__/graphLayout.test.ts` | 46 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/lib/__tests__/rpc-error.test.ts` | 31 | Reviewed; retain RPC error mapping checks; tests pass |
-| `athena-gui/src/lib/__tests__/tauri-bridge.test.ts` | 168 | Pending |
+| `athena-gui/src/lib/__tests__/tauri-bridge.test.ts` | 168 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/lib/__tests__/workspaceDialog.test.ts` | 69 | Reviewed; retain browser/native fallback checks; tests pass |
 | `athena-gui/src/lib/__tests__/workspaceStorage.test.ts` | 136 | Reviewed; retain storage normalization/failure checks; tests pass |
-| `athena-gui/src/lib/clarification-conversation.ts` | 97 | Pending |
+| `athena-gui/src/lib/clarification-conversation.ts` | 97 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/lib/errors.ts` | 4 | Reviewed; retain shared exception-to-text boundary |
-| `athena-gui/src/lib/graphLayout.ts` | 66 | Pending |
+| `athena-gui/src/lib/graphLayout.ts` | 66 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/lib/path.ts` | 5 | Reviewed; retain workspace path display semantics |
 | `athena-gui/src/lib/rpc-error.ts` | 46 | Reviewed; retain RPC wire error normalization for both transports |
-| `athena-gui/src/lib/tauri-bridge.ts` | 766 | Pending |
+| `athena-gui/src/lib/tauri-bridge.ts` | 766 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
 | `athena-gui/src/lib/workspaceDialog.ts` | 20 | Reviewed; retain native-dialog/browser boundary |
 | `athena-gui/src/lib/workspaceStorage.ts` | 96 | Reviewed; unify JSON storage IO and exception handling; 17 focused tests pass |
-| `athena-gui/src/lib/ws-backend.ts` | 154 | Pending |
-| `athena-gui/src/main.tsx` | 15 | Pending |
-| `athena-gui/src/styles.css` | 1046 | Pending |
-| `athena-gui/src/test/render.tsx` | 6 | Pending |
-| `athena-gui/src/test/setup.ts` | 5 | Pending |
-| `athena-gui/src/types/__tests__/ui.test.ts` | 27 | Pending |
-| `athena-gui/src/types/ui.ts` | 172 | Pending |
-| `athena-gui/src/vite-env.d.ts` | 1 | Pending |
-| `src/athena/__init__.py` | 1 | Pending |
-| `src/athena/agents/__init__.py` | 4 | Pending |
+| `athena-gui/src/lib/ws-backend.ts` | 154 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/main.tsx` | 15 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/styles.css` | 1046 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/test/render.tsx` | 6 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/test/setup.ts` | 5 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/types/__tests__/ui.test.ts` | 27 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/types/ui.ts` | 172 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `athena-gui/src/vite-env.d.ts` | 1 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `gui-tui-review.md` |
+| `src/athena/__init__.py` | 1 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `root-module-review.md` |
+| `src/athena/agents/__init__.py` | 4 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
 | `src/athena/agents/base_runner.py` | 142 | Reviewed; use session memory directly; retain mailbox and tool projection semantics |
-| `src/athena/agents/ideator/__init__.py` | 4 | Pending |
-| `src/athena/agents/ideator/ideator.py` | 624 | Pending |
-| `src/athena/agents/ideator/types.py` | 69 | Pending |
-| `src/athena/agents/ideator_agent.py` | 157 | Pending |
-| `src/athena/agents/kaggle_handoff_agent.py` | 108 | Pending |
+| `src/athena/agents/ideator/__init__.py` | 4 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/ideator/ideator.py` | 624 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/ideator/types.py` | 69 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/ideator_agent.py` | 157 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/kaggle_handoff_agent.py` | 108 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
 | `src/athena/agents/orchestration.py` | 215 | Reviewed; remove dummy followup attribute and repeated abstract method; retain tool policy |
-| `src/athena/agents/prepare_agent.py` | 145 | Pending |
-| `src/athena/agents/prompt_agent.py` | 126 | Pending |
-| `src/athena/agents/prompts/baseline_ideator_agent.md` | 133 | Pending |
-| `src/athena/agents/prompts/data_agent.md` | 45 | Pending |
-| `src/athena/agents/prompts/eda_worker_agent.md` | 24 | Pending |
-| `src/athena/agents/prompts/evaluator_agent.md` | 243 | Pending |
-| `src/athena/agents/prompts/general_agent.md` | 54 | Pending |
-| `src/athena/agents/prompts/ideator_agent.md` | 85 | Pending |
-| `src/athena/agents/prompts/ideator_gated_agent.md` | 102 | Pending |
-| `src/athena/agents/prompts/kaggle_handoff_agent.md` | 96 | Pending |
-| `src/athena/agents/prompts/plan_agent.md` | 42 | Pending |
-| `src/athena/agents/prompts/prepare_agent.md` | 134 | Pending |
-| `src/athena/agents/prompts/prepare_eda_agent.md` | 65 | Pending |
-| `src/athena/agents/prompts/supervisor_agent.md` | 73 | Pending |
-| `src/athena/agents/prompts/validate_agent.md` | 12 | Pending |
-| `src/athena/agents/supervisor_agent.py` | 451 | Pending |
-| `src/athena/agents/task_agents.py` | 172 | Pending |
-| `src/athena/agents/tools/__init__.py` | 1 | Pending |
-| `src/athena/agents/tools/generic_tools.py` | 113 | Pending |
-| `src/athena/app_server/__init__.py` | 52 | Pending |
-| `src/athena/app_server/__main__.py` | 219 | Pending |
-| `src/athena/app_server/client.py` | 469 | Pending |
-| `src/athena/app_server/events.py` | 188 | Pending |
-| `src/athena/app_server/exceptions.py` | 21 | Pending |
-| `src/athena/app_server/execution.py` | 73 | Pending |
-| `src/athena/app_server/lifecycle.py` | 181 | Pending |
-| `src/athena/app_server/observability.py` | 146 | Pending |
-| `src/athena/app_server/protocol.py` | 233 | Pending |
-| `src/athena/app_server/server.py` | 361 | Pending |
-| `src/athena/app_server/submissions.py` | 115 | Pending |
-| `src/athena/app_server/thread_manager.py` | 288 | Pending |
-| `src/athena/app_server/thread_runtime.py` | 633 | Pending |
-| `src/athena/app_server/transport.py` | 138 | Pending |
-| `src/athena/cli.py` | 1125 | Pending |
-| `src/athena/core/__init__.py` | 35 | Pending |
+| `src/athena/agents/prepare_agent.py` | 145 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompt_agent.py` | 126 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/baseline_ideator_agent.md` | 133 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/data_agent.md` | 45 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/eda_worker_agent.md` | 24 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/evaluator_agent.md` | 243 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/general_agent.md` | 54 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/ideator_agent.md` | 85 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/ideator_gated_agent.md` | 102 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/kaggle_handoff_agent.md` | 96 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/plan_agent.md` | 42 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/prepare_agent.md` | 134 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/prepare_eda_agent.md` | 65 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/supervisor_agent.md` | 73 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/prompts/validate_agent.md` | 12 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/supervisor_agent.py` | 451 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/task_agents.py` | 172 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/tools/__init__.py` | 1 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/agents/tools/generic_tools.py` | 113 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/app_server/__init__.py` | 52 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/__main__.py` | 219 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/client.py` | 469 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/events.py` | 188 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/exceptions.py` | 21 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/execution.py` | 73 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/lifecycle.py` | 181 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/observability.py` | 146 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/protocol.py` | 233 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/server.py` | 361 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/submissions.py` | 115 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/thread_manager.py` | 288 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/thread_runtime.py` | 633 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/app_server/transport.py` | 138 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/cli.py` | 1125 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `root-module-review.md` |
+| `src/athena/core/__init__.py` | 35 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
 | `src/athena/core/agent/__init__.py` | 51 | Reviewed; retain canonical exports, remove constructor alias; public API tests pass |
 | `src/athena/core/agent/chat.py` | New | Reviewed; merged text/structured call context; 432 combined tests pass |
-| `src/athena/core/agent/agent_runtime.py` | 730 | Pending |
-| `src/athena/core/agent/models.py` | 83 | Pending |
-| `src/athena/core/agent/provider.py` | 599 | Pending |
+| `src/athena/core/agent/agent_runtime.py` | 730 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/agent/models.py` | 83 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/agent/provider.py` | 599 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
 | `src/athena/core/agent/registry.py` | 55 | Reviewed; factory parameters reduced from 2 to 1; migrate production and test factories |
 | `src/athena/core/agent/runtime.py` | 654 | Reviewed; remove task placeholders, result remapping, dispatch closures and redundant parameters; 356 tests pass |
 | `src/athena/core/agent/session.py` | 82 | Reviewed; delete memory facade and property forwarding; preserve checkpoint ownership |
-| `src/athena/core/agent/settings.py` | 242 | Pending |
-| `src/athena/core/agent/tools/__init__.py` | 5 | Pending |
-| `src/athena/core/agent/tools/user_input.py` | 157 | Pending |
-| `src/athena/core/agent/types.py` | 229 | Pending |
-| `src/athena/core/artifact_store.py` | 118 | Pending |
-| `src/athena/core/contracts.py` | 58 | Pending |
-| `src/athena/core/git_workspace.py` | 506 | Pending |
-| `src/athena/core/human_request.py` | 229 | Pending |
-| `src/athena/core/persistence.py` | 24 | Pending |
-| `src/athena/core/project_lock.py` | 101 | Pending |
-| `src/athena/core/research_models.py` | 97 | Pending |
-| `src/athena/core/research_tree.py` | 569 | Pending |
-| `src/athena/core/retry.py` | 98 | Pending |
-| `src/athena/core/thread_models.py` | 24 | Pending |
+| `src/athena/core/agent/settings.py` | 242 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/agent/tools/__init__.py` | 5 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/agent/tools/user_input.py` | 157 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `root-module-review.md` |
+| `src/athena/core/agent/types.py` | 229 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/artifact_store.py` | 118 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/contracts.py` | 58 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/git_workspace.py` | 506 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/human_request.py` | 229 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `root-module-review.md` |
+| `src/athena/core/persistence.py` | 24 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/project_lock.py` | 101 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `root-module-review.md` |
+| `src/athena/core/research_models.py` | 97 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/research_tree.py` | 569 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/retry.py` | 98 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
+| `src/athena/core/thread_models.py` | 24 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
 | `src/athena/core/tool.py` | 208 | Reviewed; inline private forwarding layers; keep one registry mapping; 402 tests pass |
 | `src/athena/core/tool_types.py` | 91 | Reviewed; remove unused max_result_chars; retain shared data contracts |
-| `src/athena/core/workspace.py` | 86 | Pending |
+| `src/athena/core/workspace.py` | 86 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `core-app-review.md` |
 | `src/athena/execution/__init__.py` | 42 | Reviewed; retain one public execution facade after monitoring merge |
 | `src/athena/execution/backend.py` | 122 | Reviewed; retain the source-independent backend protocol and local implementation |
 | `src/athena/execution/check.py` | 249 | Reviewed; four-field scratch records and derived host status |
 | `src/athena/execution/compute_config.py` | 124 | Reviewed; retain six consumed fields and separate file/mapping boundaries |
-| `src/athena/execution/events.py` | 139 | Reviewed; merged contracts into monitor.py and deleted file |
+| `src/athena/execution/events.py` | 139 | Retired from current workspace; historical status: Reviewed; merged contracts into monitor.py and deleted file |
 | `src/athena/execution/monitor.py` | 286 | Reviewed; own event contracts and monitor lifecycle in one module |
 | `src/athena/execution/pool.py` | 363 | Reviewed; automatic preflight, six-field leases, one condition lock |
 | `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
@@ -1199,7 +1214,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/remote/channel.py` | 463 | Reviewed; single command input and consolidated remote-job state |
 | `src/athena/execution/remote/dataset.py` | 188 | Reviewed; four-field report, mandatory verification, private staging helpers |
 | `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
-| `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
+| `src/athena/execution/remote/mirrored.py` | 120 | Retired from current workspace; historical status: Reviewed; merge into mirror.py and delete forwarding file |
 | `src/athena/execution/remote/ssh.py` | 362 | Reviewed; five-parameter backend construction and per-run cwd ownership |
 | `src/athena/execution/runtime.py` | 895 | Reviewed; unify string/argv commands, remove dead environment/backend inputs and cwd calculation |
 | `src/athena/gui/__init__.py` | 9 | Reviewed; retain the single-service package facade |
@@ -1216,7 +1231,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/kaggle/pipeline.py` | 156 | Reviewed; delete one-shot five-attribute class and reduce runner to two parameters |
 | `src/athena/kaggle/schemas.py` | 63 | Reviewed; delete unconstructed discussion summary and retain live request/report models |
 | `src/athena/kaggle/tool.py` | 444 | Reviewed; one declarative registry and one named tool replace nine concrete classes |
-| `src/athena/kaggle/wiring.py` | 124 | Reviewed; merged into tool composition root and deleted |
+| `src/athena/kaggle/wiring.py` | 124 | Retired from current workspace; historical status: Reviewed; merged into tool composition root and deleted |
 | `src/athena/memory/__init__.py` | 13 | Reviewed; retain public exports |
 | `src/athena/memory/compaction.py` | 138 | Reviewed; retain checkpoint consumed by ThreadRuntime |
 | `src/athena/memory/context_manager.py` | 118 | Reviewed; retain token and rollback owner |
@@ -1236,12 +1251,12 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
 | `src/athena/research/config.py` | 83 | Reviewed; three public input groups and four resolved fields replace the 25-field flat config |
 | `src/athena/research/contracts.py` | 88 | Reviewed; absorb all shared research payload models behind one explicit export surface |
-| `src/athena/research/data_models.py` | 46 | Reviewed; merged into contracts.py and deleted |
+| `src/athena/research/data_models.py` | 46 | Retired from current workspace; historical status: Reviewed; merged into contracts.py and deleted |
 | `src/athena/research/evaluation/__init__.py` | 5 | Reviewed; retain one three-symbol facade for trusted scoring and generalization policy |
 | `src/athena/research/evaluation/evaluator.py` | 115 | Reviewed; absorb pure generalization calculations beside trusted scoring |
 | `src/athena/research/evaluation/spec.py` | 168 | Reviewed; four-symbol schema surface replaces unused defaults and test-only filename helper |
 | `src/athena/research/evaluation/trust.py` | 264 | Reviewed; one explicit probe contract, one label parse, and linear permutation selection replace compatibility plumbing |
-| `src/athena/research/evaluation/validation.py` | 70 | Reviewed; delete stateless service and its discarded result construction |
+| `src/athena/research/evaluation/validation.py` | 70 | Retired from current workspace; historical status: Reviewed; delete stateless service and its discarded result construction |
 | `src/athena/research/experiment_documents/__init__.py` | 11 | Reviewed; three-symbol facade after deleting the result wrapper export |
 | `src/athena/research/experiment_documents/models.py` | 324 | Reviewed; retain strict persisted contracts and delete the four-field transient outcome model |
 | `src/athena/research/experiment_documents/projector.py` | 391 | Reviewed; return one success boolean and retain two-attribute projection ownership |
@@ -1253,37 +1268,37 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/idea_generation/gate.py` | 219 | Reviewed; direct-draft orchestration and two-parameter candidate screening replace copied packages and dead planning |
 | `src/athena/research/idea_generation/gatekeeper.py` | 262 | Reviewed; retain pure evidence/falsifiability/risk policy and remove the constant verifier rubric |
 | `src/athena/research/idea_generation/idea_schemas.py` | 453 | Reviewed; delete four unused duplicate/planning models and the unreachable exploratory verdict |
-| `src/athena/research/idea_generation/pre_gate_checks.py` | 112 | Reviewed; merged into gate.py and deleted |
-| `src/athena/research/idea_generation/prompts.py` | 59 | Reviewed; prompts moved to their sole owning execution modules and file deleted |
+| `src/athena/research/idea_generation/pre_gate_checks.py` | 112 | Retired from current workspace; historical status: Reviewed; merged into gate.py and deleted |
+| `src/athena/research/idea_generation/prompts.py` | 59 | Retired from current workspace; historical status: Reviewed; prompts moved to their sole owning execution modules and file deleted |
 | `src/athena/research/idea_generation/review_board.py` | 134 | Reviewed; retain two-perspective boundary and inline its single-use formatting chain |
-| `src/athena/research/idea_generation/structured_chat.py` | 83 | Reviewed; merged into core/agent/chat.py and deleted; schema retry/artifact test passes |
-| `src/athena/research/idea_generation/validation.py` | 99 | Reviewed; delete unreachable fixed-domain verifier planning and discarded artifacts |
+| `src/athena/research/idea_generation/structured_chat.py` | 83 | Retired from current workspace; historical status: Reviewed; merged into core/agent/chat.py and deleted; schema retry/artifact test passes |
+| `src/athena/research/idea_generation/validation.py` | 99 | Retired from current workspace; historical status: Reviewed; delete unreachable fixed-domain verifier planning and discarded artifacts |
 | `src/athena/research/literature/__init__.py` | 1 | Reviewed; retain concise package marker |
 | `src/athena/research/literature/bench/__init__.py` | 72 | Reviewed; one facade replaces direct imports from five implementation modules |
 | `src/athena/research/literature/bench/datasets/imbalance_auc.json` | 91 | Reviewed; retain versioned twelve-query known-item gold unchanged |
 | `src/athena/research/literature/bench/datasets/imbalance_auc_recall.json` | 35 | Reviewed; retain provenance-declared multi-pass proxy gold unchanged |
 | `src/athena/research/literature/bench/health.py` | 175 | Reviewed; retain corpus-structure boundary and make four helpers private |
-| `src/athena/research/literature/bench/known_item.py` | 273 | Reviewed; cohesive retrieval path moved to retrieval.py and file deleted |
-| `src/athena/research/literature/bench/query_sets.py` | 60 | Reviewed; dataset I/O merged into retrieval.py and file deleted |
-| `src/athena/research/literature/bench/recall.py` | 169 | Reviewed; models and pure metric split by responsibility and file deleted |
-| `src/athena/research/literature/bench/reproducibility.py` | 55 | Reviewed; pairwise overlap merged into metrics.py and file deleted |
-| `src/athena/research/literature/bench/schemas.py` | 204 | Reviewed; contracts moved to models.py and aggregate input fields reduced |
+| `src/athena/research/literature/bench/known_item.py` | 273 | Retired from current workspace; historical status: Reviewed; cohesive retrieval path moved to retrieval.py and file deleted |
+| `src/athena/research/literature/bench/query_sets.py` | 60 | Retired from current workspace; historical status: Reviewed; dataset I/O merged into retrieval.py and file deleted |
+| `src/athena/research/literature/bench/recall.py` | 169 | Retired from current workspace; historical status: Reviewed; models and pure metric split by responsibility and file deleted |
+| `src/athena/research/literature/bench/reproducibility.py` | 55 | Retired from current workspace; historical status: Reviewed; pairwise overlap merged into metrics.py and file deleted |
+| `src/athena/research/literature/bench/schemas.py` | 204 | Retired from current workspace; historical status: Reviewed; contracts moved to models.py and aggregate input fields reduced |
 | `src/athena/research/literature/bench/metrics.py` | new | Added; pure recall and overlap calculations |
 | `src/athena/research/literature/bench/models.py` | new | Added; versioned benchmark inputs and reports |
 | `src/athena/research/literature/bench/retrieval.py` | new | Added; known-item execution and dataset/report I/O |
 | `src/athena/research/literature/contracts.py` | 45 | Reviewed; retain shared chunking, diagnostic, source-format, and visual-policy contracts |
 | `src/athena/research/literature/paper_markdown/__init__.py` | 15 | Reviewed; retain narrow package facade over consolidated models and processor |
 | `src/athena/research/literature/paper_markdown/chunking.py` | 213 | Reviewed; retain deterministic retrieval-unit construction boundary |
-| `src/athena/research/literature/paper_markdown/document.py` | 65 | Reviewed; transient parsed records merged into models.py and file deleted |
-| `src/athena/research/literature/paper_markdown/interfaces.py` | 102 | Reviewed; provider protocols and request/result records merged into models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/document.py` | 65 | Retired from current workspace; historical status: Reviewed; transient parsed records merged into models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/interfaces.py` | 102 | Retired from current workspace; historical status: Reviewed; provider protocols and request/result records merged into models.py and file deleted |
 | `src/athena/research/literature/paper_markdown/pdf_elements.py` | 62 | Reviewed; absorb PDF block geometry and reading-order logic |
-| `src/athena/research/literature/paper_markdown/pdf_layout.py` | 79 | Reviewed; merged into pdf_elements.py and file deleted |
+| `src/athena/research/literature/paper_markdown/pdf_layout.py` | 79 | Retired from current workspace; historical status: Reviewed; merged into pdf_elements.py and file deleted |
 | `src/athena/research/literature/paper_markdown/pdf_parser.py` | 1275 | Reviewed; retain cohesive parser and replace nine page inputs with two context records |
 | `src/athena/research/literature/paper_markdown/processor.py` | 515 | Reviewed; expose only process and reduce visual interpretation inputs |
 | `src/athena/research/literature/paper_markdown/quality.py` | 373 | Reviewed; retain independent deterministic conversion-quality gate |
-| `src/athena/research/literature/paper_markdown/schemas.py` | 368 | Reviewed; persisted schemas moved to consolidated models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/schemas.py` | 368 | Retired from current workspace; historical status: Reviewed; persisted schemas moved to consolidated models.py and file deleted |
 | `src/athena/research/literature/paper_markdown/models.py` | new | Added; parsed, persisted, and provider-boundary records |
-| `src/athena/research/literature/paper_markdown/tex_bibliography.py` | 84 | Reviewed; bibliography rendering merged into tex_render.py and file deleted |
+| `src/athena/research/literature/paper_markdown/tex_bibliography.py` | 84 | Retired from current workspace; historical status: Reviewed; bibliography rendering merged into tex_render.py and file deleted |
 | `src/athena/research/literature/paper_markdown/tex_parser.py` | 1259 | Reviewed; retain cohesive TeX structure parser |
 | `src/athena/research/literature/paper_markdown/tex_render.py` | 157 | Reviewed; absorb citation, label, reference, and bibliography rendering |
 | `src/athena/research/literature/paper_markdown/tex_source.py` | 414 | Reviewed; retain archive expansion and source-selection boundary |
@@ -1292,38 +1307,38 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/paper_markdown/visuals.py` | 230 | Reviewed; retain media extraction and rendering boundary |
 | `src/athena/research/literature/paper_rag/__init__.py` | 29 | Reviewed; retain narrow construction and tool facade with new option/runtime records |
 | `src/athena/research/literature/paper_rag/index.py` | 676 | Reviewed; retain cohesive write path and remove unused whole-corpus embedding path |
-| `src/athena/research/literature/paper_rag/interfaces.py` | 42 | Reviewed; provider protocols merged into models.py and file deleted |
-| `src/athena/research/literature/paper_rag/schemas.py` | 173 | Reviewed; persisted contracts moved to models.py and file deleted |
+| `src/athena/research/literature/paper_rag/interfaces.py` | 42 | Retired from current workspace; historical status: Reviewed; provider protocols merged into models.py and file deleted |
+| `src/athena/research/literature/paper_rag/schemas.py` | 173 | Retired from current workspace; historical status: Reviewed; persisted contracts moved to models.py and file deleted |
 | `src/athena/research/literature/paper_rag/models.py` | new | Added; persisted contracts, provider protocols, and corpus build options |
 | `src/athena/research/literature/paper_rag/search.py` | 567 | Reviewed; absorb graph/document traversal and delete duplicate forwarding surface |
 | `src/athena/research/literature/paper_rag/tool.py` | 586 | Reviewed; all tools accept one shared runtime and embedding-only base deleted |
-| `src/athena/research/literature/paper_rag/traversal.py` | 241 | Reviewed; merged into search.py and file deleted |
+| `src/athena/research/literature/paper_rag/traversal.py` | 241 | Retired from current workspace; historical status: Reviewed; merged into search.py and file deleted |
 | `src/athena/research/literature/paper_scout/__init__.py` | 13 | Reviewed; narrow facade to Agent and its runtime |
 | `src/athena/research/literature/paper_scout/agent.py` | 443 | Reviewed; absorb prompts/tools and reduce Agent to one runtime dependency |
 | `src/athena/research/literature/paper_scout/backends.py` | 311 | Reviewed; retain isolated search/reference adapters |
 | `src/athena/research/literature/paper_scout/pool.py` | 222 | Reviewed; retain deterministic observation, resolution, and ranking state |
-| `src/athena/research/literature/paper_scout/prompts.py` | 98 | Reviewed; prompts moved to their owning execution modules and file deleted |
-| `src/athena/research/literature/paper_scout/reranker.py` | 210 | Reviewed; tie-only relevance signal merged into scorer.py and file deleted |
+| `src/athena/research/literature/paper_scout/prompts.py` | 98 | Retired from current workspace; historical status: Reviewed; prompts moved to their owning execution modules and file deleted |
+| `src/athena/research/literature/paper_scout/reranker.py` | 210 | Retired from current workspace; historical status: Reviewed; tie-only relevance signal merged into scorer.py and file deleted |
 | `src/athena/research/literature/paper_scout/schemas.py` | 350 | Reviewed; retain persisted request/corpus/result contracts |
 | `src/athena/research/literature/paper_scout/scorer.py` | 326 | Reviewed; delete disabled token path and consolidate active relevance signals |
 | `src/athena/research/literature/paper_scout/selection.py` | 369 | Reviewed; retain source-aware delivery and boundary selection policy |
 | `src/athena/research/literature/paper_scout/session.py` | 238 | Reviewed; split services/run state and reduce constructor/state surface |
-| `src/athena/research/literature/paper_scout/tool.py` | 97 | Reviewed; run-local adapters merged into agent.py and file deleted |
+| `src/athena/research/literature/paper_scout/tool.py` | 97 | Retired from current workspace; historical status: Reviewed; run-local adapters merged into agent.py and file deleted |
 | `src/athena/research/literature/paper_source/__init__.py` | 9 | Reviewed; narrow facade exports fetcher, runtime, and Agent adapter |
 | `src/athena/research/literature/paper_source/arxiv.py` | 245 | Reviewed; retain versioned arXiv parsing and endpoint adapter |
 | `src/athena/research/literature/paper_source/fetcher.py` | 709 | Reviewed; absorb payload/tool layers and reduce fetch runtime and method inputs |
 | `src/athena/research/literature/paper_source/http.py` | 236 | Reviewed; retain shared rate-limited GET transport used beyond literature |
 | `src/athena/research/literature/paper_source/openalex.py` | 152 | Reviewed; retain free metadata and guarded paid-content protocol |
-| `src/athena/research/literature/paper_source/payloads.py` | 198 | Reviewed; merged into sole production consumer fetcher.py and deleted |
+| `src/athena/research/literature/paper_source/payloads.py` | 198 | Retired from current workspace; historical status: Reviewed; merged into sole production consumer fetcher.py and deleted |
 | `src/athena/research/literature/paper_source/schemas.py` | 379 | Reviewed; retain persisted request/result and identity contracts |
-| `src/athena/research/literature/paper_source/tool.py` | 91 | Reviewed; Agent adapter merged into fetcher.py and file deleted |
+| `src/athena/research/literature/paper_source/tool.py` | 91 | Retired from current workspace; historical status: Reviewed; Agent adapter merged into fetcher.py and file deleted |
 | `src/athena/research/literature/survey/__init__.py` | 43 | Reviewed; narrow facade to the six library/composition entrypoints and Agent tool |
 | `src/athena/research/literature/survey/library.py` | 333 | Reviewed; retain persistent paper/vector caches and cross-run reuse boundary |
 | `src/athena/research/literature/survey/pipeline.py` | 581 | Reviewed; absorb stages, introduce one run runtime, and remove test-only forwarders/dead state |
 | `src/athena/research/literature/survey/providers.py` | 174 | Reviewed; retain isolated embedding and vision provider implementations |
 | `src/athena/research/literature/survey/report.py` | 237 | Reviewed; retain CLI report rendering boundary |
-| `src/athena/research/literature/survey/stages.py` | 591 | Reviewed; merged into pipeline.py and deleted |
-| `src/athena/research/literature/survey/tool.py` | 110 | Reviewed; merged into wiring.py and deleted |
+| `src/athena/research/literature/survey/stages.py` | 591 | Retired from current workspace; historical status: Reviewed; merged into pipeline.py and deleted |
+| `src/athena/research/literature/survey/tool.py` | 110 | Retired from current workspace; historical status: Reviewed; merged into wiring.py and deleted |
 | `src/athena/research/literature/survey/wiring.py` | 344 | Reviewed; composition root now owns the single survey Agent tool |
 | `src/athena/research/output_freshness.py` | 115 | Reviewed; delete test-only restore API and fold single-use version validation |
 | `src/athena/research/prepare/__init__.py` | 1 | Reviewed; retain minimal package marker |
@@ -1344,14 +1359,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/corpus.py` | 90 | Reviewed; own merged survey lifecycle and corpus/read ledger behind module functions |
 | `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
 | `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
-| `src/athena/research/runtime/facade.py` | 728 | Pending; grouped constructor retained and six survey forwarders removed; remaining surface still open |
+| `src/athena/research/runtime/facade.py` | 728 | Reviewed 2026-10-15; public composition/lifecycle facade retained after caller review; see docs/reviews/2026-10-15-engineering-optimization/research-agents-review.md |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Reviewed; use one slotted Runtime owner and reduce the handoff boundary to five inputs |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Reviewed; derive availability from one slotted reason and use the typed durable state contract |
 | `src/athena/research/runtime/services.py` | 136 | Reviewed; cap all service/session records at five slotted fields and remove the durable wrapper |
 | `src/athena/research/runtime/settings.py` | 308 | Reviewed; delete the one-attribute controller and consolidate validation in module functions |
-| `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |
-| `src/athena/research/script_runner.py` | 388 | Pending |
-| `src/athena/research/splitter.py` | 308 | Pending |
+| `src/athena/research/runtime/survey.py` | 165 | Retired from current workspace; historical status: Reviewed; merge lifecycle into `corpus.py` and delete file |
+| `src/athena/research/script_runner.py` | 388 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/splitter.py` | 308 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
 | `src/athena/research/supervisor/__init__.py` | 5 | Reviewed; remove unused Supervisor reexport and retain package marker |
 | `src/athena/research/supervisor/deps.py` | 111 | Reviewed; slot five focused groups and collapse validation policy to one mode |
 | `src/athena/research/supervisor/evaluator_plan.py` | 425 | Reviewed; runtime-owned five-argument Plan and one real property-probe path replace dependency/test compatibility plumbing |
@@ -1359,35 +1374,35 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/experiment.py` | 555 | Reviewed; unify score inputs in `PlanBest`, return typed diff failures directly, and distinguish the lightweight settlement decision from the durable service |
 | `src/athena/research/supervisor/manifest.py` | 108 | Reviewed; express version 1 as a literal and remove one-use validation plumbing while retaining the strict untrusted-manifest boundary |
 | `src/athena/research/supervisor/phases.py` | 650 | Reviewed; flatten PREPARE baseline creation, remove redundant phase/export forwarding, and retain the explicit five-owner lifecycle boundary |
-| `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Reviewed; merge the forwarding composition facade into the single Plan runtime owner and delete the file |
+| `src/athena/research/supervisor/plan_lifecycle.py` | 192 | Retired from current workspace; historical status: Reviewed; merge the forwarding composition facade into the single Plan runtime owner and delete the file |
 | `src/athena/research/supervisor/plan_runtime.py` | 450 | Reviewed; directly own persistence, settlement, hypotheses, checkpoints, dispatch, execution, and recovery with a four-argument constructor |
 | `src/athena/research/supervisor/plans.py` | 180 | Reviewed; remove three unread input fields and decision suggestions, share trusted-ref validation, and project frozen Human guidance into Plan prompts |
 | `src/athena/research/supervisor/prepare.py` | 296 | Reviewed; add slim dependency/request holders, inline prepare turn loop, and extract shared decision/outcome checks |
 | `src/athena/research/supervisor/prompt_context.py` | 74 | Reviewed; remove one-purpose PromptBlock class, keep helper block renderer |
 | `src/athena/research/supervisor/recovery.py` | 60 | Reviewed; replace class-like recovery façade with pure function callpoint and compatibility shim |
-| `src/athena/research/supervisor/run_state.py` | 145 | Pending |
-| `src/athena/research/supervisor/scheduling.py` | 389 | Pending |
-| `src/athena/research/supervisor/search_loop.py` | 429 | Pending |
-| `src/athena/research/supervisor/settlement.py` | 290 | Pending |
-| `src/athena/research/supervisor/state.py` | 242 | Pending |
-| `src/athena/research/supervisor/statistics.py` | 90 | Pending |
-| `src/athena/research/supervisor/supervisor.py` | 288 | Pending |
-| `src/athena/research/supervisor/validation.py` | 711 | Pending |
-| `src/athena/research/supervisor/validation_contracts.py` | 84 | Pending |
+| `src/athena/research/supervisor/run_state.py` | 145 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/scheduling.py` | 389 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/search_loop.py` | 429 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/settlement.py` | 290 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/state.py` | 242 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/statistics.py` | 90 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/supervisor.py` | 288 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/validation.py` | 711 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
+| `src/athena/research/supervisor/validation_contracts.py` | 84 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
 | `src/athena/research/turns/__init__.py` | 1 | Reviewed; retain package boundary |
 | `src/athena/research/turns/common.py` | 98 | Reviewed; derive agent service from runtime instead of duplicate parameter |
 | `src/athena/research/turns/general.py` | 215 | Reviewed; delete two single-call tool wrappers; retain optional handoff policy |
-| `src/athena/research/turns/ideator.py` | 520 | Pending |
+| `src/athena/research/turns/ideator.py` | 520 | Reviewed 2026-10-15; retain/change decision and caller/test evidence in `research-agents-review.md` |
 | `src/athena/research/turns/runner.py` | 98 | Reviewed; retain distinct Supervisor/Data result boundaries |
 | `src/athena/research/turns/support.py` | 126 | Reviewed; retain two-stage citation verification policy |
 | `src/athena/retrieval/__init__.py` | 1 | Reviewed; retain minimal package boundary |
 | `src/athena/retrieval/web_search.py` | 386 | Reviewed; delete dual-owner tool base and use one shared session dependency |
 | `src/athena/serving/__init__.py` | 1 | Reviewed; retain package boundary |
-| `src/athena/serving/http_api.py` | 152 | Reviewed; merged into predictions_api and deleted |
+| `src/athena/serving/http_api.py` | 152 | Retired from current workspace; historical status: Reviewed; merged into predictions_api and deleted |
 | `src/athena/serving/model.py` | 305 | Reviewed; retain isolated model contract |
 | `src/athena/serving/predictions_api.py` | 39 | Reviewed; owns HTTP implementation and CLI; 22 tests pass |
-| `src/athena/utils/__init__.py` | 5 | Reviewed; delete one-function package shim; all consumers migrated |
-| `src/athena/utils/single_turn_chat.py` | 135 | Reviewed; merge into core/agent/chat.py; reduce sampling arguments to AgentConfig |
+| `src/athena/utils/__init__.py` | 5 | Retired from current workspace; historical status: Reviewed; delete one-function package shim; all consumers migrated |
+| `src/athena/utils/single_turn_chat.py` | 135 | Retired from current workspace; historical status: Reviewed; merge into core/agent/chat.py; reduce sampling arguments to AgentConfig |
 | `src/athena_tui/__init__.py` | 8 | Reviewed; retain minimal one-symbol package facade |
 | `src/athena_tui/__main__.py` | 6 | Reviewed; retain required `python -m` entry |
 | `src/athena_tui/app.py` | 668 | Reviewed; instance attributes 17 to 11, event reducer arguments 3 to 2, preserve prompt-toolkit behavior |
@@ -1406,29 +1421,29 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Reviewed; remove duplicate AgentOutcome export and retain canonical facade |
 | `athena-rust/crates/athena-agent/src/openai_provider.rs` | 216 | Reviewed; remove unread emitter parameter and retain isolated transport boundary |
 | `athena-rust/crates/athena-agent/src/provider.rs` | 141 | Reviewed; preserve message roles instead of forcing plain text to user |
-| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Reviewed; delete the unconstructed runtime adapter and its ignored context limit |
+| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Retired from current workspace; historical status: Reviewed; delete the unconstructed runtime adapter and its ignored context limit |
 | `athena-rust/crates/athena-agent/src/subagent.rs` | 229 | Reviewed; retain concurrency, memory, event, and cancellation lifecycle owner |
 | `athena-rust/crates/athena-agent/tests/common/mod.rs` | 230 | Reviewed; retain shared deterministic provider/tool/context fixtures |
 | `athena-rust/crates/athena-agent/tests/provider_mapping.rs` | 54 | Reviewed; add plain assistant-role regression |
 | `athena-rust/crates/athena-agent/tests/subagent.rs` | 51 | Reviewed; retain completion, messaging, event, and cancellation coverage |
 | `athena-rust/crates/athena-agent/tests/tool_loop.rs` | 113 | Reviewed; retain ordering/barrier/error coverage and add pre-cancelled regression |
-| `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Reviewed; delete the self-tested, unconnected compaction prototype |
-| `athena-rust/crates/athena-memory/src/context.rs` | 443 | Reviewed; merge the active one-field buffer into message.rs and delete file |
+| `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Retired from current workspace; historical status: Reviewed; delete the self-tested, unconnected compaction prototype |
+| `athena-rust/crates/athena-memory/src/context.rs` | 443 | Retired from current workspace; historical status: Reviewed; merge the active one-field buffer into message.rs and delete file |
 | `athena-rust/crates/athena-memory/src/lib.rs` | 9 | Reviewed; expose one private-module facade without prototype exports |
 | `athena-rust/crates/athena-memory/src/message.rs` | 188 | Reviewed; own wire types and the active normalized conversation buffer |
-| `athena-rust/crates/athena-memory/src/rollout.rs` | 519 | Reviewed; delete the unconnected duplicate of Python rollout persistence |
-| `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Reviewed; delete tests exclusive to the removed prototype |
+| `athena-rust/crates/athena-memory/src/rollout.rs` | 519 | Retired from current workspace; historical status: Reviewed; delete the unconnected duplicate of Python rollout persistence |
+| `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Retired from current workspace; historical status: Reviewed; delete tests exclusive to the removed prototype |
 | `athena-rust/crates/athena-memory/tests/context_parity.rs` | 219 | Reviewed; retain fixture-governed message wire parity |
-| `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Reviewed; delete tests exclusive to the removed prototype |
+| `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Retired from current workspace; historical status: Reviewed; delete tests exclusive to the removed prototype |
 | `athena-rust/crates/athena-protocol/src/envelope.rs` | 88 | Reviewed; retain fixture-governed wire envelopes and transport unions |
 | `athena-rust/crates/athena-protocol/src/error.rs` | 103 | Reviewed; one RpcError constructor, no copied application exception or forwarding helpers |
 | `athena-rust/crates/athena-protocol/src/lib.rs` | 162 | Reviewed; absorb method constants and delete duplicate inline tests |
-| `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Reviewed; merge constants into facade and delete file |
+| `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Retired from current workspace; historical status: Reviewed; merge constants into facade and delete file |
 | `athena-rust/crates/athena-protocol/src/operations.rs` | 91 | Reviewed; retain consumed request DTOs and delete five unused result DTOs |
 | `athena-rust/crates/athena-protocol/tests/python_fixtures.rs` | 386 | Reviewed; retain 26 canonical wire/control/boundary cases |
-| `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Reviewed; delete with unconsumed prototype crate |
-| `athena-rust/crates/athena-research/src/lib.rs` | 166 | Reviewed; delete unused facade and inline-only tests with crate |
-| `athena-rust/crates/athena-research/src/tree.rs` | 141 | Reviewed; delete stale duplicate of authoritative Python ResearchTree |
+| `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Retired from current workspace; historical status: Reviewed; delete with unconsumed prototype crate |
+| `athena-rust/crates/athena-research/src/lib.rs` | 166 | Retired from current workspace; historical status: Reviewed; delete unused facade and inline-only tests with crate |
+| `athena-rust/crates/athena-research/src/tree.rs` | 141 | Retired from current workspace; historical status: Reviewed; delete stale duplicate of authoritative Python ResearchTree |
 | `athena-rust/crates/athena-runtime/src/event.rs` | 303 | Reviewed; remove unused journal surface and subscription state |
 | `athena-rust/crates/athena-runtime/src/lib.rs` | 20 | Reviewed; retain the minimal runtime facade |
 | `athena-rust/crates/athena-runtime/src/runner.rs` | 57 | Reviewed; retain the runtime execution contract |
@@ -1447,7 +1462,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-server/src/subscription.rs` | 83 | Reviewed; retain pump lifecycle and drain all subscriptions under one map take |
 | `athena-rust/crates/athena-server/src/transport.rs` | 307 | Reviewed; replace eight-field temporary object and seven forwarding methods with direct halves |
 | `athena-rust/crates/athena-server/tests/app_server_e2e.rs` | 131 | Reviewed; retain ready rejection and full lifecycle coverage through generic raw transport |
-| `athena-rust/crates/athena-tools/src/context.rs` | 8 | Reviewed; merge two-field invocation context into tool.rs and delete file |
+| `athena-rust/crates/athena-tools/src/context.rs` | 8 | Retired from current workspace; historical status: Reviewed; merge two-field invocation context into tool.rs and delete file |
 | `athena-rust/crates/athena-tools/src/executor.rs` | 111 | Reviewed; retain lifecycle boundary; construct its sole failure result directly |
 | `athena-rust/crates/athena-tools/src/lib.rs` | 19 | Reviewed; remove context module and builder export; retain canonical facade |
 | `athena-rust/crates/athena-tools/src/registry.rs` | 105 | Reviewed; two types/two fields to one type/one BTreeMap; delete build phase; stable order preserved |
@@ -1455,160 +1470,160 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-tools/src/tool.rs` | 44 | Reviewed; absorb ToolContext and remove its unread tool-name field |
 | `athena-rust/crates/athena-tools/tests/registry.rs` | 166 | Reviewed; eight duplicate/order/search/empty cases migrated to direct registry construction |
 | `athena-rust/crates/athena-tools/tests/tool_lifecycle.rs` | 279 | Reviewed; six success/error/cancellation/truncation cases retained |
-| `athena-rust/crates/athena-types/src/domain.rs` | 237 | Reviewed; delete seven unconsumed research-domain contracts with their prototype |
+| `athena-rust/crates/athena-types/src/domain.rs` | 237 | Retired from current workspace; historical status: Reviewed; delete seven unconsumed research-domain contracts with their prototype |
 | `athena-rust/crates/athena-types/src/ids.rs` | 119 | Reviewed; remove public intermediate wrapper and unused conversion traits |
 | `athena-rust/crates/athena-types/src/lib.rs` | 122 | Reviewed; retain thread/turn contracts and delete duplicate inline tests/domain exports |
 | `athena-rust/crates/athena-types/src/status.rs` | 21 | Reviewed; retain two fixture-governed runtime enums |
 | `athena-rust/crates/athena-types/tests/python_fixtures.rs` | 216 | Reviewed; retain six live thread/turn/identifier parity cases |
-| `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Reviewed; delete unconsumed injectable Git process boundary with crate |
-| `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Reviewed; delete crate-local error with its only consumers |
-| `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Reviewed; delete unused facade and workspace member |
-| `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Reviewed; delete unconsumed worktree/review state manager |
-| `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Reviewed; delete orphaned branch record and CommitHash dependency |
-| `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Reviewed; delete self-only five-case integration suite with prototype |
-| `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Reviewed; removed two unused fields and three data-only runtime classes |
-| `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
-| `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
-| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Reviewed; simplified sampling/configuration and deleted unused dual-signature runner |
-| `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
-| `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Reviewed; move live contracts/configuration to provider.ts; delete unused exports and file; preserve deferred SDK limitation |
-| `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Reviewed; retain typed message, codec, state and error contracts; 10 tests pass |
-| `athena_ts/packages/athena-agent/src/cancel.ts` | 42 | Reviewed; delete custom token/waiters; native AbortSignal throughout callers; move CancelledError to agent/types.ts; 431 tests pass |
-| `athena_ts/packages/athena-agent/src/index.ts` | 29 | Reviewed; retain canonical exports; removed MemoryView no longer exported |
-| `athena_ts/packages/athena-agent/src/memory/compaction.ts` | 133 | Pending |
-| `athena_ts/packages/athena-agent/src/memory/context-manager.ts` | 123 | Pending |
-| `athena_ts/packages/athena-agent/src/memory/index.ts` | 4 | Pending |
-| `athena_ts/packages/athena-agent/src/memory/rollout.ts` | 158 | Pending |
-| `athena_ts/packages/athena-agent/src/messages.ts` | 139 | Pending |
-| `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Reviewed; shared AgentConfig, retained literal input/history/tool/cancellation boundary |
-| `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Reviewed; remove unused output-limit attribute; retain message truncation |
-| `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Reviewed; consolidate lifecycle, delete forwarding helpers and redundant registry storage |
-| `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Reviewed; retain runtime/structured output contracts; add latch-controlled concurrency/failure/alignment checks; 25 tests pass before and after |
-| `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Reviewed; consolidate configuration/client/streaming regressions; 18 tests pass |
-| `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Reviewed; migrate factory and verify exact argument list; 6 tests pass |
-| `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Reviewed; direct context and detached mailbox contract test passes |
-| `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Reviewed; delete obsolete configuration tests; live lazy-client and environment contracts covered in provider.test.ts |
-| `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Reviewed; retain protocol/state/error checks; 10 tests pass |
-| `athena_ts/packages/athena-agent/test/memory/compaction.test.ts` | 85 | Pending |
-| `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Pending |
-| `athena_ts/packages/athena-agent/test/memory/rollout.test.ts` | 221 | Pending |
-| `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Reviewed; retain canonical exports and reject removed facade; 3 tests pass |
-| `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Reviewed; 20 tests including sampling defaults/overrides and turn budgets |
-| `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Reviewed; add cancellation, non-Error and duplicate registry checks; 16 tests pass |
-| `athena_ts/packages/athena-autoresearch/dsh-ui/app.js` | 107 | Pending |
-| `athena_ts/packages/athena-autoresearch/dsh-ui/hypothesis-graph.js` | 350 | Pending |
-| `athena_ts/packages/athena-autoresearch/scripts/dsh-ui-server.mjs` | 204 | Pending |
-| `athena_ts/packages/athena-autoresearch/scripts/run-autoresearch.mjs` | 72 | Pending |
-| `athena_ts/packages/athena-autoresearch/scripts/smoke.mjs` | 115 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/bootstrap.ts` | 31 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/budget-service.ts` | 50 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/console-port.ts` | 36 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/gate-runner.ts` | 45 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/hypothesis-pool.ts` | 180 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/pipeline-runner.ts` | 113 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/pipeline-types.ts` | 46 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/core/provider-registry.ts` | 35 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/index.ts` | 22 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/plugin.ts` | 141 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/builtins.ts` | 154 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/compiler/local-tex.ts` | 44 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/compiler/overleaf.ts` | 95 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/experiment/athena-engine.ts` | 34 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/template/curl-template.ts` | 85 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/providers/types.ts` | 104 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/runtime.ts` | 126 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/schemas/pool.ts` | 43 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/schemas/run-spec.ts` | 132 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/schemas/state.ts` | 102 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/services/packaging.ts` | 37 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/services/paper-composer.ts` | 69 | Pending |
-| `athena_ts/packages/athena-autoresearch/src/stages.ts` | 114 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/_support.ts` | 53 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/core/budget-service.test.ts` | 43 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/core/gate-runner.test.ts` | 19 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/core/hypothesis-pool.test.ts` | 80 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/core/pipeline-runner.test.ts` | 58 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/core/provider-registry.test.ts` | 32 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/dsh-headless.integration.test.ts` | 72 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/providers/curl-template.test.ts` | 38 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/providers/native-svg.test.ts` | 36 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/providers/overleaf.test.ts` | 34 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/runtime.test.ts` | 49 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/schemas/run-spec.test.ts` | 45 | Pending |
-| `athena_ts/packages/athena-autoresearch/test/services/paper-composer.test.ts` | 22 | Pending |
-| `athena_ts/packages/athena-core/src/app.ts` | 53 | Pending |
-| `athena_ts/packages/athena-core/src/errors.ts` | 33 | Pending |
-| `athena_ts/packages/athena-core/src/id.ts` | 12 | Pending |
-| `athena_ts/packages/athena-core/src/index.ts` | 21 | Pending |
-| `athena_ts/packages/athena-core/src/models/contracts.ts` | 37 | Pending |
-| `athena_ts/packages/athena-core/src/models/hypothesis-graph.ts` | 100 | Pending |
-| `athena_ts/packages/athena-core/src/models/research-data-models.ts` | 51 | Pending |
-| `athena_ts/packages/athena-core/src/models/research-models.ts` | 72 | Pending |
-| `athena_ts/packages/athena-core/src/models/research-tree.ts` | 707 | Pending |
-| `athena_ts/packages/athena-core/src/models/thread-models.ts` | 21 | Pending |
-| `athena_ts/packages/athena-core/src/services/artifact-store.ts` | 115 | Pending |
-| `athena_ts/packages/athena-core/src/services/git-workspace.ts` | 545 | Pending |
-| `athena_ts/packages/athena-core/src/services/persistence.ts` | 22 | Pending |
-| `athena_ts/packages/athena-core/src/services/retry.ts` | 83 | Pending |
-| `athena_ts/packages/athena-core/src/services/workspace.ts` | 44 | Pending |
-| `athena_ts/packages/athena-core/test/app.test.ts` | 25 | Pending |
-| `athena_ts/packages/athena-core/test/errors.test.ts` | 11 | Pending |
-| `athena_ts/packages/athena-core/test/id.test.ts` | 15 | Pending |
-| `athena_ts/packages/athena-core/test/models/contracts.test.ts` | 32 | Pending |
-| `athena_ts/packages/athena-core/test/models/research-models.test.ts` | 54 | Pending |
-| `athena_ts/packages/athena-core/test/models/research-tree-scheduling.test.ts` | 324 | Pending |
-| `athena_ts/packages/athena-core/test/models/research-tree.test.ts` | 389 | Pending |
-| `athena_ts/packages/athena-core/test/services/artifact-store.test.ts` | 57 | Pending |
-| `athena_ts/packages/athena-core/test/services/git-workspace.test.ts` | 527 | Pending |
-| `athena_ts/packages/athena-core/test/services/persistence.test.ts` | 28 | Pending |
-| `athena_ts/packages/athena-core/test/services/retry.test.ts` | 36 | Pending |
-| `athena_ts/packages/athena-core/test/smoke.test.ts` | 7 | Pending |
-| `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Reviewed; retain cohesive composition root and Cordis services; privatize two internal projections |
-| `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Reviewed; four service/tool/validation/PREPARE cases plus removed-export assertions |
-| `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Reviewed; delete score envelope and five unused validation placeholders; retain bundle provenance |
-| `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
-| `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
-| `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; remove internal scheduling count from barrel |
-| `athena_ts/packages/athena-research/src/report.ts` | 78 | Reviewed; retain shared pure renderer, remove unused precision option |
-| `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
-| `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
-| `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
-| `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Reviewed; delete unconnected projector/schemas/helpers; fold live redaction into PlanRunner |
-| `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Reviewed; consolidated failure handling/traversal and removed unused timeout configuration |
-| `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Reviewed; merge schemas into contracts.ts, privatize serialization and delete file |
-| `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
-| `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; pure two-argument reconciliation; resource checks owned by Supervisor; 27 focused tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; runtime inputs 2 arguments to 1; one durable manual-mode authority; 19 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
-| `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Reviewed; one 14-field phase owner, durable evaluator authority, narrowed public surface, lifecycle/race regressions |
-| `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Reviewed; owns result construction and existing decision/scoring loop |
-| `athena_ts/packages/athena-research/src/validation.ts` | 54 | Reviewed; merged sole production use into supervisor/validation.ts and deleted |
-| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
-| `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Reviewed; seven numeric/error/prediction/identity/direction cases |
-| `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Reviewed; five empty/zero/formatting/pending/validation rendering cases |
-| `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Reviewed; delete exclusive dead-API tests; live failure/evidence tests cover redaction |
-| `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |
-| `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Reviewed; 36 strict data/reference/snapshot/legacy-input cases; persistence tests own serialization |
-| `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Reviewed; real PlanRunner success/artifact/feedback retry plus evaluator decisions |
-| `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Reviewed; file/directory evaluator, labels and invalid declarations |
-| `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; 10 pure reconciliation cases; real missing-resource coverage moved to Supervisor tests |
-| `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, durable manual-mode authority, policy/budget/dedup regressions; 19 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
-| `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Reviewed; 47 deterministic flow, recovery, wake, stop, failure and phase-concurrency cases |
-| `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |
-| `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |
-| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |
-| `athena_ts/vitest.workspace.ts` | 4 | Pending |
+| `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Retired from current workspace; historical status: Reviewed; delete unconsumed injectable Git process boundary with crate |
+| `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Retired from current workspace; historical status: Reviewed; delete crate-local error with its only consumers |
+| `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Retired from current workspace; historical status: Reviewed; delete unused facade and workspace member |
+| `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Retired from current workspace; historical status: Reviewed; delete unconsumed worktree/review state manager |
+| `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Retired from current workspace; historical status: Reviewed; delete orphaned branch record and CommitHash dependency |
+| `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Retired from current workspace; historical status: Reviewed; delete self-only five-case integration suite with prototype |
+| `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Retired from current workspace; historical status: Reviewed; removed two unused fields and three data-only runtime classes |
+| `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Retired from current workspace; historical status: Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
+| `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Retired from current workspace; historical status: Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
+| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Retired from current workspace; historical status: Reviewed; simplified sampling/configuration and deleted unused dual-signature runner |
+| `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Retired from current workspace; historical status: Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
+| `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Retired from current workspace; historical status: Reviewed; move live contracts/configuration to provider.ts; delete unused exports and file; preserve deferred SDK limitation |
+| `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Retired from current workspace; historical status: Reviewed; retain typed message, codec, state and error contracts; 10 tests pass |
+| `athena_ts/packages/athena-agent/src/cancel.ts` | 42 | Retired from current workspace; historical status: Reviewed; delete custom token/waiters; native AbortSignal throughout callers; move CancelledError to agent/types.ts; 431 tests pass |
+| `athena_ts/packages/athena-agent/src/index.ts` | 29 | Retired from current workspace; historical status: Reviewed; retain canonical exports; removed MemoryView no longer exported |
+| `athena_ts/packages/athena-agent/src/memory/compaction.ts` | 133 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/memory/context-manager.ts` | 123 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/memory/index.ts` | 4 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/memory/rollout.ts` | 158 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/messages.ts` | 139 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Retired from current workspace; historical status: Reviewed; shared AgentConfig, retained literal input/history/tool/cancellation boundary |
+| `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Retired from current workspace; historical status: Reviewed; remove unused output-limit attribute; retain message truncation |
+| `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Retired from current workspace; historical status: Reviewed; consolidate lifecycle, delete forwarding helpers and redundant registry storage |
+| `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Retired from current workspace; historical status: Reviewed; retain runtime/structured output contracts; add latch-controlled concurrency/failure/alignment checks; 25 tests pass before and after |
+| `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Retired from current workspace; historical status: Reviewed; consolidate configuration/client/streaming regressions; 18 tests pass |
+| `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Retired from current workspace; historical status: Reviewed; migrate factory and verify exact argument list; 6 tests pass |
+| `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Retired from current workspace; historical status: Reviewed; direct context and detached mailbox contract test passes |
+| `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Retired from current workspace; historical status: Reviewed; delete obsolete configuration tests; live lazy-client and environment contracts covered in provider.test.ts |
+| `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Retired from current workspace; historical status: Reviewed; retain protocol/state/error checks; 10 tests pass |
+| `athena_ts/packages/athena-agent/test/memory/compaction.test.ts` | 85 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/test/memory/rollout.test.ts` | 221 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Retired from current workspace; historical status: Reviewed; retain canonical exports and reject removed facade; 3 tests pass |
+| `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Retired from current workspace; historical status: Reviewed; 20 tests including sampling defaults/overrides and turn budgets |
+| `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Retired from current workspace; historical status: Reviewed; add cancellation, non-Error and duplicate registry checks; 16 tests pass |
+| `athena_ts/packages/athena-autoresearch/dsh-ui/app.js` | 107 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/dsh-ui/hypothesis-graph.js` | 350 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/dsh-ui-server.mjs` | 204 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/run-autoresearch.mjs` | 72 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/smoke.mjs` | 115 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/bootstrap.ts` | 31 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/budget-service.ts` | 50 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/console-port.ts` | 36 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/gate-runner.ts` | 45 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/hypothesis-pool.ts` | 180 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/pipeline-runner.ts` | 113 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/pipeline-types.ts` | 46 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/provider-registry.ts` | 35 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/index.ts` | 22 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/plugin.ts` | 141 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/builtins.ts` | 154 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/compiler/local-tex.ts` | 44 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/compiler/overleaf.ts` | 95 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/experiment/athena-engine.ts` | 34 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/template/curl-template.ts` | 85 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/types.ts` | 104 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/runtime.ts` | 126 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/pool.ts` | 43 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/run-spec.ts` | 132 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/state.ts` | 102 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/services/packaging.ts` | 37 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/services/paper-composer.ts` | 69 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/src/stages.ts` | 114 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/_support.ts` | 53 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/budget-service.test.ts` | 43 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/gate-runner.test.ts` | 19 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/hypothesis-pool.test.ts` | 80 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/pipeline-runner.test.ts` | 58 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/provider-registry.test.ts` | 32 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/dsh-headless.integration.test.ts` | 72 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/curl-template.test.ts` | 38 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/native-svg.test.ts` | 36 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/overleaf.test.ts` | 34 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/runtime.test.ts` | 49 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/schemas/run-spec.test.ts` | 45 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-autoresearch/test/services/paper-composer.test.ts` | 22 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/app.ts` | 53 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/errors.ts` | 33 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/id.ts` | 12 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/index.ts` | 21 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/contracts.ts` | 37 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/hypothesis-graph.ts` | 100 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/research-data-models.ts` | 51 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/research-models.ts` | 72 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/research-tree.ts` | 707 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/models/thread-models.ts` | 21 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/services/artifact-store.ts` | 115 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/services/git-workspace.ts` | 545 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/services/persistence.ts` | 22 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/services/retry.ts` | 83 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/src/services/workspace.ts` | 44 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/app.test.ts` | 25 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/errors.test.ts` | 11 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/id.test.ts` | 15 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/models/contracts.test.ts` | 32 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/models/research-models.test.ts` | 54 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/models/research-tree-scheduling.test.ts` | 324 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/models/research-tree.test.ts` | 389 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/services/artifact-store.test.ts` | 57 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/services/git-workspace.test.ts` | 527 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/services/persistence.test.ts` | 28 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/services/retry.test.ts` | 36 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-core/test/smoke.test.ts` | 7 | Retired from current workspace; historical status: Pending |
+| `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Retired from current workspace; historical status: Reviewed; retain cohesive composition root and Cordis services; privatize two internal projections |
+| `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Retired from current workspace; historical status: Reviewed; four service/tool/validation/PREPARE cases plus removed-export assertions |
+| `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Retired from current workspace; historical status: Reviewed; delete score envelope and five unused validation placeholders; retain bundle provenance |
+| `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Retired from current workspace; historical status: Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
+| `athena_ts/packages/athena-research/src/execution.ts` | 94 | Retired from current workspace; historical status: Reviewed; deleted context/root state, single run options and four-field result |
+| `athena_ts/packages/athena-research/src/index.ts` | 45 | Retired from current workspace; historical status: Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; remove internal scheduling count from barrel |
+| `athena_ts/packages/athena-research/src/report.ts` | 78 | Retired from current workspace; historical status: Reviewed; retain shared pure renderer, remove unused precision option |
+| `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Retired from current workspace; historical status: Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
+| `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Retired from current workspace; historical status: Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
+| `athena_ts/packages/athena-research/src/shell.ts` | 48 | Retired from current workspace; historical status: Reviewed; deleted adapter exclusively used by removed runtime |
+| `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Retired from current workspace; historical status: Reviewed; delete unconnected projector/schemas/helpers; fold live redaction into PlanRunner |
+| `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Retired from current workspace; historical status: Reviewed; consolidated failure handling/traversal and removed unused timeout configuration |
+| `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Retired from current workspace; historical status: Reviewed; merge schemas into contracts.ts, privatize serialization and delete file |
+| `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Retired from current workspace; historical status: Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Retired from current workspace; historical status: Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
+| `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Retired from current workspace; historical status: Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Retired from current workspace; historical status: Reviewed; pure two-argument reconciliation; resource checks owned by Supervisor; 27 focused tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Retired from current workspace; historical status: Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; runtime inputs 2 arguments to 1; one durable manual-mode authority; 19 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Retired from current workspace; historical status: Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
+| `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Retired from current workspace; historical status: Reviewed; one 14-field phase owner, durable evaluator authority, narrowed public surface, lifecycle/race regressions |
+| `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Retired from current workspace; historical status: Reviewed; owns result construction and existing decision/scoring loop |
+| `athena_ts/packages/athena-research/src/validation.ts` | 54 | Retired from current workspace; historical status: Reviewed; merged sole production use into supervisor/validation.ts and deleted |
+| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Retired from current workspace; historical status: Reviewed; deleted after full caller tracing proved standalone root unused |
+| `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Retired from current workspace; historical status: Reviewed; seven numeric/error/prediction/identity/direction cases |
+| `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Retired from current workspace; historical status: Reviewed; five empty/zero/formatting/pending/validation rendering cases |
+| `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Retired from current workspace; historical status: Reviewed; delete exclusive dead-API tests; live failure/evidence tests cover redaction |
+| `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Retired from current workspace; historical status: Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |
+| `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Retired from current workspace; historical status: Reviewed; 36 strict data/reference/snapshot/legacy-input cases; persistence tests own serialization |
+| `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Retired from current workspace; historical status: Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |
+| `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Retired from current workspace; historical status: Reviewed; real PlanRunner success/artifact/feedback retry plus evaluator decisions |
+| `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Retired from current workspace; historical status: Reviewed; file/directory evaluator, labels and invalid declarations |
+| `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Retired from current workspace; historical status: Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
+| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Retired from current workspace; historical status: Reviewed; 10 pure reconciliation cases; real missing-resource coverage moved to Supervisor tests |
+| `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Retired from current workspace; historical status: Reviewed; literal action contracts, durable manual-mode authority, policy/budget/dedup regressions; 19 tests pass |
+| `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Retired from current workspace; historical status: Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
+| `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Retired from current workspace; historical status: Reviewed; 47 deterministic flow, recovery, wake, stop, failure and phase-concurrency cases |
+| `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Retired from current workspace; historical status: Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |
+| `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Retired from current workspace; historical status: Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |
+| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Retired from current workspace; historical status: Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |
+| `athena_ts/vitest.workspace.ts` | 4 | Retired from current workspace; historical status: Pending |
 | `scripts/build.cjs` | 62 | Reviewed; absorb release composition behind `--package`; one parser/runner and preserved npm commands |
 | `scripts/check_code_style.py` | 162 | Reviewed; retain repository hook and its distinct AST/text rules; hard-rule gate passes |
 | `scripts/export_rust_contract_fixtures.py` | 374 | Reviewed; four parameters to zero, scan methods once, remove dead imports/constants; four fixture files export |
 | `scripts/gui_gateway_entry.py` | 26 | Reviewed; retain frozen-only `inspect.getsource` compatibility entry used by PyInstaller |
 | `scripts/prepare_examples_article.py` | 230 | Reviewed; merge single-use hash helper and reduce manifest writer from four parameters to two |
 | `scripts/probe_max_tokens.py` | 117 | Reviewed; retain cohesive manual diagnostic; remove prohibited future import; help path passes |
-| `scripts/release.cjs` | 60 | Reviewed; merge into build.cjs and delete duplicated parser/runner/composition file |
+| `scripts/release.cjs` | 60 | Retired from current workspace; historical status: Reviewed; merge into build.cjs and delete duplicated parser/runner/composition file |
 | `scripts/run_headless.py` | 112 | Reviewed; retain distinct headless/CI runtime entry with already-minimal one-argument helpers |

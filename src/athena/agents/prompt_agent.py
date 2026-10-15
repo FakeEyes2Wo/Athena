@@ -86,6 +86,7 @@ def register_prompt_agent(
     name: str | None = None,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     prompt_agent_type: str | None = None,
+    restrict_shell_workdir: bool = False,
 ) -> None:
     """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
 
@@ -104,8 +105,13 @@ def register_prompt_agent(
     """
 
     def factory(agent_id: str) -> AgentSpec:
+        """Build one registered agent with its workspace-scoped tools."""
         root = workspace(agent_id) if callable(workspace) else workspace
-        tools = generic_tool_registry(root, runtime=runtime)
+        tools = generic_tool_registry(
+            root,
+            runtime=runtime,
+            restrict_shell_workdir=restrict_shell_workdir,
+        )
         resolved = extra_tools() if callable(extra_tools) else extra_tools
         if resolved is not None:
             for spec in resolved.specs:

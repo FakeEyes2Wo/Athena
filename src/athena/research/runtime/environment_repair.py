@@ -83,6 +83,7 @@ def _callback_tools(actions: Mapping[str, RepairAction]) -> ToolRegistry:
         try:
             await callback()
         except asyncio.CancelledError:
+            # Trigger: an allowlisted repair callback is cancelled; let task cancellation propagate.
             raise
         except Exception:  # noqa: BLE001 - callback details stay off-model
             return {"status": "failed"}
@@ -154,10 +155,12 @@ async def _run_repair_agent(runtime: Any, actions: Mapping[str, RepairAction]) -
         )
         await asyncio.wait_for(agents.wait_run(run_id), timeout=REPAIR_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
+        # Trigger: the bounded Agent repair wait is cancelled; interrupt/reap its run, then propagate.
         if run_id is not None:
             await _interrupt_and_reap(agents, run_id)
         raise
     except TimeoutError as exc:
+        # Trigger: the repair Agent does not finish within REPAIR_TIMEOUT_SECONDS.
         if run_id is not None:
             await _interrupt_and_reap(agents, run_id)
         raise BaselineAuthorityError("environment repair timed out") from exc
@@ -217,8 +220,10 @@ async def preflight(
         try:
             await asyncio.wait_for(authority.load(), timeout=AUTHORITY_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
+            # Trigger: loading the external authority record is cancelled; preserve cancellation.
             raise
         except (TimeoutError, ConnectionError):
+            # Trigger: authority load exceeds its deadline or the authority connection is unavailable.
             if attempt >= MAX_REPAIR_ATTEMPTS:
                 await _audit(runtime, attempt, "unavailable")
                 raise BaselineAuthorityError(
@@ -233,12 +238,14 @@ async def preflight(
             try:
                 await _run_repair_agent(runtime, actions)
             except asyncio.CancelledError:
+                # Trigger: the repair Agent run is cancelled; preserve cancellation after its cleanup.
                 raise
             except Exception as exc:
                 await _audit(runtime, attempt + 1, "repair_failed")
                 raise BaselineAuthorityError("environment repair failed") from exc
             # The next loop iteration is the mandatory platform recheck.
         except BaselineAuthorityError:
+            # Trigger: authority preflight reports a nonrepairable invalid record or configuration.
             await _audit(runtime, attempt, "nonrepairable")
             raise BaselineAuthorityError(
                 "baseline authority preflight failed: nonrepairable"

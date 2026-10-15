@@ -56,6 +56,7 @@ class OutputEvent(BaseModel):
 
     @model_validator(mode="after")
     def validate_scope_metadata(self) -> "OutputEvent":
+        """Require session, scope, and scope ID to be present as one unit."""
         values = (self.session_id, self.scope, self.scope_id)
         if not (
             all(value is None for value in values)
@@ -97,6 +98,19 @@ def redact(text: str) -> str:
         else:
             redacted = pattern.sub("[REDACTED]", redacted)
     return redacted
+
+
+def bounded_redacted_tail(text: str, limit: int) -> str:
+    """Normalize a diagnostic and retain a redacted root-cause tail."""
+    if limit <= 0:
+        return ""
+    normalized = " ".join(redact(text).split())
+    if len(normalized) <= limit:
+        return normalized
+    marker = "…[earlier diagnostic omitted] "
+    if limit <= len(marker):
+        return normalized[-limit:]
+    return marker + normalized[-(limit - len(marker)) :]
 
 
 def sanitize_terminal_text(text: str) -> str:

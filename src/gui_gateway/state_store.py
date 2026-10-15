@@ -75,8 +75,10 @@ class GuiStateStore:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
+            # A first launch has no persisted GUI state yet.
             return GuiState()
         except (OSError, json.JSONDecodeError):
+            # Corrupt/unreadable preferences are quarantined before using defaults.
             self._backup_corrupt()
             return GuiState()
         if not isinstance(payload, dict):
@@ -122,6 +124,7 @@ class GuiStateStore:
                 try:
                     os.unlink(temp_name)
                 except OSError:
+                    # The operating system rejected this filesystem or transport operation.
                     pass
                 raise
 
@@ -132,4 +135,5 @@ class GuiStateStore:
             backup = self._path.with_name(f"{self._path.name}.corrupt-{stamp}")
             os.replace(self._path, backup)
         except OSError:
+            # The operating system rejected this filesystem or transport operation.
             pass

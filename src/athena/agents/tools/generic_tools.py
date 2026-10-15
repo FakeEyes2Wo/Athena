@@ -27,15 +27,16 @@ def _workspace_path(root: Path, path: str) -> Path:
     try:
         return resolve_workspace_path(root, path)
     except ValueError as exc:
+        # Trigger: the requested path is absolute or resolves outside the tool workspace.
         raise ValueError(
             f"{exc} Use a relative path inside your workspace ({root}); "
             "reach external files via shell_command instead."
         ) from None
 
 
-def _reject_framework_write(path_obj: Path) -> None:
+def _reject_framework_write(path_obj: Path, root: Path) -> None:
     """框架私有目录只读：agent 不得写 ``.athena/**``（state/tree/logs/artifacts）。"""
-    if _FRAMEWORK_OWNED_DIR in path_obj.parts:
+    if _FRAMEWORK_OWNED_DIR in path_obj.relative_to(root).parts:
         raise ValueError(
             f".athena/ is owned by the Athena runtime and is read-only for agents; "
             f"refusing to write {path_obj}"
@@ -43,7 +44,10 @@ def _reject_framework_write(path_obj: Path) -> None:
 
 
 def generic_tool_registry(
-    workspace: Path, *, runtime: "ExecutionRuntime | None" = None
+    workspace: Path,
+    *,
+    runtime: "ExecutionRuntime | None" = None,
+    restrict_shell_workdir: bool = False,
 ) -> ToolRegistry:
     """构造通用工具集：read_file / write_file / append_file + 可选 shell_command。
 
@@ -76,7 +80,7 @@ def generic_tool_registry(
         and a cut-off call writes nothing at all.
         """
         path_obj = _workspace_path(root, path)
-        _reject_framework_write(path_obj)
+        _reject_framework_write(path_obj, root)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         # newline="" 关掉换行翻译：内容按模型给出的样子逐字节落盘。开着的话
         # Windows 上每个 \n 会变成 \r\n，写回的字节数与 content 对不上，
@@ -94,7 +98,7 @@ def generic_tool_registry(
         running size so you can tell how much has landed.
         """
         path_obj = _workspace_path(root, path)
-        _reject_framework_write(path_obj)
+        _reject_framework_write(path_obj, root)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         with path_obj.open("a", encoding="utf-8", newline="") as handle:
             handle.write(content)
@@ -109,5 +113,10 @@ def generic_tool_registry(
     reg.register(write_file)
     reg.register(append_file)
     if runtime is not None:
-        reg.register(runtime.shell_command_tool(root))
+        shell = (
+            runtime.shell_command_tool(root, restrict_workdir=True)
+            if restrict_shell_workdir
+            else runtime.shell_command_tool(root)
+        )
+        reg.register(shell)
     return reg

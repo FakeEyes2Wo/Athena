@@ -147,6 +147,7 @@ def build_services(
         source: ProgressSource,
         persist: bool,
     ) -> None:
+        """Publish clarification progress with its originating event scope."""
         await events.publish_output(
             source=source,
             channel="error" if stage == "failure" else "text",
@@ -205,7 +206,7 @@ def build_services(
         options=RuntimeOptions(
             ideation=config.research.policy.ideation,
             direction=config.research.policy.direction,
-            tolerance=config.research.policy.tolerance,
+            tolerance=state.tolerance,
             auto_validate=config.research.policy.auto_validate,
             skip_validate=config.research.policy.skip_validate,
         ),
@@ -239,7 +240,7 @@ def wire_workflow(runtime: Any) -> None:
             agents=services.infrastructure.agents,
             workspaces=services.experiments.git,
             documents=ExperimentDocumentProjector(
-                document_root=config.paths.root / ".athena" / "exp_docs",
+                document_root=config.paths.athena / "exp_docs",
                 evaluator_roots=(
                     config.paths.workspaces / "evaluator" / "evaluate",
                     config.paths.workspaces / "evaluator",
@@ -267,7 +268,7 @@ def wire_workflow(runtime: Any) -> None:
             scheduler=Scheduler(),
             recovery=reconcile_plans,
             direction=config.research.policy.direction,
-            tolerance=config.research.policy.tolerance,
+            tolerance=runtime.session.options.tolerance,
             on_plan_settled=runtime.release_lease,
         ),
     )
@@ -396,6 +397,8 @@ def _load_state(config: ResearchConfig) -> ResearchState:
             phase="PREPARE",
             search_limit=config.research.search.search_limit,
             concurrency=config.research.search.concurrency,
+            experiment_timeout_s=config.dependencies.execution.experiment_timeout_s,
+            tolerance=config.research.policy.tolerance,
             ideator_count=config.research.search.ideator_count,
             hypotheses_per_ideator=config.research.search.hypotheses_per_ideator,
         )
@@ -417,7 +420,13 @@ def _load_state(config: ResearchConfig) -> ResearchState:
             state.eda_dir = None
     if state.status == "FAILED":
         state.status = "IDLE"
-    state.experiment_timeout_s = config.dependencies.execution.experiment_timeout_s
+    # A checkpoint's experiment timeout is a GUI/session setting. Only legacy
+    # states without the field fall back to the configured execution default.
+    if "experiment_timeout_s" not in state.model_fields_set:
+        state.experiment_timeout_s = config.dependencies.execution.experiment_timeout_s
+    # Older state files predate session-scoped tolerance persistence.
+    if state.tolerance is None:
+        state.tolerance = config.research.policy.tolerance
     if config.dependencies.execution.data_root is not None and state.data_root is None:
         state.data_root = str(config.dependencies.execution.data_root)
     return state

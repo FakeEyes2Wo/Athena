@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.research.supervisor.plan_runtime import CompletedPlanTurn
 from athena.research.supervisor.plans import PlanState
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.search_loop import SearchLoop
@@ -156,7 +157,7 @@ async def test_search_loop_persists_through_public_plan_owner_surface() -> None:
     )
 
     await loop._apply_completed_turn(
-        SimpleNamespace(plan_id="hyp_public", decision=None, result=None)
+        CompletedPlanTurn(plan_id="hyp_public", decision=None, result=None)
     )
 
     assert plans.persisted is True

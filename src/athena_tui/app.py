@@ -27,6 +27,7 @@ from athena_tui.render import (
     render_header,
     render_history_lines,
     render_status,
+    render_welcome,
 )
 from athena_tui.state import (
     COMPOSER,
@@ -46,6 +47,7 @@ from athena_tui.state import (
 try:
     from pyperclip import PyperclipException
 except ImportError:
+    # The optional clipboard integration is unavailable in this installed dependency set.
     _CLIPBOARD_ERRORS: tuple[type[Exception], ...] = ()
 else:
     _CLIPBOARD_ERRORS = (PyperclipException,)
@@ -58,6 +60,9 @@ _STYLE = Style.from_dict(
     {
         "header.brand": "bold",
         "header.path": "#8b949e",
+        "logo": "bold",
+        "logo.eye": "#c99500 bold",
+        "logo.perch": "#8b949e",
         "phase.running": "#2dd4bf bold",
         "phase.waiting": "#fbbf24 bold",
         "phase.done": "#22c55e bold",
@@ -94,7 +99,9 @@ def _create_system_clipboard() -> Clipboard:
         from prompt_toolkit.clipboard.pyperclip import (
             PyperclipClipboard,
         )  # 延迟导入避免循环依赖
+    # Some prompt_toolkit releases do not ship the system clipboard adapter.
     except ImportError:
+        # The optional clipboard integration is unavailable in this installed dependency set.
         return InMemoryClipboard()
     return _ResilientClipboard(PyperclipClipboard())
 
@@ -111,14 +118,18 @@ class _ResilientClipboard(Clipboard):
         self._fallback.set_data(data)
         try:
             self._system.set_data(data)
+        # An unavailable clipboard backend falls back to the in-memory buffer.
         except _CLIPBOARD_ERRORS:
+            # The operating-system clipboard backend is unavailable or rejected this operation.
             self._system = self._fallback
 
     def get_data(self):
         """Return system text, falling back to the last local copy on failure."""
         try:
             return self._system.get_data()
+        # Clipboard reads can fail when the OS backend is unavailable.
         except _CLIPBOARD_ERRORS:
+            # The operating-system clipboard backend is unavailable or rejected this operation.
             self._system = self._fallback
             return self._fallback.get_data()
 
@@ -407,6 +418,8 @@ class AthenaApp:
     def _history_fragments(self) -> StyleAndTextTuples:
         lines = render_history_lines(self.state, self._history_content_width())
         height = self._history_height()
+        if not lines and self._history_selection_lines is None:
+            return render_welcome(self._history_content_width(), height)
         total = len(lines)
         end = (
             total
@@ -496,8 +509,7 @@ class AthenaApp:
                 for char in fragment:
                     width = max(0, get_cwidth(char))
                     char_end = column + width
-                    if char_end > start and column < end:
-                        selected += char
+                    selected += char if char_end > start and column < end else ""
                     column = char_end
             selected_lines.append(selected.rstrip())
         return "\n".join(selected_lines)

@@ -83,7 +83,12 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            # A malformed request header must not tear down the HTTP connection.
+            self._send(HTTPStatus.BAD_REQUEST, {"error": "Content-Length 必须是整数"})
+            return
         if length <= 0:
             self._send(
                 HTTPStatus.BAD_REQUEST,
@@ -93,12 +98,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            # The request body is not UTF-8 JSON; model execution has not started.
             self._send(HTTPStatus.BAD_REQUEST, {"error": f"body 不是合法 JSON：{exc}"})
             return
 
         try:
             request = self.bundle.validate(payload)
         except ValidationError as exc:
+            # The decoded JSON violates the frozen model's input contract.
             self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
@@ -153,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        # Console interruption ends serving; the finally block releases the socket.
         print("\nstopped", file=sys.stderr)
     finally:
         server.server_close()

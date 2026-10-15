@@ -201,11 +201,12 @@ def test_a_non_path_dataset_argument_is_left_alone(tmp_path, monkeypatch) -> Non
     assert f"Dataset path: {url}" in research.task.text
 
 
-def test_tolerance_rejects_negative_values() -> None:
+@pytest.mark.parametrize("value", ["-0.1", "nan", "inf", "-inf"])
+def test_tolerance_rejects_negative_or_nonfinite_values(value) -> None:
     """``PlanInput.tolerance`` 声明了 ge=0；负值该在解析期就失败，而不是烧掉一轮 PREPARE。"""
     with pytest.raises(SystemExit):
         cli._build_parser().parse_args(
-            ["run", "--project", "p", "--data", "d.csv", "--tolerance", "-0.1"]
+            ["run", "--project", "p", "--data", "d.csv", f"--tolerance={value}"]
         )
 
 

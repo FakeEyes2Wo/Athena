@@ -28,6 +28,7 @@ def evaluate_recall(
     total = len(gold)
 
     def stage(name: str, found: int, previous: int) -> StageRecall:
+        """Record recall gained at one pipeline stage and losses before it."""
         return StageRecall(
             stage=name,
             found=found,

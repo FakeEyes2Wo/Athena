@@ -57,6 +57,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const [pickerOpen, setPickerOpen] = useState(true);
   const [switching, setSwitching] = useState(false);
   const mountedRef = useRef(true);
+  const rootRequestEpochRef = useRef(0);
   const activeSwitchRef = useRef<Promise<void> | null>(null);
   const queuedIntentRef = useRef<WorkspaceIntent | null>(null);
   const [browsing, setBrowsing] = useState(false);
@@ -64,11 +65,14 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const [error, setError] = useState<string | null>(null);
 
   const loadActiveRoot = useCallback((isCurrent: () => boolean) => {
+    const requestEpoch = ++rootRequestEpochRef.current;
+    const isLatestRequest = () =>
+      isCurrent() && requestEpoch === rootRequestEpochRef.current;
     const rememberedRoots = loadRecentRoots();
     setRecentRoots(rememberedRoots);
     return settingsGet()
       .then((settings) => {
-        if (!isCurrent()) return;
+        if (!isLatestRequest()) return;
         const root = settings.project_root || null;
         setCurrentRoot(root);
         setError(null);
@@ -77,7 +81,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
         setReady(true);
       })
       .catch((err: unknown) => {
-        if (!isCurrent()) return;
+        if (!isLatestRequest()) return;
         setError(errorMessage(err));
         setReady(true);
       });
@@ -103,6 +107,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
     if (!mountedRef.current) return Promise.resolve();
     const trimmed = path.trim();
     if (!trimmed) return Promise.resolve();
+    rootRequestEpochRef.current += 1;
     queuedIntentRef.current = { path: trimmed, sessionId: sessionId ?? null };
     setSwitching(true);
     setError(null);
@@ -136,6 +141,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
           }
         }
       } finally {
+        rootRequestEpochRef.current += 1;
         activeSwitchRef.current = null;
         if (mountedRef.current) setSwitching(false);
       }

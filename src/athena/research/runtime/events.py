@@ -302,6 +302,7 @@ class RuntimeEvents:
                 try:
                     args_text = json.dumps(args, ensure_ascii=False)
                 except (TypeError, ValueError):
+                    # Trigger: a tool argument contains a non-JSON value; display its string form in the event.
                     args_text = str(args)
                 text = f"{name}({args_text})"
             else:
@@ -331,6 +332,7 @@ class RuntimeEvents:
         try:
             worktree = self._supervisor.workspace_path(plan)
         except KeyError:
+            # Trigger: the plan has no registered worktree entry while formatting its file-tool event.
             return
         text = f"{path}\nworktree: {worktree}"
         if tool == "write_file":
@@ -469,5 +471,6 @@ class RuntimeEvents:
             try:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
+                # Trigger: an output-log line is not a complete JSON event; keep later valid events.
                 logger.warning("skipping malformed output log line")
         return events

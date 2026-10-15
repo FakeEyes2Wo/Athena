@@ -5,6 +5,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
@@ -15,9 +19,14 @@ from athena.research.clarification.context import (
 )
 from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.supervisor.deps import SupervisorDeps
-from athena.research.supervisor.events import wait_run_events
-from athena.research.supervisor.experiment import PlanTurnResult, load_agent_result
+from athena.research.supervisor.events import bounded_redacted_tail, wait_run_events
+from athena.research.supervisor.experiment import (
+    PlanTurnResult,
+    load_agent_result,
+    load_best,
+)
 from athena.research.supervisor.plans import (
+    PlanBest,
     PlanDecision,
     PlanFailure,
     PlanInput,
@@ -27,6 +36,7 @@ from athena.research.supervisor.prompt_context import (
     data_contract_block,
     handoff_block,
     hypothesis_block,
+    trusted_score_block,
 )
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.settlement import PlanSettlement
@@ -87,11 +97,6 @@ class PlanRuntime:
         self.save_state()
         await self.publish_state()
 
-    @staticmethod
-    def _previous_failure_block(summary: str | None) -> str:
-        failure = PlanFailure.from_summary(summary)
-        return failure.to_prompt_block() if failure is not None else ""
-
     def _corpus_block(self, plan_input: PlanInput) -> str:
         """Render corpus pointers named by the Plan's frozen hypothesis."""
         corpus_ref = getattr(self._state, "corpus_ref", None)
@@ -114,8 +119,10 @@ class PlanRuntime:
         state: PlanState,
         plan_input: PlanInput,
         previous_failure: str | None,
+        best: PlanBest | None = None,
     ) -> str:
         """Assemble the complete model-visible prompt for one Plan turn."""
+        previous = PlanFailure.from_summary(previous_failure)
         hypothesis = plan_input.hypothesis
         hypothesis_context = (
             hypothesis_block(
@@ -136,11 +143,31 @@ class PlanRuntime:
                 if plan_input.human_context
                 else ""
             )
+            + (
+                f"\n\nWorkspace for this Plan: {self.workspace_path(plan_id).resolve()}\n"
+                "The file tools and shell default working directory are bound to "
+                "this isolated workspace. Its inherited code, experiment.json, "
+                "predictions, and reports belong to this Plan. Use relative file "
+                "paths here; omit shell workdir or choose a directory inside it. "
+                "ATHENA_ENV_ROOT and the project workspace named in the general "
+                "task are the shared dependency environment. Install dependencies "
+                "with uv --project targeting that environment while keeping "
+                "experiment commands in this Plan workspace. Read external "
+                "datasets through their absolute file paths."
+            )
             + hypothesis_context
+            + trusted_score_block(
+                reference_metric=plan_input.reference_metric,
+                direction=plan_input.direction,
+                tolerance=plan_input.tolerance,
+                best_metric=best.metric if best is not None else None,
+                best_commit=best.commit if best is not None else None,
+                stale_rounds=state.stale_rounds,
+            )
             + handoff_block(plan_input.eval_handoff)
             + self._corpus_block(plan_input)
             + data_contract_block(self._state.data_contract or "")
-            + self._previous_failure_block(previous_failure)
+            + (previous.to_prompt_block() if previous is not None else "")
         )
 
     async def _confirmed_task_context(self, state: ResearchState | None = None) -> str:
@@ -155,18 +182,23 @@ class PlanRuntime:
         """Run one Plan Agent turn and persist failures for the next prompt."""
         state = self._state.plans[plan_id]
         previous_failure = state.last_failure
-        state = state.model_copy(
-            update={"turns_used": state.turns_used + 1, "last_failure": None}
-        )
+        # Keep the diagnostic durable while repair is in progress so a restart
+        # can resume with the same cause. A trusted score clears it below.
+        state = state.model_copy(update={"turns_used": state.turns_used + 1})
         self._state.plans[plan_id] = state
         await self.persist_state()
         try:
             plan_input = await self.plan_input(plan_id)
+            best = (
+                await load_best(state.best_ref, self._deps.runtime.store)
+                if state.kind == "SEARCH" and state.best_ref is not None
+                else None
+            )
             run_id = await self._deps.runtime.agents.followup(
                 plan_id,
                 {
                     "content": self._turn_prompt(
-                        plan_id, state, plan_input, previous_failure
+                        plan_id, state, plan_input, previous_failure, best
                     ),
                     "context_refs": [state.context_ref],
                 },
@@ -180,32 +212,101 @@ class PlanRuntime:
                     run_id,
                     lambda kind, ref, data: publish(plan_id, kind, ref, data),
                 )
-            decision = await load_agent_result(
-                summary, self._deps.runtime.store, PlanDecision
-            )
-            if decision is None:
+        except AgentCommandError as exc:
+            # Trigger: Agent submission/wait fails; only a closed command during pause is tolerated below.
+            if (
+                self._state.status != "RUNNING"
+                and exc.code is ErrorCode.CLOSED
+                and str(exc) == "runtime paused"
+            ):
+                # AgentRuntime rejects followup after pause() closes its
+                # dispatch gate. The turn never ran, so return its reservation.
+                current = self._state.plans.get(plan_id)
+                if current is not None:
+                    self._state.plans[plan_id] = current.model_copy(
+                        update={"turns_used": max(0, current.turns_used - 1)}
+                    )
+                    await self.persist_state()
                 return CompletedPlanTurn(plan_id, None, None)
-        except Exception as exc:  # noqa: BLE001 - normalize external turn boundary
             failure = PlanFailure(
                 kind="turn_infrastructure_failed",
-                detail=f"{type(exc).__name__}: {' '.join(str(exc).split())}",
+                detail=bounded_redacted_tail(f"{type(exc).__name__}: {exc}", 1000),
             )
             await self._record_failure(plan_id, failure)
             return CompletedPlanTurn(plan_id, None, None, failure)
-        if decision.decision == "abandon" and state.best_ref is None:
+        except Exception as exc:  # noqa: BLE001 - normalize external turn boundary
+            failure = PlanFailure(
+                kind="turn_infrastructure_failed",
+                detail=bounded_redacted_tail(f"{type(exc).__name__}: {exc}", 1000),
+            )
+            await self._record_failure(plan_id, failure)
+            return CompletedPlanTurn(plan_id, None, None, failure)
+        status = getattr(summary.status, "value", summary.status)
+        if status != "completed":
+            diagnostic = (
+                getattr(summary, "error", None)
+                or getattr(summary, "reason", None)
+                or "Plan Agent did not complete"
+            )
+            failure = PlanFailure(
+                kind="turn_infrastructure_failed",
+                detail=bounded_redacted_tail(
+                    f"Plan Agent status={status}: {diagnostic}", 1000
+                ),
+            )
+            await self._record_failure(plan_id, failure)
+            return CompletedPlanTurn(plan_id, None, None, failure)
+        try:
+            decision = await load_agent_result(
+                summary, self._deps.runtime.store, PlanDecision
+            )
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            # Trigger: the Agent result is malformed JSON or cannot validate as a PlanDecision.
+            failure = PlanFailure(
+                kind="turn_output_invalid",
+                detail=bounded_redacted_tail(f"{type(exc).__name__}: {exc}", 1000),
+            )
+            await self._record_failure(plan_id, failure)
+            return CompletedPlanTurn(plan_id, None, None, failure)
+        if decision is None:
+            failure = PlanFailure(
+                kind="turn_output_invalid",
+                detail=(
+                    "missing structured PlanDecision result; return decision and reason"
+                ),
+            )
+            await self._record_failure(plan_id, failure)
+            return CompletedPlanTurn(plan_id, None, None, failure)
+        if decision.decision == "abandon":
+            await self._record_failure(
+                plan_id,
+                PlanFailure(kind="agent_abandoned", detail=decision.reason),
+            )
             return CompletedPlanTurn(plan_id, decision, None)
         if plan_id not in self._state.plans:
             return CompletedPlanTurn(plan_id, None, None)
+        if (
+            decision.decision == "submit"
+            and state.kind == "SEARCH"
+            and state.best_ref is not None
+        ):
+            # A submit selects only the persisted trusted best. Any workspace
+            # edits since that score are still unscored and cannot replace it.
+            return CompletedPlanTurn(plan_id, decision, None)
         result = await self._deps.research.plan(plan_id, state)
         await self._record_turn_failure(plan_id, result)
         return CompletedPlanTurn(plan_id, decision, result)
 
     async def _record_turn_failure(self, plan_id: str, result: PlanTurnResult) -> None:
         """Persist a failed turn's reason for the immediately following prompt."""
-        if result.error:
+        if result.kind == "scored":
+            result.next_state = result.next_state.model_copy(
+                update={"last_failure": None}
+            )
+        else:
             await self._record_failure(
                 plan_id,
-                PlanFailure(kind=result.kind, detail=result.error),
+                PlanFailure(kind=result.kind, detail=result.error or result.kind),
             )
 
     async def _record_failure(self, plan_id: str, failure: PlanFailure) -> None:
@@ -213,8 +314,10 @@ class PlanRuntime:
         current = self._state.plans.get(plan_id)
         if current is None:
             return
+        prefix = f"{failure.kind}: "
+        detail = bounded_redacted_tail(failure.detail, 1200 - len(prefix))
         self._state.plans[plan_id] = current.model_copy(
-            update={"last_failure": failure.to_summary()[:1200]}
+            update={"last_failure": prefix + detail}
         )
         await self.persist_state()
 
@@ -300,7 +403,11 @@ class PlanRuntime:
             kind="SEARCH",
             context_ref=context_ref,
             turns_used=0,
-            turn_limit=hypothesis.turn_limit,
+            turn_limit=(
+                hypothesis.turn_limit
+                if hypothesis.turn_limit is not None
+                else MAX_PLAN_TURNS
+            ),
             patience=hypothesis.patience,
         )
         self.save_state()
@@ -345,6 +452,7 @@ class PlanRuntime:
             try:
                 context_json = await self._deps.runtime.store.get_text(plan.context_ref)
             except (OSError, ValueError):
+                # Trigger: a checkpoint's context artifact is unavailable or cannot be decoded for resume.
                 artifact_presence[plan.context_ref] = False
                 workspace_presence[plan_id] = False
                 continue
@@ -380,6 +488,7 @@ class PlanRuntime:
                     reference.commit, plan_id
                 )
             except ConfirmedTaskContextError as exc:
+                # Trigger: a legacy Plan has no confirmed task context, so recovery parks it safely.
                 logger.warning(
                     "parking legacy Plan %s without confirmed task context: %s",
                     plan_id,
@@ -387,6 +496,7 @@ class PlanRuntime:
                 )
                 workspace_presence[plan_id] = False
             except (GitWorkspaceError, KeyError, OSError, ValueError):
+                # Trigger: checkpoint IDs, experiment references, or worktree paths cannot be restored.
                 workspace_presence[plan_id] = False
             else:
                 self._run.add_branch(plan_id, branch)
@@ -435,6 +545,7 @@ class PlanRuntime:
             hypothesis = self._tree.get_hypothesis(plan_id)
             reference = self._tree.get_experiment(plan_input.reference_experiment_id)
         except KeyError as exc:
+            # Trigger: the Plan or reference experiment is absent from the recovered research tree.
             logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
             return False
         try:
@@ -456,6 +567,7 @@ class PlanRuntime:
                 ),
             )
         except (KeyError, ValueError) as exc:
+            # Trigger: recreated experiment state conflicts with the recovered tree's IDs or invariants.
             logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
             return False
         return True
@@ -540,6 +652,7 @@ class PlanRuntime:
             try:
                 cached = json.loads(await self._deps.runtime.store.get_text(ref))
             except (OSError, ValueError):
+                # Trigger: the cached task-research artifact is unavailable or is not valid JSON.
                 self._state.task_research_ref = None
                 ref = None
                 await self.persist_state()

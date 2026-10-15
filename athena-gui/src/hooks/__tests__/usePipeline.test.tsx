@@ -803,6 +803,292 @@ describe("usePipeline", () => {
     await waitFor(() => expect(result.current.humanRequests).toHaveLength(0));
   });
 
+  it("ignores stale reply refresh and cleanup after switching sessions", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalled());
+
+    const oldRequest = {
+      request_id: "req-old",
+      session_id: "default",
+      scope_id: "draft-old",
+      scope_kind: "clarification" as const,
+      prompt: "Old session question?",
+      choices: [],
+      allow_custom: true,
+      allow_skip: false,
+      created_at: "2026-09-01T10:00:00Z",
+      expires_at: "2026-09-01T10:02:00Z",
+    };
+    const newRequest = {
+      ...oldRequest,
+      request_id: "req-new",
+      session_id: "fresh",
+      scope_id: "draft-new",
+      prompt: "Current session question?",
+    };
+    const emitRequest = (request: typeof oldRequest) => {
+      act(() => {
+        pipelineEventHandler?.({
+          kind: "human_request",
+          data: { session_id: request.session_id, action: "created", request },
+        });
+      });
+    };
+
+    emitRequest(oldRequest);
+    let rejectOldReply!: (error: Error & { code?: string }) => void;
+    let resolveOldRefresh!: (value: { requests: typeof oldRequest[] }) => void;
+    let resolveNewReply!: (value: { replied: boolean }) => void;
+    bridgeMocks.humanReply
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOldReply = reject; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNewReply = resolve; }));
+    bridgeMocks.humanPending.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveOldRefresh = resolve; }),
+    );
+
+    let oldReply!: Promise<unknown>;
+    act(() => {
+      oldReply = result.current.replyToHumanRequest("req-old", { kind: "skip" }).catch((error) => error);
+    });
+    await act(async () => {
+      rejectOldReply(Object.assign(new Error("old request expired"), { code: "stale_request" }));
+      await waitFor(() => expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1));
+    });
+    await act(async () => {
+      await result.current.switchSession("fresh");
+    });
+    emitRequest(newRequest);
+
+    act(() => {
+      void result.current.replyToHumanRequest("req-new", { kind: "skip" });
+    });
+    expect(result.current.settlingRequestId).toBe("req-new");
+
+    await act(async () => {
+      resolveOldRefresh({ requests: [oldRequest] });
+      await oldReply;
+    });
+
+    expect(result.current.humanRequests.map((request) => request.request_id)).toEqual(["req-new"]);
+    expect(result.current.humanPendingError).toBeNull();
+    expect(result.current.settlingRequestId).toBe("req-new");
+    await act(async () => {
+      await result.current.replyToHumanRequest("req-new", { kind: "skip" });
+    });
+    expect(bridgeMocks.humanReply).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveNewReply({ replied: true });
+    });
+    expect(result.current.settlingRequestId).toBeNull();
+  });
+
+  it("does not apply an old request refresh after a newer question in the same session", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalled());
+    const oldRequest = {
+      request_id: "req-old-same-session",
+      session_id: "default",
+      scope_id: "draft-1",
+      scope_kind: "clarification" as const,
+      prompt: "First question?",
+      choices: [],
+      allow_custom: true,
+      allow_skip: true,
+      created_at: "2026-09-01T10:00:00Z",
+      expires_at: "2026-09-01T10:02:00Z",
+    };
+    const newRequest = { ...oldRequest, request_id: "req-new-same-session", prompt: "Next question?" };
+    const emitRequest = (request: typeof oldRequest) => act(() => {
+      pipelineEventHandler?.({
+        kind: "human_request",
+        data: { session_id: "default", action: "created", request },
+      });
+    });
+    emitRequest(oldRequest);
+
+    let rejectOldReply!: (error: Error & { code?: string }) => void;
+    let resolveOldRefresh!: (value: { requests: typeof oldRequest[] }) => void;
+    let resolveNewReply!: (value: { replied: boolean }) => void;
+    bridgeMocks.humanReply
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOldReply = reject; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNewReply = resolve; }));
+    bridgeMocks.humanPending.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveOldRefresh = resolve; }),
+    );
+
+    let oldReply!: Promise<unknown>;
+    act(() => {
+      oldReply = result.current.replyToHumanRequest("req-old-same-session", { kind: "skip" }).catch((error) => error);
+    });
+    await act(async () => {
+      rejectOldReply(Object.assign(new Error("old request expired"), { code: "stale_request" }));
+      await waitFor(() => expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1));
+    });
+    emitRequest(newRequest);
+    act(() => {
+      void result.current.replyToHumanRequest("req-new-same-session", { kind: "skip" });
+    });
+
+    await act(async () => {
+      resolveOldRefresh({ requests: [oldRequest] });
+      await oldReply;
+    });
+
+    expect(result.current.humanRequests.map((request) => request.request_id)).toEqual([
+      "req-old-same-session",
+      "req-new-same-session",
+    ]);
+    expect(result.current.humanPendingError).toBeNull();
+    expect(result.current.settlingRequestId).toBe("req-new-same-session");
+    await act(async () => { resolveNewReply({ replied: true }); });
+  });
+
+  it("records an old same-session success without clearing the newer reply error", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalled());
+    const oldRequest = {
+      request_id: "req-old-success",
+      session_id: "default",
+      scope_id: "draft-1",
+      scope_kind: "clarification" as const,
+      prompt: "First question?",
+      choices: [],
+      allow_custom: true,
+      allow_skip: true,
+      created_at: "2026-09-01T10:00:00Z",
+      expires_at: "2026-09-01T10:02:00Z",
+    };
+    const newRequest = { ...oldRequest, request_id: "req-new-failure", prompt: "Next question?" };
+    const emitRequest = (request: typeof oldRequest) => act(() => {
+      pipelineEventHandler?.({
+        kind: "human_request",
+        data: { session_id: "default", action: "created", request },
+      });
+    });
+    emitRequest(oldRequest);
+
+    let resolveOldReply!: (value: { replied: boolean }) => void;
+    let rejectNewReply!: (error: Error) => void;
+    bridgeMocks.humanReply
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldReply = resolve; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectNewReply = reject; }));
+    act(() => {
+      void result.current.replyToHumanRequest("req-old-success", { kind: "text", text: "old answer" });
+    });
+    emitRequest(newRequest);
+    act(() => {
+      void result.current.replyToHumanRequest("req-new-failure", { kind: "skip" }).catch(() => undefined);
+    });
+    await act(async () => { rejectNewReply(new Error("new reply failed")); });
+    expect(result.current.humanPendingError).toBe("new reply failed");
+
+    await act(async () => { resolveOldReply({ replied: true }); });
+    expect(result.current.viewModel.messages.some((message) =>
+      message.role === "user" && message.content === "old answer",
+    )).toBe(true);
+    expect(result.current.humanRequests.map((request) => request.request_id)).toEqual([
+      "req-new-failure",
+    ]);
+    expect(result.current.humanPendingError).toBe("new reply failed");
+  });
+
+  it("does not publish an old refresh error after a newer same-session question", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalled());
+    const oldRequest = {
+      request_id: "req-old-refresh-error",
+      session_id: "default",
+      scope_id: "draft-1",
+      scope_kind: "clarification" as const,
+      prompt: "First question?",
+      choices: [],
+      allow_custom: true,
+      allow_skip: true,
+      created_at: "2026-09-01T10:00:00Z",
+      expires_at: "2026-09-01T10:02:00Z",
+    };
+    const newRequest = { ...oldRequest, request_id: "req-new-refresh-error", prompt: "Next question?" };
+    const emitRequest = (request: typeof oldRequest) => act(() => {
+      pipelineEventHandler?.({
+        kind: "human_request",
+        data: { session_id: "default", action: "created", request },
+      });
+    });
+    emitRequest(oldRequest);
+    let rejectOldReply!: (error: Error & { code?: string }) => void;
+    let rejectOldRefresh!: (error: Error) => void;
+    bridgeMocks.humanReply.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectOldReply = reject; }),
+    );
+    bridgeMocks.humanPending.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectOldRefresh = reject; }),
+    );
+
+    let oldReply!: Promise<unknown>;
+    act(() => {
+      oldReply = result.current.replyToHumanRequest("req-old-refresh-error", { kind: "skip" }).catch((error) => error);
+    });
+    await act(async () => {
+      rejectOldReply(Object.assign(new Error("old request expired"), { code: "stale_request" }));
+      await waitFor(() => expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1));
+    });
+    emitRequest(newRequest);
+    await act(async () => {
+      rejectOldRefresh(new Error("old refresh failed"));
+      await oldReply;
+    });
+
+    expect(result.current.humanRequests.map((request) => request.request_id)).toEqual([
+      "req-old-refresh-error",
+      "req-new-refresh-error",
+    ]);
+    expect(result.current.humanPendingError).toBeNull();
+  });
+
+  it("keeps the current reply error when polling returns the unchanged request", async () => {
+    vi.useFakeTimers();
+    const request = {
+      request_id: "req-unchanged-poll",
+      session_id: "default",
+      scope_id: "draft-1",
+      scope_kind: "clarification" as const,
+      prompt: "Current question?",
+      choices: [{ label: "Continue", value: "continue" }],
+      allow_custom: true,
+      allow_skip: true,
+      created_at: "2026-09-01T10:00:00Z",
+      expires_at: "2026-09-01T10:02:00Z",
+    };
+    bridgeMocks.humanPending
+      .mockResolvedValueOnce({ requests: [request] })
+      .mockResolvedValue({
+        requests: [{ ...request, choices: [{ value: "continue", label: "Continue" }] }],
+      });
+    let rejectReply!: (error: Error) => void;
+    bridgeMocks.humanReply.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectReply = reject; }),
+    );
+    const { result } = renderHook(() => usePipeline());
+    try {
+      await act(async () => { await result.current.startClarification("predict churn"); });
+      expect(result.current.humanRequests.map((item) => item.request_id)).toEqual([request.request_id]);
+      expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(1);
+      act(() => {
+        void result.current.replyToHumanRequest(request.request_id, { kind: "skip" }).catch(() => undefined);
+      });
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+      expect(bridgeMocks.humanPending).toHaveBeenCalledTimes(2);
+      await act(async () => { rejectReply(new Error("reply failed")); });
+
+      expect(result.current.humanPendingError).toBe("reply failed");
+      expect(result.current.humanRequests.map((item) => item.request_id)).toEqual([request.request_id]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps human-request polling single-flight while a backend request is pending", async () => {
     vi.useFakeTimers();
     let resolvePending!: (value: { requests: [] }) => void;
@@ -1215,18 +1501,15 @@ describe("usePipeline", () => {
   it("does not persist title changes for optimistic-only sessions", async () => {
     bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
-    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    const { result, unmount } = renderHook(() => usePipeline("C:/workspace"));
     await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
 
     bridgeMocks.sessionSwitch.mockImplementation(() => new Promise(() => {}));
     act(() => result.current.newSession());
     const optimisticId = result.current.currentSessionId;
-    await act(async () => {
-      await result.current.sendPrompt("Optimistic title");
-    });
-
-    expect(result.current.sessions).toContainEqual({ id: optimisticId, title: "Optimistic title" });
+    expect(result.current.sessions.some((session) => session.id === optimisticId)).toBe(true);
     expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "default", title: "新会话" }]);
+    unmount();
   });
 
   it("waits for new-session creation before deleting it", async () => {
@@ -1257,6 +1540,57 @@ describe("usePipeline", () => {
 
     expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(newId);
     expect(result.current.sessions.some((session) => session.id === newId)).toBe(false);
+  });
+
+  it("waits for the new session runtime before starting its first task", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveCreation: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "default") return Promise.resolve({ records: [], sessions: ["default"] });
+      return new Promise((resolve) => {
+        resolveCreation = resolve;
+      });
+    });
+
+    act(() => result.current.newSession());
+    const newId = result.current.currentSessionId;
+    let sending: Promise<void> | undefined;
+    act(() => {
+      sending = result.current.sendPrompt("predict churn");
+    });
+
+    expect(bridgeMocks.taskClarificationStart).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveCreation?.({ records: [], sessions: ["default", newId] });
+      await sending;
+    });
+
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("predict churn");
+    expect(result.current.currentSessionId).toBe(newId);
+  });
+
+  it("allows a task in the restored session after new-session creation fails", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "default") return Promise.resolve({ records: [], sessions: ["default"] });
+      return Promise.reject(new Error("runtime swap failed"));
+    });
+    act(() => result.current.newSession());
+
+    await waitFor(() => expect(result.current.currentSessionId).toBe("default"));
+    await waitFor(() => expect(
+      result.current.viewModel.messages.some((message) => message.content.includes("runtime swap failed")),
+    ).toBe(true));
+
+    await act(async () => {
+      await result.current.sendPrompt("new task in the restored session");
+    });
+
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("new task in the restored session");
   });
 
   it("keeps same-millisecond new sessions unique with independent pending deletions", async () => {
@@ -1454,6 +1788,138 @@ describe("usePipeline", () => {
       resumeAvailable: true,
       resumeReason: "failed",
     });
+  });
+
+  it("restores the canonical ready draft when attaching an interrupted session", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [{ type: "user", seq: 1, text: "predict churn" }],
+      sessions: ["default"],
+      clarification: readyDraft,
+    });
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(result.current.activeDraft?.draftId).toBe("draft-1"));
+
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+    expect(result.current.viewModel.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: "predict churn" }),
+      expect.objectContaining({
+        kind: "intent-preview",
+        started: false,
+        preview: expect.objectContaining({ draftId: "draft-1", status: "READY_FOR_CONFIRMATION" }),
+      }),
+    ]));
+    expect(result.current.viewModel.messages.filter((message) =>
+      message.role === "user" && message.content === "predict churn"
+    )).toHaveLength(1);
+    expect(bridgeMocks.taskClarificationStart).not.toHaveBeenCalled();
+  });
+
+  it("treats input on a restored ready draft as a revision of that draft", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [],
+      sessions: ["default"],
+      clarification: readyDraft,
+    });
+    bridgeMocks.taskClarificationRevise.mockResolvedValue({
+      draft_id: "draft-1",
+      revision: 3,
+      status: "CLARIFYING",
+    });
+    bridgeMocks.taskClarificationStart.mockResolvedValue({
+      ...readyDraft,
+      revision: 4,
+      understanding: { ...readyDraft.understanding, primary_metric: "auc" },
+    });
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(result.current.activeDraft?.draftId).toBe("draft-1"));
+
+    await act(async () => {
+      await result.current.sendPrompt("use AUC instead");
+    });
+
+    expect(bridgeMocks.taskClarificationRevise).toHaveBeenCalledWith(
+      "draft-1",
+      2,
+      "use AUC instead",
+    );
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("predict churn");
+    expect(bridgeMocks.taskClarificationCancel).not.toHaveBeenCalled();
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+    expect(result.current.activeDraft).toMatchObject({
+      draftId: "draft-1",
+      revision: 4,
+      understanding: { primary_metric: "auc" },
+    });
+    expect(result.current.viewModel.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: "use AUC instead" }),
+      expect.objectContaining({
+        kind: "intent-preview",
+        preview: expect.objectContaining({ draftId: "draft-1", status: "READY_FOR_CONFIRMATION" }),
+      }),
+    ]));
+  });
+
+  it("shows the backend recovery warning when the saved draft is corrupt", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [],
+      sessions: ["default"],
+      clarification: null,
+      clarification_error: {
+        code: "draft_corrupt",
+        message: "The saved task draft is damaged.",
+      },
+    });
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(result.current.viewModel.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "error",
+          content: "The saved task draft is damaged.",
+        }),
+      ]),
+    ));
+    expect(result.current.currentSessionId).toBe("default");
+  });
+
+  it("keeps a restored ready draft actionable after switching sessions", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default", "s-1"], active: "default" });
+    bridgeMocks.sessionSwitch
+      .mockResolvedValueOnce({ records: [], sessions: ["default", "s-1"] })
+      .mockResolvedValueOnce({
+        records: [],
+        sessions: ["default", "s-1"],
+        clarification: { ...readyDraft, session_id: "s-1" },
+      });
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(result.current.currentSessionId).toBe("default"));
+    await act(async () => result.current.switchSession("s-1"));
+
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+    expect(result.current.activeDraft?.draftId).toBe("draft-1");
+  });
+
+  it("resumes a persisted clarification draft after session attach", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [],
+      sessions: ["default"],
+      clarification: clarifyingDraft,
+    });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("predict churn"));
+    await waitFor(() => expect(result.current.status).toBe("READY_FOR_CONFIRMATION"));
+
+    expect(result.current.activeDraft?.draftId).toBe("draft-1");
   });
 
   it("does not apply a pending creation response after unmount", async () => {

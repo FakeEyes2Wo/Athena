@@ -9,7 +9,8 @@
     "build:python": "node scripts/build.cjs --backend python",
     "release": "node scripts/build.cjs --package --backend python",
     "release:python": "node scripts/build.cjs --package --backend python",
-    "test": "npm --prefix athena-gui run test",
+    "test": "npm run test:build && npm --prefix athena-gui run test",
+    "test:build": "node --test scripts/__tests__/build.test.cjs",
     "tauri": "npm --prefix athena-gui run tauri"
   }
 }

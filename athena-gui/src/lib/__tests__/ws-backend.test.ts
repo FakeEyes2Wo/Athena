@@ -10,12 +10,14 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   sent: string[] = [];
+  sendError: Error | null = null;
 
   constructor(public url: string) {
     FakeSocket.instances.push(this);
   }
 
   send(data: string) {
+    if (this.sendError) throw this.sendError;
     this.sent.push(data);
   }
 
@@ -60,6 +62,24 @@ describe("WsBackend connection status", () => {
     expect(FakeSocket.instances).toHaveLength(2);
     FakeSocket.instances[1].open();
     expect(seen[seen.length - 1]).toBe("open");
+  });
+
+  it("removes a pending RPC when WebSocket.send throws", async () => {
+    const backend = new WsBackend();
+    const connected = backend.connect("ws://test");
+    FakeSocket.instances[0].open();
+    await connected;
+    FakeSocket.instances[0].sendError = new Error("socket send failed");
+
+    await expect(backend.call("ping")).rejects.toThrow("socket send failed");
+    expect((backend as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0);
+
+    FakeSocket.instances[0].sendError = null;
+    const nextCall = backend.call("ping");
+    await Promise.resolve();
+    expect(FakeSocket.instances[0].sent).toHaveLength(1);
+    FakeSocket.instances[0].close();
+    await expect(nextCall).rejects.toThrow();
   });
 
   it("fails in-flight calls when the socket drops", async () => {

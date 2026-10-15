@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.research.supervisor.events import wait_run_events
 from athena.research.turns import common as agent_turn_common
 from athena.research.turns.common import wait_run_with_heartbeat
-from athena.research.supervisor.events import wait_run_events
 
 
 @dataclass(frozen=True)

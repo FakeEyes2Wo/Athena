@@ -100,6 +100,7 @@ def topological_order(tree: ResearchTree) -> dict[str, Any]:
     hypotheses = data["hypotheses"]
 
     def sort_key(hyp_id: str) -> tuple[bool, int]:
+        """Put hypotheses with explicit order before unindexed hypotheses."""
         order_val = hypotheses[hyp_id].get("order")
         return (order_val is None, order_val if order_val is not None else 0)
 
@@ -117,6 +118,7 @@ def _dfs_cycles(adjacency: dict[str, list[str]]) -> tuple[bool, list[list[str]]]
     stack: list[str] = []
 
     def dfs(node: str) -> None:
+        """Visit one node and record back-edges to the active recursion stack."""
         color[node] = GRAY
         stack.append(node)
         for neighbor in adjacency[node]:
@@ -127,7 +129,6 @@ def _dfs_cycles(adjacency: dict[str, list[str]]) -> tuple[bool, list[list[str]]]
                 cycles.append(stack[index:])
         stack.pop()
         color[node] = BLACK
-        return False
 
     for node in adjacency:
         if color[node] == WHITE:
@@ -234,6 +235,7 @@ def supersedes_closure(tree: ResearchTree, params: dict[str, Any]) -> dict[str, 
         try:
             queue.extend(tree.get_hypothesis(current).supersedes)
         except KeyError:
+            # Superseded IDs may refer to hypotheses removed from the current tree.
             continue
     return {"hypothesis_id": hyp_id, "closure": closure}
 

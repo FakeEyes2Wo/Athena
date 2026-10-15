@@ -9,10 +9,10 @@ module provides the deterministic primitive to replace that step.
 import csv
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from random import Random
-from typing import Sequence
 
 #: Written beside the split files so a finished project can say how it split.
 SPLIT_MANIFEST_NAME = "split_manifest.json"
@@ -136,17 +136,45 @@ def _read_csv_table(
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Read a CSV and validate that its target/group columns exist."""
     with source_csv.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = [
-            name.strip() for name in (reader.fieldnames or []) if name.strip()
-        ]
+        reader = csv.reader(handle)
+        raw_headers = next(reader, None)
+        if not raw_headers:
+            raise ValueError(
+                f"dataset CSV {source_csv} is empty; add a header and rows"
+            )
+        fieldnames = [name.strip() for name in raw_headers]
+        if any(not name for name in fieldnames):
+            raise ValueError(f"dataset CSV {source_csv} has an empty column name")
+        if len(set(fieldnames)) != len(fieldnames):
+            raise ValueError(
+                f"dataset CSV {source_csv} has duplicate column names after trimming whitespace"
+            )
+        if "__athena_row_id" in fieldnames:
+            raise ValueError(
+                f"dataset CSV {source_csv} uses reserved column '__athena_row_id'; "
+                "remove or rename it so the platform can assign stable row IDs"
+            )
         if target_column not in fieldnames:
             raise ValueError(
                 f"target column {target_column!r} not found in {source_csv}"
             )
         if group_column is not None and group_column not in fieldnames:
             raise ValueError(f"group column {group_column!r} not found in {source_csv}")
-        rows = [dict(row) for row in reader]
+        rows = []
+        for row_number, values in enumerate(reader, start=2):
+            if len(values) != len(fieldnames):
+                raise ValueError(
+                    f"dataset CSV {source_csv} row {row_number} has {len(values)} values; "
+                    f"expected {len(fieldnames)} from its header"
+                )
+            rows.append(dict(zip(fieldnames, values)))
+    if not rows:
+        raise ValueError(f"dataset CSV {source_csv} has a header but no data rows")
+    if any(not row[target_column].strip() for row in rows):
+        raise ValueError(
+            f"target column {target_column!r} contains empty values in {source_csv}; "
+            "fill or remove those rows before PREPARE"
+        )
     return fieldnames, rows
 
 
@@ -240,6 +268,18 @@ def materialize_csv_split(
         else None
     )
     manifest = split_ids(ids, spec, groups=groups)
+
+    required = {"train": manifest.train_ids, "SEARCH": manifest.search_ids}
+    if spec.final_frac > 0:
+        required["FINAL"] = manifest.final_ids
+    empty = [name for name, split in required.items() if not split]
+    if empty:
+        raise ValueError(
+            f"dataset has {len(rows)} rows across "
+            f"{len(set(groups)) if groups is not None else len(rows)} split units; "
+            f"the configured fractions leave {', '.join(empty)} empty. Add rows/groups "
+            "or adjust the split fractions before PREPARE."
+        )
 
     _write_split_files(
         output_dir,

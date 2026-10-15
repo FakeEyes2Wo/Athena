@@ -40,10 +40,12 @@ class PdfBlock:
 
     @property
     def width(self) -> float:
+        """Return the horizontal extent of the block's page bounding box."""
         return self.bbox[2] - self.bbox[0]
 
     @property
     def height(self) -> float:
+        """Return the vertical extent of the block's page bounding box."""
         return self.bbox[3] - self.bbox[1]
 
 

@@ -173,6 +173,7 @@ async def resume_current_task(runtime: Any) -> str:
                         await runtime.supervisor.resume(restarting=True)
                         await runtime.start()
                     except BaseException:
+                        # Trigger: terminal persistence fails; keep the original failure after clearing the active turn.
                         task = lifecycle.task
                         if task is None or task.done():
                             lifecycle.started = original_started

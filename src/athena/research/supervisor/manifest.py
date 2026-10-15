@@ -96,4 +96,5 @@ def read_experiment_manifest(root: Path) -> ExperimentManifest:
     try:
         return ExperimentManifest.model_validate_json(path.read_text(encoding="utf-8"))
     except ValidationError as exc:
+        # Trigger: decoded data violates the declared model schema.
         raise ValueError(_manifest_validation_summary(exc)) from exc

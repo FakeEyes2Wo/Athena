@@ -177,5 +177,48 @@ async def test_prepare_phase_never_runs_baseline_after_research_failure(
         await orchestrator.run_prepare_phase(runtime, object())
 
 
+@pytest.mark.asyncio
+async def test_invalid_presplit_fails_before_agent_or_baseline_retries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    split_dir = tmp_path / "data"
+    split_dir.mkdir()
+    (split_dir / "train.csv").write_text("feature\n1\n", encoding="utf-8")
+    (split_dir / "search_features.csv").write_text("feature\n2\n", encoding="utf-8")
+    runtime = SimpleNamespace(
+        prepare_phase=None,
+        provider=object(),
+        task_text="task",
+        config=SimpleNamespace(
+            research=SimpleNamespace(dataset=DatasetConfig(target_column="target"))
+        ),
+        state=SimpleNamespace(data_root=str(split_dir), save=lambda *_: None),
+        state_path=tmp_path / "state.json",
+        workspaces_root=tmp_path / "workspaces",
+        publish_output=_noop_publish,
+    )
+    workspace = SimpleNamespace(path=str(tmp_path / "workspace"))
+    called: list[str] = []
+
+    async def forbidden(*_args, **_kwargs):
+        called.append("agent-or-baseline")
+        raise AssertionError("invalid splits must fail before candidate retries")
+
+    monkeypatch.setattr(
+        orchestrator, "confirmed_task_context_block", lambda _runtime: _async("")
+    )
+    monkeypatch.setattr(
+        orchestrator, "prepare_workspace", lambda _runtime: _async(workspace)
+    )
+    monkeypatch.setattr(orchestrator, "prepare_evaluators", forbidden)
+    monkeypatch.setattr(orchestrator, "prepare_eda", forbidden)
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", forbidden)
+    monkeypatch.setattr(orchestrator, "run_baseline", forbidden)
+
+    with pytest.raises(ValueError, match="missing configured target column 'target'"):
+        await orchestrator.run_prepare_phase(runtime, object())
+    assert called == []
+
+
 async def _async(value):
     return value

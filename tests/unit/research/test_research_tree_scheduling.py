@@ -11,7 +11,6 @@ from pydantic import ValidationError
 
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import Experiment, ResearchTree
-from athena.core.workspace import GitWorkBranch
 
 LEGACY_V2_FIXTURE = Path("tests/fixtures/research_tree_v2.json")
 

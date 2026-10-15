@@ -288,6 +288,7 @@ class ExecutionMonitor:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._scan_interval)
             except TimeoutError:
+                # The scan interval elapsed; run the next health sweep.
                 continue
 
     def snapshot(self, execution_id: str) -> ExecutionSnapshot | None:

@@ -5,10 +5,13 @@ use the same heartbeat/timeout machinery without circular imports.
 """
 
 import asyncio
+import logging
 import time
 from typing import Any
 
 from athena.research.supervisor.events import wait_run_events
+
+logger = logging.getLogger(__name__)
 
 AGENT_TURN_TIMEOUT_SECONDS = 900
 """单个 Agent turn 的硬超时。
@@ -53,14 +56,19 @@ async def wait_run_with_heartbeat(
                     agents.interrupt(agent_id, f"{plan or agent_id}_turn_timeout"),
                     timeout=10,
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_error:  # noqa: BLE001 - preserve timeout
+                logger.warning(
+                    "agent interrupt failed during turn-timeout cleanup (%s)",
+                    type(cleanup_error).__name__,
+                )
             raise RuntimeError(f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s")
         if project:
             events_bus = getattr(rt, "events", None)
             if events_bus is not None:
-                publish = lambda kind, ref, data: events_bus.project_agent_event(
-                    plan or agent_id, kind, ref, data
+                publish = (
+                    lambda kind, ref, data, bus=events_bus: bus.project_agent_event(
+                        plan or agent_id, kind, ref, data
+                    )
                 )
             else:
                 publish = None
@@ -74,6 +82,7 @@ async def wait_run_with_heartbeat(
                 waiter, timeout=min(TURN_HEARTBEAT_SECONDS, remaining)
             )
         except TimeoutError:
+            # Trigger: the turn heartbeat wait expires before an Agent completion event arrives.
             publish_output = getattr(rt, "publish_output", None)
             if publish_output is not None:
                 await publish_output(

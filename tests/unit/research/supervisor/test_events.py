@@ -16,6 +16,7 @@ from athena.research.supervisor.events import (
     EventProjector,
     OutputEvent,
     StateEvent,
+    bounded_redacted_tail,
     redact,
     truncate_middle,
 )
@@ -102,6 +103,24 @@ def test_redact_masks_secret_patterns() -> None:
     assert "private4" not in cleaned
     assert "sk-livevalue-abcdef" not in cleaned
     assert cleaned.count("[REDACTED]") == 5
+
+
+def test_bounded_redacted_tail_keeps_safe_root_cause() -> None:
+    diagnostic = (
+        "API_KEY=private-token " + "repeated context " * 20 + "root cause: bad shape"
+    )
+
+    result = bounded_redacted_tail(diagnostic, 64)
+
+    assert len(result) <= 64
+    assert "private-token" not in result
+    assert result.endswith("root cause: bad shape")
+    assert "earlier diagnostic omitted" in result
+
+
+def test_bounded_redacted_tail_normalizes_short_text_and_handles_small_limit() -> None:
+    assert bounded_redacted_tail(" first\n second ", 40) == "first second"
+    assert bounded_redacted_tail("root cause", 4) == "ause"
 
 
 def test_truncate_middle_leaves_short_text_untouched() -> None:

@@ -127,6 +127,7 @@ def table_to_markdown(
                         ),
                     )
                 except (IndexError, ValueError):
+                    # Trigger: a TeX column-span argument is absent or not an integer; use a one-column span.
                     span = 1
             rendered_cells.extend(value for _ in range(span - 1))
             continuation_cells.extend(True for _ in range(span - 1))

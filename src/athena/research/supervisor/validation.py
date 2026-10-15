@@ -1,9 +1,7 @@
 """Independent frozen-SOTA validation orchestration."""
 
-import csv
 import hashlib
 import json
-from collections import Counter
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
@@ -28,11 +26,13 @@ from athena.research.evaluation import (
     generalization_gap,
     generalization_warning,
 )
+from athena.research.evaluation.spec import load_evaluator_spec
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
     assert_output_roots,
 )
+from athena.research.prediction_contract import assert_predictions_cover
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.experiment import load_agent_result
@@ -83,6 +83,7 @@ async def recovery_action(
     try:
         result = ValidationResult.model_validate_json(await store.get_text(result_ref))
     except (OSError, ValueError):
+        # Trigger: cached validation output is missing, unreadable, or fails its result schema.
         return "run"
     if (
         result.result_id != input.validation_key
@@ -100,6 +101,7 @@ async def recovery_action(
             paths=tuple(evidence["reviewed_diff_paths"]),
         )
     except (OSError, KeyError, TypeError, ValueError):
+        # Trigger: scored output lacks valid reviewed-diff evidence; never trust its score without that binding.
         if result.final_test_score is not None:
             raise RuntimeError(
                 "scored validation result has invalid reviewed diff evidence"
@@ -146,6 +148,7 @@ async def _reviewed_diff_text(diff: GitDiff, store: ArtifactStore) -> str | None
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
+        # Trigger: the reviewed Git diff is binary or not valid UTF-8 text.
         return None
     text = redact(text)
     if len(text) > _MAX_REVIEW_DIFF_CHARS:
@@ -214,6 +217,7 @@ async def _load_result(
     try:
         return ValidationResult.model_validate_json(await store.get_text(result_ref))
     except (OSError, ValueError):
+        # Trigger: no stored validation artifact can be parsed for this validation key.
         return None
 
 
@@ -261,6 +265,22 @@ async def _decode_repair(
     return repair
 
 
+async def _validation_prediction_contract(
+    store: ArtifactStore, evaluator_ref: ArtifactRef
+) -> tuple[str | None, str | None, str]:
+    """Return the frozen FINAL evaluator's identity/file/format contract."""
+    descriptor = EvaluatorDescriptor.model_validate_json(
+        await store.get_text(evaluator_ref)
+    )
+    evaluator_root = Path(descriptor.dir_path)
+    if not (evaluator_root / "metric.json").is_file():
+        return None, None, descriptor.prediction_format
+    spec = load_evaluator_spec(evaluator_root)
+    if spec is None:
+        return None, None, descriptor.prediction_format
+    return spec.prediction_id_column, spec.prediction_file, spec.prediction_format
+
+
 async def _execute_predictions(
     *,
     execution: ExecutionRuntime,
@@ -270,6 +290,9 @@ async def _execute_predictions(
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
+    prediction_id_column: str | None = None,
+    prediction_file: str | None = None,
+    prediction_format: str = "tabular_csv",
     version: str | None = None,
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
@@ -313,95 +336,27 @@ async def _execute_predictions(
         try:
             assert_output_roots(workdir, manifest.outputs, required={"predictions"})
         except OutputFreshnessError as exc:
+            # Trigger: the prediction output directory is empty or still contains only archived stale output.
             raise ValueError(str(exc)) from exc
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if predict_features is not None:
-            _assert_predictions_cover(predictions_dir, predict_features)
+            assert_predictions_cover(
+                predictions_dir,
+                predict_features,
+                prediction_file=prediction_file,
+                prediction_id_column=prediction_id_column,
+                expected_id_column=prediction_id_column,
+                prediction_format=prediction_format,
+            )
         ref = await pack_directory(store, predictions_dir)
         return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
 
 
-def _row_ids(path: Path) -> tuple[list[str], set[str]]:
-    """Read the identity values from the first column of a CSV.
-
-    The split writer currently places its canonical identity first, but its
-    name is deliberately not part of validation.  This keeps VALIDATE usable
-    for datasets whose public prediction contract calls that column
-    ``image_filename``, ``sample_id``, or another dataset-specific name.
-    """
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            return [], set()
-        identity = reader.fieldnames[0]
-        values = [row.get(identity, "").strip() for row in reader]
-    values = [value for value in values if value]
-    duplicates = {value for value, count in Counter(values).items() if count > 1}
-    return values, duplicates
-
-
-def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
-    """Fail with the real cause when the re-run predicted the wrong rows.
-
-    Without this the symptom is the final evaluator returning
-    ``{"primary": 0.0}`` next to ``14539 ground truth rows have no prediction``
-    -- which reads like a broken evaluator or a broken model, and is neither.
-    The actual cause is a candidate that hardcoded the SEARCH feature path, so
-    re-running its frozen argv produced predictions for rows VALIDATE is not
-    scoring. Diagnosing that from the outside took a full manual replay; the
-    information to say it outright was here all along.
-    """
-    expected_values, expected_duplicates = _row_ids(expected_csv)
-    expected = set(expected_values)
-    if not expected:
-        return
-    if expected_duplicates:
-        raise ValueError(
-            f"expected feature file {expected_csv.name} has duplicate identity "
-            f"values: {sorted(expected_duplicates)[:5]}"
-        )
-    produced_counts: Counter[str] = Counter()
-    for path in sorted(predictions_dir.rglob("*.csv")):
-        values, _duplicates = _row_ids(path)
-        produced_counts.update(values)
-    produced = set(produced_counts)
-    produced_duplicates = {
-        value for value, count in produced_counts.items() if count > 1
-    }
-    if produced_duplicates:
-        raise ValueError(
-            "predictions contain duplicate identity values: "
-            f"{sorted(produced_duplicates)[:5]}"
-        )
-    if not produced:
-        return
-    extra = produced - expected
-    missing = expected - produced
-    if not missing:
-        if extra:
-            raise ValueError(
-                f"predictions contain {len(extra)} identity values absent from "
-                f"{expected_csv.name}: {sorted(extra)[:5]}"
-            )
-        return
-    overlap = len(expected & produced)
-    detail = (
-        f"{len(missing)} of {len(expected)} rows in {expected_csv.name} have no "
-        f"prediction (overlap {overlap})."
-    )
-    if extra:
-        detail += f" Also found {len(extra)} unexpected identity values."
-    if overlap == 0:
-        detail += (
-            " Zero overlap means the re-run predicted a different split "
-            "entirely: the candidate hardcoded its feature path instead of "
-            "reading ATHENA_PREDICT_FEATURES, so its frozen command cannot be "
-            "pointed at the held-out rows."
-        )
-    raise ValueError(detail)
+# Keep the old private name as an import-compatible alias for existing callers/tests.
+_assert_predictions_cover = assert_predictions_cover
 
 
 async def _deterministic_preflight(
@@ -581,6 +536,13 @@ class ValidationSession:
                 )
                 continue
             reviewed_diff = diff
+            (
+                prediction_id_column,
+                prediction_file,
+                prediction_format,
+            ) = await _validation_prediction_contract(
+                deps.store, input.final_evaluator_ref
+            )
             prediction_run = await _execute_predictions(
                 execution=deps.execution,
                 git=deps.git,
@@ -589,6 +551,9 @@ class ValidationSession:
                 publish=deps.publish,
                 timeout_s=options.timeout_s,
                 predict_features=options.predict_features,
+                prediction_id_column=prediction_id_column,
+                prediction_file=prediction_file,
+                prediction_format=prediction_format,
                 version=f"validate-{input.validation_key}",
             )
             if await deps.git.diff(deps.workspace) != reviewed_diff:
@@ -654,6 +619,7 @@ class ValidationSession:
                     paths=tuple(evidence["reviewed_diff_paths"]),
                 )
             except (KeyError, TypeError, ValueError):
+                # Trigger: persisted reviewed-diff evidence is incomplete or malformed, so it cannot authorize a validation commit.
                 reviewed_diff = None
         if reviewed_diff is None:
             raise RuntimeError("validation commit requires reviewed diff evidence")

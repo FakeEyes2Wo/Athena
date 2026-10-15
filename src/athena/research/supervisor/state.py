@@ -83,6 +83,9 @@ class ResearchState(BaseModel):
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
     experiment_timeout_s: int = Field(default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1)
+    # Session-scoped search threshold. None marks a legacy checkpoint so
+    # bootstrap can initialize it from the configured policy.
+    tolerance: float | None = Field(default=None, ge=0)
     # 数据集根目录（供远端算力分发数据集；本地算力可空）。
     data_root: str | None = None
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
@@ -183,6 +186,7 @@ class ResearchState(BaseModel):
             if isinstance(disk_core, Mapping):
                 core_matches_disk = _core_digest(disk_core) == _core_digest(core)
         except (OSError, json.JSONDecodeError):
+            # Trigger: the on-disk core state is absent, unreadable, or malformed during resume comparison.
             pass
         resume_payload = {
             key: value
@@ -213,7 +217,9 @@ class ResearchState(BaseModel):
         target = Path(path)
         payload = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
-            raise ValueError("research state payload must be an object")
+            raise ValueError(  # noqa: TRY004 - malformed persisted data is a value error
+                "research state payload must be an object"
+            )
         if "corpus_ideation_done" in payload:
             payload = cls._migrate_corpus_ideation_flag(payload)
         unknown = [key for key in payload if key not in cls.model_fields]
@@ -227,6 +233,7 @@ class ResearchState(BaseModel):
                 backup = target.with_name("state.json.corrupt")
                 backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
             except OSError:
+                # Trigger: the corrupt state file cannot be copied to its recovery backup.
                 logger.warning("failed to back up corrupted state file", exc_info=True)
             payload = {
                 key: value for key, value in payload.items() if key in cls.model_fields

@@ -85,6 +85,7 @@ def _source_locator_key(value: str, *, http: bool) -> tuple[str, str] | None:
     try:
         return ("http", str(HttpUrl(normalized)))
     except ValidationError:
+        # Trigger: a non-HTTP source identifier is not a valid HTTP URL, so retain it as an identifier.
         return None
 
 
@@ -129,6 +130,7 @@ class EvidenceRef(BaseModel):
     @field_validator("reference", "claim")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """Trim evidence text and reject values without substantive content."""
         return _substantive(value)
 
 
@@ -143,6 +145,7 @@ class DatasetFact(BaseModel):
 
     @model_validator(mode="after")
     def bind_local_evidence(self) -> "DatasetFact":
+        """Require local evidence and bind any calculation to the fact value."""
         if self.evidence.kind == "source":
             raise ValueError("dataset facts require local evidence")
         if self.evidence.kind == "calculation" and not any(
@@ -170,10 +173,12 @@ class DatasetProfile(BaseModel):
     @field_validator("task_type", "input_scale", "rationale")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """Normalize the profile's task, scale, and rationale text."""
         return _substantive(value)
 
     @model_validator(mode="after")
     def reject_duplicate_facts(self) -> "DatasetProfile":
+        """Require each dataset fact category to appear at most once."""
         names = [fact.field for fact in self.facts]
         if len(names) != len(set(names)):
             raise ValueError("dataset fact names must be unique")
@@ -192,10 +197,12 @@ class PretrainedAssessment(BaseModel):
     @field_validator("representation")
     @classmethod
     def normalize_representation(cls, value: str | None) -> str | None:
+        """Normalize a named pretrained representation while preserving absence."""
         return None if value is None else _substantive(value)
 
     @model_validator(mode="after")
     def bind_representation_to_status(self) -> "PretrainedAssessment":
+        """Keep named representations consistent with availability status."""
         if self.status == "available" and self.representation is None:
             raise ValueError("available pretrained weights require a representation")
         if self.status != "available" and self.representation is not None:
@@ -232,10 +239,12 @@ class ScratchScaleComparison(BaseModel):
     @field_validator("selected_candidate_id", "source_locator", "unit", "rationale")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """Normalize identity, units, and rationale used in scale comparisons."""
         return _substantive(value)
 
     @model_validator(mode="after")
     def validate_relationship(self) -> "ScratchScaleComparison":
+        """Reject a local-at-least-source claim when the numeric evidence disagrees."""
         if (
             self.relationship == "local_at_least_source"
             and self.local_value < self.source_value
@@ -267,11 +276,13 @@ class OneCandidateException(BaseModel):
     @field_validator("scope", "limitation")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """Normalize the query-scope explanation for a single candidate."""
         return _substantive(value)
 
     @field_validator("query_indices")
     @classmethod
     def reject_duplicate_indices(cls, value: list[int]) -> list[int]:
+        """Require every cited query index to be unique."""
         if len(value) != len(set(value)):
             raise ValueError("one-candidate query indices must be unique")
         return value
@@ -288,6 +299,7 @@ class SearchRecord(BaseModel):
     @field_validator("queries")
     @classmethod
     def normalize_queries(cls, value: list[str]) -> list[str]:
+        """Normalize query text and reject case-insensitive duplicates."""
         normalized = [_substantive(query) for query in value]
         if len({query.casefold() for query in normalized}) != len(normalized):
             raise ValueError("search queries must be distinct")
@@ -295,6 +307,7 @@ class SearchRecord(BaseModel):
 
     @model_validator(mode="after")
     def bind_exception_queries(self) -> "SearchRecord":
+        """Ensure single-candidate evidence references existing query positions."""
         if self.one_candidate is not None and any(
             index < 0 or index >= len(self.queries)
             for index in self.one_candidate.query_indices
@@ -322,6 +335,7 @@ class BaselineSource(BaseModel):
     @field_validator("candidate_id", "title", "method", "paper_locator", "relevance")
     @classmethod
     def normalize_text(cls, value: str | None) -> str | None:
+        """Normalize candidate identifiers and descriptive source metadata."""
         return None if value is None else _substantive(value)
 
     @field_validator("source_url", "repository_url")
@@ -348,6 +362,7 @@ class CandidateDecision(BaseModel):
     @field_validator("candidate_id", "reason")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """Normalize the candidate ID and its decision rationale."""
         return _substantive(value)
 
 
@@ -368,11 +383,13 @@ class BaselineResearch(BaseModel):
     @field_validator("selected_candidate_id")
     @classmethod
     def normalize_selected_candidate(cls, value: str) -> str:
+        """Normalize the identifier linking the selected candidate and decision."""
         return _substantive(value)
 
     @field_validator("limitations")
     @classmethod
     def normalize_limitations(cls, value: list[str]) -> list[str]:
+        """Normalize each stated limitation without dropping its provenance."""
         return [_substantive(limitation) for limitation in value]
 
     @model_validator(mode="after")
@@ -566,6 +583,7 @@ class BaselineVerification(BaseModel):
                     self.repository_url
                 )
             except ValueError as exc:
+                # The proof names a non-public, non-HTTPS, or malformed repository URL.
                 raise ValueError(
                     "git verification requires a normalized public HTTPS repository URL"
                 ) from exc
@@ -636,12 +654,14 @@ def _parse_baseline_artifacts(
     try:
         research = BaselineResearch.model_validate_json(raw_research)
     except (ValidationError, ValueError) as exc:
+        # Trigger: BASELINE_RESEARCH.json is malformed or violates the baseline research schema.
         raise BaselineResearchError(
             f"invalid {RESEARCH_FILENAME}", (str(exc),)
         ) from exc
     try:
         design_text = raw_design.decode("utf-8", errors="strict")
     except (UnicodeError, ValueError) as exc:
+        # Trigger: BASELINE_DESIGN.md bytes are not valid strict UTF-8 text.
         raise BaselineResearchError(
             f"unable to read {DESIGN_FILENAME}", (str(exc),)
         ) from exc
@@ -681,12 +701,14 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
     try:
         raw_research = (root / RESEARCH_FILENAME).read_bytes()
     except (OSError, ValueError) as exc:
+        # Trigger: BASELINE_RESEARCH.json cannot be read from the selected workspace.
         raise BaselineResearchError(
             f"unable to read {RESEARCH_FILENAME}", (str(exc),)
         ) from exc
     try:
         raw_design = (root / DESIGN_FILENAME).read_bytes()
     except (OSError, ValueError) as exc:
+        # Trigger: BASELINE_DESIGN.md cannot be read from the selected workspace.
         raise BaselineResearchError(
             f"unable to read {DESIGN_FILENAME}", (str(exc),)
         ) from exc
@@ -718,6 +740,33 @@ def titles_match(reported: str, resolved: str) -> bool:
     )
 
 
+def authority_titles_match(reported: str, resolved: str) -> bool:
+    """Match normalized titles or an exact, explicit colon-separated main title.
+
+    Some authority records index a cited paper by its short main title while
+    the submitted citation uses the full colon-separated title. In that case,
+    only the exact text before the first colon is compared with the authority
+    title. This does not claim that authority metadata verified the subtitle.
+    """
+    if titles_match(reported, resolved):
+        return True
+    resolved_title = _normalize_title(resolved)
+    if not resolved_title:
+        return False
+    for complete, short in ((reported, resolved), (resolved, reported)):
+        main_title, separator, subtitle = complete.partition(":")
+        normalized_main = _normalize_title(main_title)
+        normalized_short = _normalize_title(short)
+        if (
+            separator
+            and _normalize_title(subtitle)
+            and len(normalized_main) >= 6
+            and normalized_main == normalized_short
+        ):
+            return True
+    return False
+
+
 def _normalize_title(value: str) -> str:
     """Join Unicode-normalized alphanumeric title tokens."""
     return "".join(
@@ -743,6 +792,7 @@ def _parse_canonical_verification(
         copied = bytes(raw)
         parsed = BaselineVerification.model_validate_json(copied)
     except (TypeError, ValueError) as exc:
+        # Trigger: verification bytes are not bytes-like or do not contain valid canonical JSON.
         raise BaselineResearchError("verification bytes are invalid") from exc
     if copied != verification_bytes(parsed) or parsed != expected:
         raise BaselineResearchError(
@@ -789,6 +839,7 @@ def assert_verification_matches_artifacts(
                 str(artifacts.selected.repository_url)
             )
         except ValueError as exc:
+            # Trigger: the selected repository URL is malformed or violates the public-HTTPS policy.
             raise BaselineResearchError(
                 "selected repository is not a public HTTPS repository", (str(exc),)
             ) from exc
@@ -801,7 +852,7 @@ def assert_verification_matches_artifacts(
             raise BaselineResearchError(
                 "OpenAlex verification proof does not match the selected paper locator"
             )
-        if verification.title is None or not titles_match(
+        if verification.title is None or not authority_titles_match(
             artifacts.selected.title, verification.title
         ):
             raise BaselineResearchError(

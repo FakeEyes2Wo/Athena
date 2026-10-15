@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 import sys
 import traceback
 from dataclasses import replace
@@ -99,8 +100,10 @@ def _non_negative_float(value: str) -> float:
     烧掉了一整轮 PREPARE。
     """
     parsed = float(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"must be a non-negative number, got {value}")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a finite non-negative number, got {value}"
+        )
     return parsed
 
 
@@ -140,6 +143,7 @@ def _dataset_path_for_prompt(data: str) -> str:
         if path.exists():
             return str(path.resolve())
     except OSError:
+        # URLs and other free-form task inputs may not be valid filesystem paths.
         pass
     return data
 
@@ -245,6 +249,7 @@ class _EventRenderer:
         self._agent_plan = None
 
     def render(self, kind: str, payload: dict[str, object]) -> None:
+        """Coalesce agent fragments and flush them before each state transition."""
         if kind == "output":
             source = payload.get("source", "runtime")
             channel = payload.get("channel", "text")
@@ -285,6 +290,7 @@ def _apply_fork(args: argparse.Namespace) -> int:
     try:
         result = fork_project(source, target)
     except ForkError as error:
+        # An incomplete source or conflicting destination cannot seed a valid fork.
         print(f"分叉失败：{error}", file=sys.stderr)
         return 2
     print(f"已从 {source} 分叉到 {target}")
@@ -311,6 +317,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         with project_lock(Path(args.project) / ".athena"):
             return await _run_locked(args)
     except ProjectBusyError as error:
+        # A live process owns this project's state; never start a competing writer.
         print(f"error: {error}", file=sys.stderr)
         return 2
 
@@ -353,6 +360,7 @@ async def _run_locked(args: argparse.Namespace) -> int:
         await asyncio.wait_for(terminal.wait(), timeout=args.timeout)
         return exit_code
     except TimeoutError:
+        # The terminal event did not arrive within the user-specified run deadline.
         print(f"run timed out after {args.timeout}s", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - CLI converts run failures to exit codes.
@@ -379,6 +387,7 @@ async def _cmd_status(args: argparse.Namespace) -> int:
     snapshot: dict[str, object] = {}
 
     def receive(kind: str, payload: dict[str, object]) -> None:
+        """Capture the initial canonical state supplied by runtime subscription."""
         if kind == "state":
             snapshot.update(payload)
 
@@ -1106,6 +1115,7 @@ def _make_output_encodable() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse one CLI command and run it with encoding-safe console output."""
     _make_output_encodable()
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)

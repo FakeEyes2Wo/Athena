@@ -13,6 +13,7 @@ from athena.research.config import (
     SessionConfig,
     TaskConfig,
 )
+from athena.research.prepare.authority_local import LocalBaselineAuthorityStore
 from gui_gateway.__main__ import start_server
 from tests.integration.research.test_continue_resume_surfaces import (
     assert_confirmed_contract_unchanged,
@@ -31,6 +32,12 @@ async def _response(ws, request_id: int) -> dict:
 @pytest.mark.asyncio
 async def test_full_chat_flow(tmp_path) -> None:
     runtime = make_project(tmp_path)
+    # ``make_project`` supplies a provider for its fake model, so starting the
+    # research lifecycle must also use the same explicit authority capability
+    # as a controller-created runtime.
+    runtime.services.infrastructure.baseline_authority = LocalBaselineAuthorityStore(
+        tmp_path / "controller", tmp_path, "default"
+    )
     server, port = await start_server(test_mode=True, runtime=runtime, port=0)
     try:
         async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:

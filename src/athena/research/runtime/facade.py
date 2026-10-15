@@ -58,6 +58,7 @@ from athena.research.runtime.clarification import (
     recover_confirmation,
     seed_unconfirmed_task,
 )
+from athena.research.runtime.clarification import current_draft as current_draft_impl
 from athena.research.runtime.control import (
     message as message_impl,
 )
@@ -478,17 +479,23 @@ class ResearchRuntime:
         """Return the authoritative latest clarification draft."""
         return self._clarification_controller_or_raise().get(draft_id)
 
+    def task_clarification_current(self) -> object | None:
+        """Read this session's persisted draft without changing its state."""
+        return current_draft_impl(self)
+
     async def task_clarification_retry(self, draft_id: str, revision: int) -> object:
         """Retry a retryable FAILED draft."""
-        return self._clarification_controller_or_raise().retry(draft_id, revision)
+        controller = self._clarification_controller_or_raise()
+        draft = controller.retry(draft_id, revision)
+        return await controller.run(draft)
 
     async def task_clarification_revise(
         self, draft_id: str, revision: int, instruction: str
     ) -> object:
         """Revise a ready draft and return it to CLARIFYING."""
-        return self._clarification_controller_or_raise().revise(
-            draft_id, revision, instruction
-        )
+        controller = self._clarification_controller_or_raise()
+        draft = controller.revise(draft_id, revision, instruction)
+        return await controller.run(draft)
 
     async def task_clarification_cancel(self, draft_id: str, revision: int) -> object:
         """Cancel the active clarification draft and return the session to IDLE."""

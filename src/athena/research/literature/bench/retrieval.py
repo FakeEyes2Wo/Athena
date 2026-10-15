@@ -55,10 +55,12 @@ def _load(model: type[_Model], name_or_path: str, kind: str) -> _Model:
 
 
 def load_query_set(name_or_path: str = DEFAULT_QUERY_SET) -> QuerySet:
+    """Load a packaged or path-based known-item query set."""
     return _load(QuerySet, name_or_path, "query set")
 
 
 def load_recall_set(name_or_path: str) -> RecallQuerySet:
+    """Load a packaged or path-based staged-recall query set."""
     return _load(RecallQuerySet, name_or_path, "recall set")
 
 
@@ -104,9 +106,11 @@ async def run_known_item(
     ]
 
     async def keyword(query: KnownItemQuery, limit: int) -> list[SearchHit]:
+        """Run lexical retrieval for one known-item query."""
         return keyword_search(corpus, query.keywords or query.question.split(), limit)
 
     async def run(channel: str, runner: _Runner) -> ChannelScore:
+        """Score a channel while isolating errors to their individual queries."""
         outcomes: list[QueryOutcome] = []
         for query in usable:
             try:
@@ -133,12 +137,14 @@ async def run_known_item(
     if embedder is not None and corpus.has_vectors():
 
         async def semantic(query: KnownItemQuery, limit: int) -> list[SearchHit]:
+            """Embed and rank one query against the semantic index."""
             vectors = await embedder.embed([query.question])
             return (
                 semantic_search(corpus, normalize(vectors[0]), limit) if vectors else []
             )
 
         async def hybrid(query: KnownItemQuery, limit: int) -> list[SearchHit]:
+            """Combine query embeddings and lexical terms for one ranking."""
             vectors = await embedder.embed([query.question])
             vector = normalize(vectors[0]) if vectors else []
             return hybrid_search(

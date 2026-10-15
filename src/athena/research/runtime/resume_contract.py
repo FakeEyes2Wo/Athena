@@ -18,14 +18,19 @@ _ResumeReason = Literal[
 
 @dataclass(frozen=True, slots=True)
 class ResumeCapability:
+    """Classify a durable run status as resumable or terminal."""
+
     reason: _ResumeReason
 
     @property
     def available(self) -> bool:
+        """Return whether the current durable state permits continuation."""
         return self.reason in {"paused", "failed", "interrupted"}
 
 
 class ResearchControlError(RuntimeError):
+    """Structured control failure with a stable caller-facing error code."""
+
     retryable = False
 
     def __init__(self, code: str, message: str) -> None:
@@ -34,6 +39,7 @@ class ResearchControlError(RuntimeError):
 
 
 def is_continue_command(text: str) -> bool:
+    """Match the explicit continuation command, ignoring surrounding whitespace."""
     return text.strip().casefold() == "continue"
 
 

@@ -136,7 +136,6 @@ async def test_plan_agent_uses_its_named_workspace(tmp_path: Path) -> None:
         assert json.loads(await store.get_text(outer["result_ref"])) == {
             "decision": "submit",
             "reason": "workspace inspected",
-            "suggestions": [],
         }
 
     assert (roots["h1"] / "identity.txt").read_text() == "owned"

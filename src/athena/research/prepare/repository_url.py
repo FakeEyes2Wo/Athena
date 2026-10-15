@@ -38,6 +38,7 @@ def normalize_public_https_repository_url(value: str) -> str:
         port = parsed.port
         hostname = parsed.hostname
     except ValueError as exc:
+        # Trigger: a candidate URL fails normalization or the public HTTPS repository policy.
         raise ValueError("repository URL is malformed") from exc
 
     if parsed.scheme.casefold() != "https":
@@ -56,6 +57,7 @@ def normalize_public_https_repository_url(value: str) -> str:
     try:
         normalized_host = hostname.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
+        # Trigger: a repository URL contains a character that cannot be encoded for IDNA validation.
         raise ValueError("repository hostname is not valid IDNA") from exc
     normalized_host = normalized_host.removesuffix(".")
     if "." not in normalized_host and ":" not in normalized_host:
@@ -67,6 +69,7 @@ def normalize_public_https_repository_url(value: str) -> str:
     try:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
+        # Trigger: the normalized repository path contains no valid owner/repository pair.
         address = None
     if address is not None and not _is_public_repository_address(address):
         raise ValueError("repository IP address must be globally routable")

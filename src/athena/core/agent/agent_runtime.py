@@ -71,11 +71,13 @@ class _ThreadRunner:
         self._runtime = runtime
 
     async def run(self, thread: AthenaThread, turn, emit) -> AgentOutcome:
+        """Run one thread turn with the runner's bound agent session."""
         return await self.run_with_context(thread, turn, emit, None, asyncio.Event())
 
     async def run_with_context(
         self, thread, turn, emit, memory, cancel
     ) -> AgentOutcome:
+        """Run a turn with the conversation memory and cancellation signal."""
         if cancel.is_set():
             raise asyncio.CancelledError
         record = self._runtime._records.get(thread.thread_id)
@@ -156,6 +158,7 @@ class AgentRuntime:
 
     @property
     def session_id(self) -> str:
+        """Return the identifier used to scope this runtime's sessions."""
         return self._session_id
 
     # 生命周期
@@ -166,18 +169,22 @@ class AgentRuntime:
             raise AgentCommandError(ErrorCode.CLOSED, "runtime is closed")
 
     async def aclose(self) -> None:
+        """Close every managed thread and prevent further runtime commands."""
         if self._closed:
             return
         self._closed = True
         await self._manager.aclose("runtime close")
 
     def pause(self) -> None:
+        """Reject new agent commands while preserving existing thread state."""
         self._paused = True
 
     def resume(self) -> None:
+        """Allow agent commands after a temporary runtime pause."""
         self._paused = False
 
     def has_agent(self, agent_id: AgentId) -> bool:
+        """Return whether the runtime currently tracks the given agent."""
         return agent_id in self._records
 
     def _check_open(self) -> None:
@@ -198,6 +205,7 @@ class AgentRuntime:
         name: str = "root",
         agent_id: str | None = None,
     ):
+        """Create or retrieve the root agent and start its initial run."""
         if agent_id is None:
             return await self._spawn_agent(None, agent_type, task, name=name)
         self._require_agent_id(agent_id)
@@ -222,6 +230,7 @@ class AgentRuntime:
         *,
         name: str | None = None,
     ):
+        """Create a child agent under an existing parent and start its run."""
         if parent_id not in self._records:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown parent: {parent_id}")
         return await self._spawn_agent(parent_id, agent_type, task, name=name)
@@ -280,6 +289,7 @@ class AgentRuntime:
         try:
             self._manager.require_safe_path_basename(agent_id, "agent_id")
         except ValueError as exc:
+            # The manager rejected an unsafe path identifier; expose it as request validation.
             raise AgentCommandError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
 
     @staticmethod
@@ -301,6 +311,7 @@ class AgentRuntime:
         return None
 
     async def followup(self, agent_id: AgentId, task: object) -> RunId:
+        """Submit a follow-up request to an existing agent."""
         self._check_open()
         record = self._records.get(agent_id)
         if record is None:
@@ -315,8 +326,10 @@ class AgentRuntime:
         try:
             turn = await self._manager.submit(agent_id, req_ref)
         except ClosedError as exc:
+            # Manager shutdown raced the facade's open check; report the typed closed state.
             raise AgentCommandError(ErrorCode.CLOSED, str(exc)) from exc
         except RuntimeError as exc:
+            # The manager uses this message for its single-active-turn constraint.
             if "active turn" in str(exc):
                 raise AgentBusyError() from exc
             raise
@@ -333,6 +346,7 @@ class AgentRuntime:
         *,
         source: AgentId | None = None,
     ) -> None:
+        """Append a message to an agent mailbox for its next run."""
         record = self._records.get(agent_id)
         if record is None:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
@@ -347,6 +361,7 @@ class AgentRuntime:
     async def wait_run(
         self, run_id: RunId, *, timeout: float | None = None
     ) -> RunSummary:
+        """Wait for one run and return its terminal summary or timeout error."""
         agent_id = self._run_agent.get(run_id)
         if agent_id is None:
             raise KeyError(f"unknown run: {run_id}")
@@ -362,6 +377,7 @@ class AgentRuntime:
                 return cached
             raise
         except RuntimeError as exc:
+            # The turn runner failed; return its failure as a terminal summary for this run.
             return RunSummary(
                 run_id=run_id,
                 agent_id=agent_id,
@@ -422,6 +438,7 @@ class AgentRuntime:
         raise AgentCommandError(ErrorCode.NOT_FOUND, f"no run for agent: {agent_id}")
 
     def run_summary(self, run_id: RunId) -> RunSummary | None:
+        """Return cached terminal state or the current queued/running state."""
         cached = self._run_summaries.get(run_id)
         if cached is not None:
             return cached
@@ -438,6 +455,7 @@ class AgentRuntime:
     # 中断 / 关闭
 
     async def interrupt(self, agent_id: AgentId, reason: str) -> None:
+        """Interrupt an agent's active run with the supplied reason."""
         run_id = self._active_turn.get(agent_id)
         if run_id is None:
             raise AgentCommandError(
@@ -458,6 +476,7 @@ class AgentRuntime:
     async def cancel_run(
         self, run_id: RunId, *, reason: str = "caller_cancelled"
     ) -> None:
+        """Interrupt a run by identifier when it is currently active."""
         agent_id = self._run_agent.get(run_id)
         if agent_id is None:
             raise KeyError(f"unknown run: {run_id}")
@@ -466,6 +485,7 @@ class AgentRuntime:
     # 等待注册 / 唤醒
 
     async def wait_for(self, agent_id: AgentId, target_ids: list[AgentId]) -> None:
+        """Resume an agent after all listed agents reach terminal states."""
         record = self._records.get(agent_id)
         if record is None:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
@@ -482,6 +502,7 @@ class AgentRuntime:
         content: str,
         context_refs: list[ArtifactRef] | None = None,
     ) -> str:
+        """Register a human wait and return its reply correlation identifier."""
         record = self._records.get(agent_id)
         if record is None:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
@@ -494,6 +515,7 @@ class AgentRuntime:
         return request_id
 
     async def human_reply(self, request_id: str, reply: str) -> RunId:
+        """Deliver a human reply and start the waiting agent's next run."""
         agent_id = self._human_waits.pop(request_id, None)
         if agent_id is None:
             raise AgentCommandError(
@@ -559,6 +581,7 @@ class AgentRuntime:
         return out
 
     async def close(self, agent_id: AgentId, *, recursive: bool = False) -> None:
+        """Close an agent, requiring recursive close when live descendants exist."""
         if agent_id not in self._records:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
         if not recursive:
@@ -622,6 +645,7 @@ class AgentRuntime:
     # 查询 / 投影
 
     def list_agents(self, path_prefix: AgentPath | None = None) -> list[AgentSnapshot]:
+        """Return snapshots for tracked agents, optionally under a path prefix."""
         snaps = []
         for agent_id, rec in self._records.items():
             if path_prefix is not None and rec.path[: len(path_prefix)] != path_prefix:
@@ -657,14 +681,17 @@ class AgentRuntime:
         return AgentStatus.IDLE
 
     def agent_snapshot(self, agent_id: AgentId) -> AgentSnapshot | None:
+        """Return one agent snapshot, or ``None`` when it is not tracked."""
         rec = self._records.get(agent_id)
         return self._snapshot(rec) if rec is not None else None
 
     def agent_path(self, agent_id: AgentId) -> AgentPath | None:
+        """Return an agent's immutable path, or ``None`` if it is unknown."""
         rec = self._records.get(agent_id)
         return rec.path if rec is not None else None
 
     def registry_spec(self, agent_id: AgentId):
+        """Return the registered runner and codec for a tracked agent."""
         rec = self._records.get(agent_id)
         if rec is None:
             raise KeyError(f"unknown agent: {agent_id}")
@@ -675,6 +702,7 @@ class AgentRuntime:
     def run_events(
         self, run_id: RunId, after_sequence: int = 0
     ) -> AsyncIterator[AgentEvent]:
+        """Stream events belonging to one run after the given sequence."""
         agent_id = self._run_agent.get(run_id)
         if agent_id is None:
             raise KeyError(f"unknown run: {run_id}")
@@ -683,6 +711,7 @@ class AgentRuntime:
     def session_events(
         self, agent_id: AgentId, after_sequence: int = 0
     ) -> AsyncIterator[AgentEvent]:
+        """Stream all session events for an agent after the given sequence."""
         return self._session_events(agent_id, None, after_sequence)
 
     def _session_events(

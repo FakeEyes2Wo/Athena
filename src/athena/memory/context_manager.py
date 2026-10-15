@@ -6,11 +6,10 @@ snapshot/items_since/rollback 构成版本化快照协议：
 - rollback(idx) 回滚并恢复 token 计数，保持 sum(estimate(m)) == _token_count 不变量
 """
 
+from copy import deepcopy
 from dataclasses import replace
 
 from pydantic_ai.messages import ModelMessage, ModelRequest
-
-from athena.core.tool_types import truncate_text
 
 
 class ContextManager:
@@ -32,7 +31,7 @@ class ContextManager:
     @property
     def items(self) -> list[ModelMessage]:
         """深拷贝 — 外部修改不影响内部状态和 token 计数。"""
-        return [replace(m, parts=[replace(p) for p in m.parts]) for m in self._items]
+        return deepcopy(self._items)
 
     @property
     def tokens(self) -> int:
@@ -61,7 +60,7 @@ class ContextManager:
         """返回 idx 之后新增的消息。边界保护：越界返回空列表。"""
         if idx < 0 or idx >= len(self._items):
             return []
-        return list(self._items[idx:])
+        return deepcopy(self._items[idx:])
 
     def rollback(self, idx: int) -> None:
         """回滚到 idx，删除之后的消息并恢复 token 计数。"""
@@ -93,16 +92,20 @@ class ContextManager:
     @staticmethod
     def _prepare(msg: ModelMessage) -> ModelMessage:
         """预处理消息：深拷贝 parts，过长工具返回用 truncate_text 保留头尾各半。"""
-        if not isinstance(msg, ModelRequest):
-            return replace(msg, parts=list(msg.parts))
-        parts = list(msg.parts)
-        for i, part in enumerate(parts):
+        from athena.core.tool_types import truncate_text  # 延迟导入避免循环依赖
+
+        # core's public facade also imports memory; defer that edge until use.
+        # Nested tool arguments/returns must not alias caller-owned dictionaries.
+        prepared = deepcopy(msg)
+        if not isinstance(prepared, ModelRequest):
+            return prepared
+        for i, part in enumerate(prepared.parts):
             content = getattr(part, "content", None)
             if getattr(part, "part_kind", None) == "tool-return" and isinstance(
                 content, str
             ):
-                parts[i] = replace(part, content=truncate_text(content))
-        return replace(msg, parts=parts)
+                prepared.parts[i] = replace(part, content=truncate_text(content))
+        return prepared
 
     @staticmethod
     def _estimate_one(msg: ModelMessage) -> int:

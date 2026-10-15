@@ -9,14 +9,15 @@ if TYPE_CHECKING:
     from athena.core.agent.agent_runtime import AgentRuntime
     from athena.core.contracts import ArtifactStore, CommitHash
     from athena.core.research_models import Hypothesis
+    from athena.core.research_tree import ResearchTree
     from athena.core.workspace import GitWorkspace
     from athena.research.contracts import GeneralTurnOutcome
     from athena.research.experiment_documents import DocumentProjector
     from athena.research.supervisor.experiment import PlanTurnResult
     from athena.research.supervisor.plans import PlanState
     from athena.research.supervisor.prepare import PrepareResult
-    from athena.core.research_tree import ResearchTree
     from athena.research.supervisor.scheduling import Scheduler
+    from athena.research.supervisor.state import ResearchState
 
 PlanTurn = Callable[[str, "PlanState"], Awaitable["PlanTurnResult"]]
 SupervisorTurn = Callable[[str], Awaitable[str]]

@@ -41,7 +41,7 @@ def _clean(text: str) -> str:
 
 def _decode_url(href: str) -> str:
     query = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query)
-    return urllib.parse.unquote(query.get("uddg", [href])[0])
+    return query.get("uddg", [href])[0]
 
 
 def _compose_query(query: str, domains: list[str] | None) -> str:
@@ -119,28 +119,36 @@ class WebSession:
         self._fetches = 0
 
     def search_refs(self, count: int) -> list[str]:
+        """Reserve unique references for every result of one search call."""
         call, self._searches = self._searches, self._searches + 1
         return [f"turn0search{call}-{i}" for i in range(count)]
 
     def fetch_ref(self) -> str:
+        """Reserve a page reference independent of the search result sequence."""
         ref_id, self._fetches = f"turn0fetch{self._fetches}", self._fetches + 1
         return ref_id
 
     def remember_url(self, ref_id: str, url: str) -> None:
+        """Bind a search reference to its destination before the page is fetched."""
         self._urls[ref_id] = url
 
     def remember_page(self, ref_id: str, page: dict) -> None:
+        """Cache a fetched page and make its reference resolvable as a URL."""
         self._urls[ref_id] = page["url"]
         self._pages[ref_id] = page
 
     def page(self, ref_id: str) -> dict | None:
+        """Return the cached extraction, or None for a reference not yet fetched."""
         return self._pages.get(ref_id)
 
     def url(self, ref_id: str) -> str | None:
+        """Resolve either a search or fetch reference within this session."""
         return self._urls.get(ref_id)
 
 
 class WebSearchTool(BaseTool):
+    """Search public pages and register destinations in the shared web session."""
+
     spec = ToolSpec(
         name="web_search",
         description=(
@@ -230,6 +238,8 @@ class WebSearchTool(BaseTool):
         domains: list[str] | None = None,
         recency: int | None = None,
     ) -> list[dict]:
+        """Fetch bounded DuckDuckGo results with optional domain and date filters."""
+        # Apply query policy before the shared transport owns rate limiting.
         params: dict[str, str] = {"q": _compose_query(query, domains)}
         if recency is not None:
             params["df"] = _recency_filter(int(recency))
@@ -242,6 +252,7 @@ class WebSearchTool(BaseTool):
         links, snippets = _RESULT_LINK.findall(text), _SNIPPET.findall(text)
         refs = self.session.search_refs(min(len(links), limit))
         results: list[dict] = []
+        # References belong to this search call even when URLs repeat later.
         for index, (href, title) in enumerate(links[:limit]):
             result = {
                 "ref_id": refs[index],
@@ -255,6 +266,7 @@ class WebSearchTool(BaseTool):
         return results
 
     async def search_many(self, queries: list[dict], limit: int) -> list[dict]:
+        """Merge at most four queries in order, keeping each destination once."""
         if len(queries) > MAX_QUERIES:
             raise ValueError(f"search_query must have at most {MAX_QUERIES} queries")
         per_query = max(2, limit // max(1, len(queries)))
@@ -276,6 +288,7 @@ class WebSearchTool(BaseTool):
         return combined[:limit]
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Accept legacy or batched query input and return reference-backed results."""
         queries, limit = self._queries(input), self._limit(input)
         if len(queries) == 1:
             spec = queries[0]
@@ -291,6 +304,8 @@ class WebSearchTool(BaseTool):
 
 
 class WebFetchTool(BaseTool):
+    """Fetch readable page text and search within session-owned page references."""
+
     spec = ToolSpec(
         name="web_fetch",
         description=(
@@ -319,6 +334,7 @@ class WebFetchTool(BaseTool):
         self.session = session or WebSession()
 
     async def fetch(self, url: str, max_chars: int = 12000) -> dict:
+        """Extract bounded text from an HTTP(S) page, rejecting other URL schemes."""
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
             raise ValueError("web_fetch only supports http and https URLs")
@@ -332,9 +348,17 @@ class WebFetchTool(BaseTool):
         )
 
     async def fetch_ref(self, ref_id: str, max_chars: int = 12000) -> dict:
+        """Honor the requested text limit, refetching only an insufficient cache."""
         cached = self.session.page(ref_id)
-        if cached is not None:
-            return dict(cached)
+        if cached is not None and (
+            len(cached["text"]) >= max_chars or not cached["truncated"]
+        ):
+            # A smaller view must not truncate the session's larger cached page.
+            return {
+                **cached,
+                "text": cached["text"][:max_chars],
+                "truncated": cached["truncated"] or len(cached["text"]) > max_chars,
+            }
         url = self.session.url(ref_id)
         if url is None:
             raise ValueError(f"unknown web ref_id: {ref_id}")
@@ -356,6 +380,8 @@ class WebFetchTool(BaseTool):
         }
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """Resolve a URL or reference and return bounded text or pattern excerpts."""
+        # Resolve one canonical page before applying the optional find operation.
         max_chars = max(500, min(int(input.get("max_chars") or 12000), 50000))
         pattern = (input.get("pattern") or "").strip() or None
         ref_id = (input.get("ref_id") or "").strip()

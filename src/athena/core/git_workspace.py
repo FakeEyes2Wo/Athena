@@ -174,14 +174,11 @@ class LocalGitWorkspace(GitWorkspace):
                     path = line[len("worktree ") :]
                 elif line.startswith("branch "):
                     br = line[len("branch ") :].removeprefix("refs/heads/")
-            if br == branch and path:
-                worktree_path = Path(path).resolve()
-                registered = self._states.get(worktree_path)
-                if registered is not None:
-                    workspace = registered.workspace
-                    if workspace.branch != branch:
-                        raise GitWorkspaceError("worktree 分支与已注册状态不匹配")
-                    return workspace
+            if br != branch or not path:
+                continue
+            worktree_path = Path(path).resolve()
+            registered = self._states.get(worktree_path)
+            if registered is None:
                 workspace = GitWorkBranch(
                     path=str(worktree_path),
                     branch=branch,
@@ -189,6 +186,10 @@ class LocalGitWorkspace(GitWorkspace):
                 )
                 self._states[worktree_path] = _WorkspaceState(workspace)
                 return workspace
+            workspace = registered.workspace
+            if workspace.branch != branch:
+                raise GitWorkspaceError("worktree 分支与已注册状态不匹配")
+            return workspace
         return None
 
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
@@ -426,6 +427,7 @@ class LocalGitWorkspace(GitWorkspace):
         try:
             baseline = await self._resolve_commit(baseline)
         except GitWorkspaceError:
+            # An invalid baseline trailer makes this recovery marker unusable.
             return None
         reviewed_diff = await self._git(
             "diff",
@@ -454,6 +456,7 @@ class LocalGitWorkspace(GitWorkspace):
                     "merge-base", marker, current, cwd=self._repo
                 )
             except GitWorkspaceError:
+                # Unrelated histories cannot prove that the marker is an ancestor.
                 ancestor = b""
             if ancestor.decode("ascii", errors="ignore").strip() == marker:
                 return marker
@@ -514,6 +517,7 @@ class LocalGitWorkspace(GitWorkspace):
         try:
             output = await self._git("rev-parse", "--verify", f"{commit}^{{commit}}")
         except GitWorkspaceError as exc:
+            # Git rejected the revision or it did not resolve to a commit object.
             raise GitWorkspaceError(f"未知或非 commit 对象：{commit}") from exc
         return output.decode("ascii").strip()
 

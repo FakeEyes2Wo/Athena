@@ -39,6 +39,7 @@ def _replace_with_retry(source: Path, destination: Path) -> None:
             os.replace(source, destination)
             return
         except BaseException as error:
+            # Inspect cancellation/system-exit too, but retry only recognized OS sharing errors.
             if not _is_retryable_replace_error(error):
                 raise
             if not isinstance(error, OSError):
@@ -58,6 +59,7 @@ def _fsync_parent(parent: Path) -> None:
     try:
         descriptor = os.open(parent, flags)
     except OSError as error:
+        # Some filesystems/platforms do not support opening directories for fsync.
         if error.errno in _DIRECTORY_SYNC_UNSUPPORTED:
             return
         raise
@@ -83,6 +85,7 @@ def atomic_write_bytes(path: str | Path, payload: bytes) -> Path:
         _replace_with_retry(temporary, target)
         _fsync_parent(target.parent)
     except BaseException:
+        # Any write/replace/sync failure (including cancellation) removes the temp before propagation.
         temporary.unlink(missing_ok=True)
         raise
     return target

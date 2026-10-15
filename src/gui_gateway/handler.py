@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from athena.core.human_request import (
 )
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
+from athena.research.clarification.errors import ClarificationPersistenceError
 from athena.research.runtime.bootstrap import build_paths
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiState, GuiStateStore
@@ -42,6 +43,7 @@ def _build_runtime(
     try:
         parameters = inspect.signature(factory).parameters.values()
     except (TypeError, ValueError):
+        # Some callable objects do not expose signatures; use the legacy call shape.
         parameters = ()
     accepts_keyword = any(
         parameter.name == "skip_validate"
@@ -164,6 +166,8 @@ def _session_activity(state_root: Path) -> tuple[bool, float]:
         path.stat().st_mtime
         for path in (
             state_root / "state.json",
+            state_root / "clarification.json",
+            state_root / "clarification-confirmation.json",
             state_root / "logs" / "sessions" / "default.jsonl",
         )
         if path.is_file()
@@ -178,8 +182,10 @@ def _directory_status(path: Path) -> bool:
     try:
         return stat.S_ISDIR(path.stat().st_mode)
     except (FileNotFoundError, NotADirectoryError):
+        # A missing path or a non-directory parent means it is not a directory.
         return False
     except OSError as exc:
+        # Permission and I/O errors are meaningful validation failures to callers.
         raise ValueError(f"directory is not accessible: {path}") from exc
 
 
@@ -201,6 +207,7 @@ async def _rmtree_when_released(path: Path, attempts: int = 10) -> None:
             _rmtree_force(path)
             return
         except PermissionError:
+            # Windows may hold transient handles while a released session closes.
             if attempt == attempts - 1:
                 raise
             await asyncio.sleep(delay)
@@ -224,6 +231,8 @@ class GuiRequestHandler:
         self._service = GuiService(runtime)
         self._project_root = Path(runtime.settings().get("project_root") or ".")
         self._current_session_id = "default"
+        self._clarification_calls = 0
+        self._runtime_swap_in_progress = False
 
     @property
     def runtime(self) -> ResearchRuntime:
@@ -231,6 +240,42 @@ class GuiRequestHandler:
         return self._runtime
 
     async def _swap_runtime(self, project_root: str, state_root: Path | None) -> None:
+        self._begin_runtime_swap()
+        try:
+            await self._replace_runtime(project_root, state_root)
+        finally:
+            self._runtime_swap_in_progress = False
+
+    def _begin_runtime_swap(self) -> None:
+        """Reject teardown during a human-facing clarification operation."""
+        if self._runtime_swap_in_progress:
+            raise ValueError("a workspace or session change is already in progress")
+        if self._clarification_calls:
+            raise ValueError(
+                "cannot change workspace or session while task understanding is active; "
+                "finish the current question or cancel the draft first"
+            )
+        self._runtime_swap_in_progress = True
+
+    def _begin_clarification_call(self) -> None:
+        """Fence clarification work from runtime teardown without a long-held lock."""
+        if self._runtime_swap_in_progress:
+            raise ValueError("the workspace or session is changing; retry this task")
+        self._clarification_calls += 1
+
+    async def _run_clarification_call(
+        self, operation: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        """Track a generator-advancing clarification RPC until it settles."""
+        self._begin_clarification_call()
+        try:
+            return await operation()
+        finally:
+            self._clarification_calls -= 1
+
+    async def _replace_runtime(
+        self, project_root: str, state_root: Path | None
+    ) -> None:
         """Close the current runtime and rebuild a fresh one (project/session swap).
 
         Build the replacement first. If construction fails, the previous runtime
@@ -308,8 +353,8 @@ class GuiRequestHandler:
         # 不存在的目录自动创建（含多级父目录），方便首次选择工作区。
         root.mkdir(parents=True, exist_ok=True)
         root = root.resolve()
-        self._project_root = root
         await self._swap_runtime(str(root), None)
+        self._project_root = root
         # 换工作区就换了一整套会话命名空间，旧工作区的会话 id 不能带过去。
         self._current_session_id = "default"
         stored = self._state_store.load()
@@ -333,11 +378,31 @@ class GuiRequestHandler:
         if previous != session_id:
             await self._discard_blank_session(previous)
         self._remember_session(session_id)
-        return {
+        result = {
             "session_id": session_id,
             "records": self._runtime.replay_output_events(),
             "sessions": self._session_ids(),
+            "clarification": None,
         }
+        try:
+            result["clarification"] = self._service.task_clarification_current()
+        except ClarificationPersistenceError as error:
+            # Report a damaged draft without preventing the session response.
+            if not str(error).startswith("draft_corrupt:"):
+                raise
+            # Keep session attach usable while preserving a visible recovery
+            # warning; starting a fresh task quarantines this damaged record.
+            logger.warning(
+                "session %s contains a corrupt clarification draft", session_id
+            )
+            result["clarification_error"] = {
+                "code": "draft_corrupt",
+                "message": (
+                    "The saved task draft is damaged. It will be preserved as a "
+                    "backup when you start a new task."
+                ),
+            }
+        return result
 
     async def _discard_blank_session(self, session_id: str) -> None:
         """回收刚离开的空白命名会话（没有 state.json 也没有 transcript）。
@@ -448,6 +513,7 @@ class GuiRequestHandler:
                 key=lambda item: str(item["name"]).casefold(),
             )
         except OSError as exc:
+            # The operating system rejected this filesystem or transport operation.
             raise ValueError(f"directory is not readable: {root}") from exc
         parent = root.parent if root != root.parent else None
         return {
@@ -470,6 +536,13 @@ class GuiRequestHandler:
         return {"deleted": True, "sessions": self._session_ids()}
 
     async def _reset_default_session(self) -> None:
+        self._begin_runtime_swap()
+        try:
+            await self._reset_default_session_impl()
+        finally:
+            self._runtime_swap_in_progress = False
+
+    async def _reset_default_session_impl(self) -> None:
         """重置默认会话：释放句柄 → 清掉它的痕迹 → 重开一个干净 runtime。
 
         default 没有独立目录（状态就落在工作区的 ``.athena/`` 里），所以只删它
@@ -551,23 +624,29 @@ class GuiRequestHandler:
             return service.eda_report()
 
         if method == "task_clarification_start":
-            return await service.task_clarification_start(
-                _require_str(params, "task", "task")
+            return await self._run_clarification_call(
+                lambda: service.task_clarification_start(
+                    _require_str(params, "task", "task")
+                )
             )
         if method == "task_clarification_get":
             return await service.task_clarification_get(
                 _require_str(params, "draft_id", "draft_id")
             )
         if method == "task_clarification_retry":
-            return await service.task_clarification_retry(
-                _require_str(params, "draft_id", "draft_id"),
-                int(params.get("revision")),
+            return await self._run_clarification_call(
+                lambda: service.task_clarification_retry(
+                    _require_str(params, "draft_id", "draft_id"),
+                    int(params.get("revision")),
+                )
             )
         if method == "task_clarification_revise":
-            return await service.task_clarification_revise(
-                _require_str(params, "draft_id", "draft_id"),
-                int(params.get("revision")),
-                _require_str(params, "instruction", "instruction"),
+            return await self._run_clarification_call(
+                lambda: service.task_clarification_revise(
+                    _require_str(params, "draft_id", "draft_id"),
+                    int(params.get("revision")),
+                    _require_str(params, "instruction", "instruction"),
+                )
             )
         if method == "task_clarification_cancel":
             return await service.task_clarification_cancel(

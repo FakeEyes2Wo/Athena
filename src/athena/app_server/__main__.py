@@ -7,6 +7,7 @@ from athena.app_server.events import Event, EventJournal
 from athena.app_server.submissions import InterruptTurn, StartTurn, Submission
 from athena.app_server.thread_runtime import ThreadRuntime
 
+
 async def _example_runner(_thread, turn, emit):
     await emit("message", f"artifact://events/{turn.turn_id}/started")
     if turn.request_ref == "request://fail":
@@ -16,6 +17,7 @@ async def _example_runner(_thread, turn, emit):
         return ("result://slow", "context://slow")
     await emit("message", f"artifact://events/{turn.turn_id}/done")
     return (f"result://{turn.turn_id}", f"context://{turn.turn_id}")
+
 
 async def _test_basic_submit_complete():
     print("  P2-1: basic submit & complete...", end=" ")
@@ -37,6 +39,7 @@ async def _test_basic_submit_complete():
     print("PASS")
     return True
 
+
 async def _test_runner_failure():
     print("  P2-2: runner failure...", end=" ")
     rt = ThreadRuntime("t2", "s1", "ctx://init", _example_runner)
@@ -56,6 +59,7 @@ async def _test_runner_failure():
     await rt.force_close()
     print("PASS")
     return True
+
 
 async def _test_interrupt():
     print("  P2-3: interrupt running turn...", end=" ")
@@ -80,6 +84,7 @@ async def _test_interrupt():
     print("PASS")
     return True
 
+
 async def _test_emit_rejected_after_terminal():
     print("  P2-4: emit rejected after terminal...", end=" ")
     rt = ThreadRuntime("t4", "s1", "ctx://init", _example_runner)
@@ -98,10 +103,12 @@ async def _test_emit_rejected_after_terminal():
                 raise RuntimeError("no active turn")
         assert False, "should have raised"
     except RuntimeError as e:
+        # This smoke check expects a turn-state precondition failure before cleanup.
         assert "no active turn" in str(e)
     await rt.force_close()
     print("PASS")
     return True
+
 
 async def _test_concurrent_threads():
     print("  P2-5: concurrent threads...", end=" ")
@@ -136,6 +143,7 @@ async def _test_concurrent_threads():
     print("PASS")
     return True
 
+
 async def _test_shutdown():
     print("  P2-6: graceful shutdown...", end=" ")
     rt = ThreadRuntime("t6", "s1", "ctx://init", _example_runner)
@@ -153,6 +161,7 @@ async def _test_shutdown():
             break
     print("PASS")
     return True
+
 
 async def _test_event_journal_multi_subscriber():
     print("  P4-1: multi-subscriber replay...", end=" ")
@@ -183,7 +192,9 @@ async def _test_event_journal_multi_subscriber():
     print("PASS")
     return True
 
+
 async def main():
+    """Run the in-process AppServer lifecycle smoke-test suite."""
     print("=== Athena App Server Self-Test ===\n")
     tests = [
         (
@@ -214,6 +225,7 @@ async def main():
     print(f"Results: {passed} passed, {failed} failed")
     if failed > 0:
         raise SystemExit(1)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

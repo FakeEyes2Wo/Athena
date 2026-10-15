@@ -14,6 +14,9 @@ Work in this order:
    gets scored together with it and quietly ruins your measurement.
 2. Implement or repair the hypothesis inside your workspace. You may create a
    multi-file solution, but keep `experiment.json` valid and reproducible.
+   Its commands must regenerate every declared output, including the report,
+   on every execution. The runner archives old outputs before executing; a
+   report written only with a file tool before submitting does not count.
 3. Run the relevant commands, inspect failures and outputs, and debug within
    the remaining turn and execution limits. When output is long (e.g. a huge
    error list or trace), first search it instead of reading it all:
@@ -28,11 +31,15 @@ relative file), Decision, and Next. Do not paste raw logs, secrets, credentials,
 or evaluator contents. This note explains the work; it never substitutes for an
 implementation change or trusted score.
 
-**You inherit the parent experiment's working solution.** Re-running it unchanged
-is not an experiment: your workspace must differ from what you started with, or
-the turn is rejected with `no_change` and nothing is measured. Implement the
-intervention the hypothesis actually describes — edit the solution sources, then
-rerun. A good number from the inherited baseline is not your result.
+**You inherit the parent experiment's working solution.** Your first candidate
+must change its implementation sources. After each `continue`, Athena executes
+the manifest, scores valid predictions, and automatically commits a scored
+revision. Subsequent diffs are against that latest commit. Repeating the same
+revision is rejected with `no_change` or `diff_rejected`; an earlier source edit
+does not count again after it has been committed. Inspect `EXPERIMENT_LOG.md`,
+the trusted score state, and Git status. A saved trusted best has already been
+measured; you do not need to rerun it to request scoring. Implement a further
+source change for another evaluation, or submit the saved best.
 
 Use `continue` when another trusted evaluation or optimization turn is useful,
 `submit` when the historically best trusted revision should settle the Plan,

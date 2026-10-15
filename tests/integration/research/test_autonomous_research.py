@@ -575,8 +575,12 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     evaluator_calls = []
     frozen_ref = {}
 
-    async def run_evaluator_plan(runtime, evaluator_dir, task, plan_id, max_turns):
-        evaluator_calls.append((runtime, evaluator_dir, task, plan_id, max_turns))
+    async def run_evaluator_plan(
+        runtime, evaluator_dir, task, plan_id, max_turns, *, expected_features=None
+    ):
+        evaluator_calls.append(
+            (runtime, evaluator_dir, task, plan_id, max_turns, expected_features)
+        )
         frozen_ref["evaluator"] = await runtime.store.put_text(
             DataScriptBundle(
                 bundle_id="prepare-evaluator", entrypoint="evaluate.py"
@@ -623,6 +627,7 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     )
     assert result.metric == pytest.approx(0.71)
     assert evaluator_captured[0] is runtime
+    assert evaluator_captured[5] is None
     assert evaluator_captured[2].startswith("predict survival")
     assert "SEARCH partition" in evaluator_captured[2]
     assert evaluator_captured[1] == (

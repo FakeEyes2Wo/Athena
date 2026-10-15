@@ -88,7 +88,10 @@ class PlanSettlement:
         primary: float | None = None
         outcome: Outcome | None = None
         if best_ref is None:
-            error = "settled without a trusted result"
+            error = (
+                self._state.plans[plan_id].last_failure
+                or "settled without a trusted result"
+            )
             if result is not None and result.error:
                 error = f"{result.kind}: {result.error}"
             self._tree.transition_experiment(
@@ -97,14 +100,18 @@ class PlanSettlement:
                 error=error,
             )
             if result is not None:
-                for kind, ref in {
-                    "predictions": result.predictions_ref,
-                    "metrics": result.metrics_ref,
-                    "evidence": result.evidence_ref,
-                    "report": result.report_ref,
-                }.items():
-                    if ref is not None:
-                        self._tree.attach_artifact(experiment_id, kind, ref)
+                artifacts = {
+                    kind: ref
+                    for kind, ref in {
+                        "predictions": result.predictions_ref,
+                        "metrics": result.metrics_ref,
+                        "evidence": result.evidence_ref,
+                        "report": result.report_ref,
+                    }.items()
+                    if ref is not None
+                }
+                for kind, ref in artifacts.items():
+                    self._tree.attach_artifact(experiment_id, kind, ref)
         else:
             best = await load_best(best_ref, self._deps.runtime.store)
             comparison: ComparisonVerdict | None = None
@@ -151,6 +158,7 @@ class PlanSettlement:
                     await self._deps.runtime.store.get_text(evidence_ref)
                 )
             except (json.JSONDecodeError, OSError, ValueError):
+                # Trigger: optional score evidence cannot be loaded as JSON; retain the trusted score without extra refs.
                 evidence = {}
             for key in (
                 "predictions_ref",

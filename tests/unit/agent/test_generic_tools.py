@@ -119,6 +119,22 @@ def test_generic_registry_runtime_adds_shell_command(tmp_path: Path) -> None:
     assert names == {"read_file", "write_file", "append_file", "shell_command"}
 
 
+def test_generic_registry_preserves_legacy_shell_runtime_signature(
+    tmp_path: Path,
+) -> None:
+    """Unrestricted agents keep working with shell adapters taking only root."""
+    from athena.execution.runtime import ExecutionRuntime
+
+    class LegacyRuntime:
+        def shell_command_tool(self, workspace_root: Path):
+            return ExecutionRuntime(
+                project_root=tmp_path, environment_root=tmp_path
+            ).shell_command_tool(workspace_root)
+
+    reg = generic_tool_registry(tmp_path, runtime=LegacyRuntime())
+    assert "shell_command" in {spec.name for spec in reg.specs}
+
+
 def test_build_llm_agent_injects_runtime_summary(tmp_path: Path) -> None:
     """runtime 提供时 system prompt 注入运行时摘要，tools 含 shell_command。"""
     from athena.agents.prompt_agent import build_llm_agent

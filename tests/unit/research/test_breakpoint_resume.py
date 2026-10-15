@@ -274,6 +274,7 @@ def _stub_runtime(
     task_understanding=None,
     skip_validate: bool = False,
     validation_phase=None,
+    with_authority: bool = False,
 ) -> ResearchRuntime:
     runtime = ResearchRuntime(
         project_root=tmp_path,
@@ -282,7 +283,10 @@ def _stub_runtime(
             policy=ResearchPolicy(skip_validate=skip_validate),
         ),
         dependencies=RuntimeDependencies(
-            adapters=RuntimeAdapters(validation=validation_phase)
+            adapters=RuntimeAdapters(validation=validation_phase),
+            baseline_authority=(
+                _MemoryBaselineAuthorityStore() if with_authority else None
+            ),
         ),
     )
     runtime.services.workflow.provider = object()
@@ -358,6 +362,7 @@ def _checkpointed_resume_runtime(
         tmp_path,
         skip_validate=skip_validate,
         validation_phase=validation_phase,
+        with_authority=True,
     )
     _seed_resumable_sota(runtime)
     runtime.state.phase = phase
@@ -440,6 +445,7 @@ async def test_lifecycle_start_does_not_require_clarification_services(
     )
     runtime = SimpleNamespace(
         session=SimpleNamespace(lifecycle=lifecycle),
+        provider=None,
         task_text="confirmed task",
         state=state,
         state_path=Path("state.json"),
@@ -505,7 +511,9 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
 @pytest.mark.asyncio
 async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> None:
     runtime = _stub_runtime(
-        tmp_path, task_understanding={"title": "titanic", "target": "survival"}
+        tmp_path,
+        task_understanding={"title": "titanic", "target": "survival"},
+        with_authority=True,
     )
     outputs: list[dict[str, object]] = []
 
@@ -626,6 +634,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     state = SimpleNamespace(
         phase="PREPARE",
         status="RUNNING",
+        experiment_timeout_s=120,
         eda_dir=None,
         task_understanding=None,
         save=lambda path: None,
@@ -700,6 +709,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     result = await PhaseRunner(rt).run_prepare_phase()
 
     assert result.evaluator_ref == frozen_ref
+    assert captured["timeout_s"] == 120
     assert rt.supervisor.checked_refs == []
     for filename in (
         "BASELINE_RESEARCH.json",

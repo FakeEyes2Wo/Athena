@@ -92,17 +92,19 @@ class TrustedEvaluator:
                 output_schema={"primary": None},
             )
         except (subprocess.SubprocessError, RuntimeError) as exc:
+            # Trigger: evaluator execution fails or returns no usable result, so this candidate cannot be scored.
             raise ValueError(f"evaluator failed to produce a score: {exc}") from exc
         primary = result.outputs.get("primary")
         if primary is None:
             raise ValueError("candidate evaluation produced no primary score")
         if isinstance(primary, bool) or not isinstance(primary, (int, float, str)):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 - evaluator data errors are a scoring failure contract
                 f"primary score must be a number, got {type(primary).__name__}"
             )
         try:
             metric = float(primary)
         except (TypeError, ValueError):
+            # Trigger: the evaluator's primary output cannot be converted to a numeric score.
             raise ValueError(
                 f"primary score must be numeric, got {primary!r}"
             ) from None
@@ -114,6 +116,7 @@ class TrustedEvaluator:
             try:
                 test_se = float(test_se)
             except (TypeError, ValueError):
+                # Trigger: optional test_se output is present but cannot be converted to a number.
                 raise ValueError(f"test_se must be numeric, got {test_se!r}") from None
             if not math.isfinite(test_se) or test_se < 0:
                 raise ValueError(
@@ -123,6 +126,7 @@ class TrustedEvaluator:
             try:
                 test_n = int(test_n)
             except (TypeError, ValueError):
+                # Trigger: optional test_n output is present but cannot be converted to an integer.
                 raise ValueError(f"test_n must be an integer, got {test_n!r}") from None
             if test_n < 0:
                 raise ValueError(f"test_n must be non-negative, got {test_n!r}")

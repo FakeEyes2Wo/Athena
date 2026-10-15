@@ -73,7 +73,8 @@ class Recovery:
         workspace_exists: Callable[[str], bool],
         artifact_exists: Callable[[str], bool],
     ) -> ResearchState:
+        """Delegate recovery reconciliation to the pure module operation."""
         return reconcile(state, tree, workspace_exists, artifact_exists)
 
 
-__all__ = ["reconcile", "Recovery"]
+__all__ = ["Recovery", "reconcile"]

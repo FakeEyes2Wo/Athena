@@ -5,8 +5,9 @@ mod common;
 
 use athena_agent::{AgentError, ProviderEvent};
 use athena_memory::{MessagePart, MessageRole};
+use athena_runtime::{EmitError, EventDraft, EventSink};
 use common::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{Mutex, watch};
 
@@ -54,6 +55,47 @@ async fn single_tool_call_then_completes() {
         && m.parts.iter().any(
             |p| matches!(p, MessagePart::ToolReturn { tool_name, .. } if tool_name == "echo")
         )));
+}
+
+struct EventRefSink(Arc<StdMutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl EventSink for EventRefSink {
+    async fn emit(&self, draft: EventDraft) -> Result<(), EmitError> {
+        if draft.kind.starts_with("tool/") {
+            self.0.lock().unwrap().push(draft.event_ref);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn same_named_tool_calls_keep_distinct_provider_call_ids() {
+    let provider = FakeProvider::new(vec![
+        vec![
+            tool_call("provider_call_a", "echo"),
+            tool_call("provider_call_b", "echo"),
+            completed(),
+        ],
+        vec![text_delta("done"), completed()],
+    ]);
+    let agent = make_agent(provider, vec![EchoTool::new("echo", true)]);
+    let event_refs = Arc::new(StdMutex::new(Vec::new()));
+    let (ctx, _) = make_ctx(Arc::new(EventRefSink(event_refs.clone())), "echo twice");
+
+    agent.run(ctx).await.unwrap();
+
+    let mut actual = event_refs.lock().unwrap().clone();
+    actual.sort();
+    assert_eq!(
+        actual,
+        vec![
+            "event:provider_call_a".to_string(),
+            "event:provider_call_a".to_string(),
+            "event:provider_call_b".to_string(),
+            "event:provider_call_b".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]

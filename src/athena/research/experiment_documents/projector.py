@@ -51,6 +51,7 @@ def _resolve_metric(
                 raise ValueError("primary_metric is blank or missing")
             return name
         except (OSError, TypeError, ValueError):
+            # Trigger: an evaluator metric file is unreadable or lacks a nonblank primary_metric string.
             logger.warning("invalid evaluator metric at %s", root, exc_info=True)
     if isinstance(task_understanding, Mapping):
         value = task_understanding.get("primary_metric")
@@ -179,14 +180,17 @@ class ProjectionContext:
 
     @property
     def validation(self) -> Mapping[str, object] | None:
+        """Return the validation result carried by the canonical state."""
         return self.state.validation
 
     @property
     def validation_skipped(self) -> bool:
+        """Report whether validation was explicitly skipped for this run."""
         return bool(self.state.validation_skipped)
 
     @property
     def task_understanding(self) -> Mapping[str, object] | None:
+        """Return the persisted task-understanding payload, when present."""
         return self.state.task_understanding
 
 

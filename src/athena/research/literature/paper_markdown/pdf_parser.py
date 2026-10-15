@@ -168,13 +168,14 @@ def repeated_margin_texts(pages: list[tuple[fitz.Rect, list[PdfBlock]]]) -> set[
         for block in blocks:
             if block.block_type != "text":
                 continue
-            if (
+            if not (
                 block.bbox[1] <= page_rect.height * 0.08
                 or block.bbox[3] >= page_rect.height * 0.92
             ):
-                normalized = normalized_margin_text(block.text)
-                if normalized:
-                    seen.add(normalized)
+                continue
+            normalized = normalized_margin_text(block.text)
+            if normalized:
+                seen.add(normalized)
         counts.update(seen)
     threshold = max(2, len(pages) // 2)
     return {text for text, count in counts.items() if count >= threshold}
@@ -1095,9 +1096,11 @@ class PdfPaperParser:
                     looks_like_author_line(block.text)
                     and block.text.strip() not in authors
                 ):
-                    for author in split_pdf_author_line(block.text):
-                        if author not in authors:
-                            authors.append(author)
+                    authors.extend(
+                        author
+                        for author in split_pdf_author_line(block.text)
+                        if author not in authors
+                    )
                 if block.bbox[1] > page_rect.height * 0.25:
                     continue
                 self.add_element(block, "front_matter", block.text)
