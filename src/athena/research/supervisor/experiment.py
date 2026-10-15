@@ -77,6 +77,9 @@ def _diff_intervention_failure(paths: tuple[str, ...]) -> PlanFailure | None:
     prove the diff implements the exact intervention, but it rejects the obvious
     non-experiments (manifest-only, output-only, doc-only) that currently pass
     the “non-empty diff” gate.
+
+    An unchanged entrypoint can import changed helpers or load them dynamically;
+    manifest argv alone cannot establish whether a source change is executed.
     """
     if not paths:
         return PlanFailure(
@@ -495,7 +498,7 @@ class PlanRunner:
         try:
             assert_output_roots(self.workdir, manifest.outputs, required=required)
         except OutputFreshnessError as exc:
-            # 命令未产生声明输出 → 同 Plan 修正后重试
+            # 命令未产生声明输出 → 同 Plan 修正后重试。
             return PlanFailure(kind="output_failed", detail=str(exc))
         return None
 

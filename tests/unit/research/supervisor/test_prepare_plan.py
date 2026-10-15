@@ -558,6 +558,7 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
 
     assert agents.created == ["prepare"]
     assert len(agents.feedback) == 1
+    assert agents.feedback[0].startswith("PREPARE repair turn 2/2;")
     assert "row ids do not align" in agents.feedback[0]
 
 

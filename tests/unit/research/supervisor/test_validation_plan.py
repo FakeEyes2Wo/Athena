@@ -447,10 +447,17 @@ class _StubExecution:
 class _StubGit:
     def __init__(self) -> None:
         self.restored: list[tuple[str, ...]] = []
+        self.discarded: list[tuple[str, ...]] = []
 
     async def restore_paths(self, workspace, paths) -> None:
         del workspace
         self.restored.append(tuple(paths))
+
+    async def discard_to_baseline(self, workspace, *, keep_paths=()) -> tuple[str, ...]:
+        """Record the approved paths the run must leave in place."""
+        del workspace
+        self.discarded.append(tuple(keep_paths))
+        return ()
 
 
 @pytest.mark.asyncio
@@ -489,7 +496,8 @@ async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None
     # Stale file is archived outside the Git worktree, not packed.
     history = workdir.parent / "validate-output-history" / "validate"
     assert (history / "predictions" / "stale.csv").is_file()
-    assert git.restored == [("predictions", "REPORT.md")]
+    # No repair was approved, so nothing is kept and all run churn is discarded.
+    assert git.discarded == [()]
 
 
 @pytest.mark.asyncio
@@ -559,4 +567,4 @@ async def test_execute_predictions_rejects_missing_directory(tmp_path) -> None:
             store=store,
             publish=None,
         )
-    assert git.restored == [("predictions",)]
+    assert git.discarded == [()]

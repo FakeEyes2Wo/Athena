@@ -88,8 +88,79 @@ def _trusted_git_candidates() -> tuple[tuple[Path, Path], ...]:
     return tuple(candidates)
 
 
+_TRUSTED_GIT_ENV_VAR = "ATHENA_TRUSTED_GIT"
+_TRUSTED_GIT_PROXY_ENV_VAR = "ATHENA_TRUSTED_GIT_PROXY"
+
+
+def _operator_git_proxy() -> str | None:
+    """Return the operator-declared egress proxy for repository verification.
+
+    The clone deliberately discards every ambient proxy setting, which assumes
+    the verification host reaches the repository directly. A network whose only
+    egress is a local proxy makes that assumption false, and the authority gate
+    can then never pass while every other phase works. The operator may name
+    the proxy that all other traffic already uses.
+
+    Like the trusted-Git override the value is read once at import, which keeps
+    it out of reach of a running Agent, and URLs carrying credentials are
+    rejected so the value cannot leak into argv or diagnostics.
+    """
+
+    raw = os.environ.get(_TRUSTED_GIT_PROXY_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+    except ValueError:
+        # Malformed proxy authorities, such as unmatched IPv6 brackets, are unusable.
+        return None
+    if parsed.scheme.casefold() not in {"http", "https", "socks5", "socks5h"}:
+        return None
+    if not hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if parsed.path.strip("/") or parsed.query or parsed.fragment:
+        return None
+    return raw
+
+
+def _operator_git_override() -> str | None:
+    """Return the operator-declared Git executable when it is usable.
+
+    Git for Windows is not always installed under ``%ProgramFiles%``: a custom
+    drive or a package manager is common, and the fixed candidate list then
+    finds nothing, so the baseline authority gate can never pass while every
+    other phase works. The operator who launches the run may therefore name
+    the real executable explicitly.
+
+    The value is read once at import, which keeps it out of reach of a running
+    Agent, and it is only accepted when it is an absolute path to an existing
+    file named ``git`` or ``git.exe``.
+    """
+
+    raw = os.environ.get(_TRUSTED_GIT_ENV_VAR, "").strip()
+    if not raw or not Path(raw).is_absolute():
+        return None
+    try:
+        resolved = Path(raw).resolve(strict=True)
+    except OSError:
+        # The configured executable is absent, inaccessible or cannot be resolved.
+        return None
+    if not resolved.is_file():
+        return None
+    if resolved.name.casefold() not in {"git", "git.exe"}:
+        return None
+    return str(resolved)
+
+
 def _capture_git_executable() -> str | None:
-    """Capture Git only from fixed, controller-owned installation directories."""
+    """Capture Git from the operator override or a fixed installation directory."""
+
+    override = _operator_git_override()
+    if override is not None:
+        return override
 
     for trusted_root, candidate in _trusted_git_candidates():
         try:
@@ -118,6 +189,7 @@ def _capture_platform_environment() -> Mapping[str, str]:
 
 
 _GIT_EXECUTABLE: Final[str | None] = _capture_git_executable()
+_GIT_PROXY: Final[str | None] = _operator_git_proxy()
 _PLATFORM_ENVIRONMENT: Final[Mapping[str, str]] = _capture_platform_environment()
 
 
@@ -281,7 +353,11 @@ class GitCloneVerifier:
         """Clone a repository shallowly and return its resolved HEAD commit."""
 
         if _GIT_EXECUTABLE is None:
-            self._raise_failure("trusted Git executable is unavailable")
+            self._raise_failure(
+                "trusted Git executable is unavailable: install Git under "
+                "%ProgramFiles%\\Git or name the real executable with the "
+                "ATHENA_TRUSTED_GIT environment variable before launching the run"
+            )
         try:
             normalized_url = normalize_public_https_repository_url(repository_url)
         except ValueError as exc:
@@ -359,14 +435,16 @@ class GitCloneVerifier:
                 "http.saveCookies=false",
                 "-c",
                 "http.extraHeader=",
-                "-c",
-                "http.sslCert=",
-                "-c",
-                "http.sslKey=",
+                # No empty ``http.sslCert``/``http.sslKey`` overrides here: an
+                # empty client-certificate path is not a no-op on Windows, where
+                # it aborts the schannel handshake ("Failed to get certificate
+                # location or file") and the clone dies with a credential error.
+                # Ambient TLS material is already kept out by the environment
+                # allowlist and the nulled system/global configuration.
                 "-c",
                 "http.sslCertPasswordProtected=false",
                 "-c",
-                "http.proxy=",
+                f"http.proxy={_GIT_PROXY or ''}",
                 "-c",
                 "http.proxySSLCert=",
                 "-c",

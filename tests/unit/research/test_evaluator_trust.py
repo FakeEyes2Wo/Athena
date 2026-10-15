@@ -15,6 +15,9 @@ from athena.research.evaluation.trust import (
 )
 
 _LABELS = "__athena_row_id,label\n0,0\n1,1\n2,0\n3,1\n4,0\n5,1\n"
+_LABELS_WITH_SAMPLE_KEY = (
+    "__athena_row_id,unit_serial,fault\n0,0,0\n1,1,1\n2,2,0\n3,3,1\n4,4,0\n5,5,1\n"
+)
 
 
 class _RowOrderBroken:
@@ -108,6 +111,65 @@ def test_parse_labels_trims_headers_and_predictions_quote_csv_values() -> None:
 def test_extract_label_column_from_source_reads_explicit_constant() -> None:
     assert extract_label_column_from_source("LABEL_COLUMN = 'outcome'\n") == "outcome"
     assert extract_label_column_from_source("label = 'outcome'\n") is None
+
+
+def test_parse_labels_reads_the_declared_target_column() -> None:
+    """A sample key between the identity and target column must not win."""
+
+    ids, values, id_column = _parse_labels(
+        _LABELS_WITH_SAMPLE_KEY,
+        id_column="__athena_row_id",
+        target_column="fault",
+    )
+
+    assert ids == ["0", "1", "2", "3", "4", "5"]
+    assert values == ["0", "1", "0", "1", "0", "1"]
+    assert id_column == "__athena_row_id"
+
+
+def test_parse_labels_rejects_an_absent_or_identity_target_column() -> None:
+    with pytest.raises(ValueError):
+        _parse_labels(_LABELS_WITH_SAMPLE_KEY, target_column="missing")
+    with pytest.raises(ValueError):
+        _parse_labels(_LABELS_WITH_SAMPLE_KEY, target_column="__athena_row_id")
+
+
+def test_extract_label_column_reads_the_declared_constant() -> None:
+    source = (
+        'PREDICTION_FILE = "predictions__x.csv"\n'
+        'PREDICTION_COLUMN = "pred_label"\n'
+        'LABEL_COLUMN = "fault"\n'
+    )
+
+    assert extract_label_column_from_source(source) == "fault"
+
+
+def test_extract_label_column_returns_none_when_not_declared() -> None:
+    assert extract_label_column_from_source("") is None
+    assert extract_label_column_from_source('PREDICTION_COLUMN = "pred"\n') is None
+
+
+@pytest.mark.asyncio
+async def test_probe_reads_the_declared_target_column() -> None:
+    """The perfect-prediction probe must score against the target, not a key.
+
+    Without an explicit target column the probe takes the column after the
+    identity one, which here is ``unit_serial``. Reading it yields a degenerate
+    label universe, and the value-permutation check then correctly reports that
+    permuting values did not change the score.
+    """
+
+    scorer = _GoodEvaluator()
+
+    outcome = await validate_evaluator_properties(
+        _LABELS_WITH_SAMPLE_KEY,
+        scorer,
+        prediction_column="pred_label",
+        prediction_id_column="__athena_row_id",
+        label_column="fault",
+    )
+
+    assert outcome["ok"] is True
 
 
 def test_extract_prediction_column_returns_none_when_not_declared() -> None:

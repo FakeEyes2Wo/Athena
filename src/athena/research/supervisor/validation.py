@@ -294,6 +294,7 @@ async def _execute_predictions(
     prediction_file: str | None = None,
     prediction_format: str = "tabular_csv",
     version: str | None = None,
+    keep_paths: tuple[str, ...] = (),
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
 
@@ -307,6 +308,13 @@ async def _execute_predictions(
     With the Task B execution API, the held-out target travels on
     ``ExecutionContext.predict_features`` and is materialised onto each
     ``CommandRequest`` by ``ExecutionRuntime.run`` before the backend runs it.
+
+    ``keep_paths`` names the paths the independent review approved.  Everything
+    else the run touched is run-artifact churn: the frozen command rewrites its
+    own report and any side files it writes, and VALIDATE refuses to proceed
+    while the worktree differs from the reviewed state.  Restoring declared
+    outputs alone is not enough for a candidate whose command also writes
+    undeclared files, so the whole delta beyond ``keep_paths`` is restored.
     """
     workdir = Path(workspace.path)
     manifest = read_experiment_manifest(workdir)
@@ -352,7 +360,10 @@ async def _execute_predictions(
         ref = await pack_directory(store, predictions_dir)
         return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
-        await git.restore_paths(workspace, tuple(manifest.outputs.values()))
+        # Put the worktree back to the reviewed state: the approved paths keep
+        # the content the review accepted, and every other path the run rewrote
+        # — including undeclared side files the command writes — is discarded.
+        await git.discard_to_baseline(workspace, keep_paths=keep_paths)
 
 
 # Keep the old private name as an import-compatible alias for existing callers/tests.
@@ -503,39 +514,49 @@ class ValidationSession:
         deps = self.deps
         input = self.input
         options = self.options
+        if deps.workspace.base_commit != input.sota_commit:
+            raise RuntimeError(
+                "validation cannot restart from a non-SOTA commit without "
+                "reviewed diff evidence"
+            )
         repair = await _decode_repair(deps.agents, deps.store, input=input)
         for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await deps.git.diff(deps.workspace)
-            preflight = await _deterministic_preflight(
-                workspace=deps.workspace,
-                diff=diff,
-                explanation=repair.explanation,
-                store=deps.store,
-            )
-            if not preflight.accepted:
-                repair = await _decode_repair(
-                    deps.agents,
-                    deps.store,
-                    input=input,
-                    feedback=f"Validation policy rejected the repair: {preflight.reason}",
+            if not diff.paths:
+                # Nothing is being proposed, so there is no repair to approve:
+                # run the frozen SOTA command exactly as committed.
+                reviewed_diff = diff
+            else:
+                preflight = await _deterministic_preflight(
+                    workspace=deps.workspace,
+                    diff=diff,
+                    explanation=repair.explanation,
+                    store=deps.store,
                 )
-                continue
-            review = await review_validation_diff(
-                workspace=deps.workspace,
-                diff=diff,
-                explanation=repair.explanation,
-                independent_review=deps.independent_review,
-                store=deps.store,
-            )
-            if not review.accepted:
-                repair = await _decode_repair(
-                    deps.agents,
-                    deps.store,
-                    input=input,
-                    feedback=f"Independent review rejected the repair: {review.reason}",
+                if not preflight.accepted:
+                    repair = await _decode_repair(
+                        deps.agents,
+                        deps.store,
+                        input=input,
+                        feedback=f"Validation policy rejected the repair: {preflight.reason}",
+                    )
+                    continue
+                review = await review_validation_diff(
+                    workspace=deps.workspace,
+                    diff=diff,
+                    explanation=repair.explanation,
+                    independent_review=deps.independent_review,
+                    store=deps.store,
                 )
-                continue
-            reviewed_diff = diff
+                if not review.accepted:
+                    repair = await _decode_repair(
+                        deps.agents,
+                        deps.store,
+                        input=input,
+                        feedback=f"Independent review rejected the repair: {review.reason}",
+                    )
+                    continue
+                reviewed_diff = diff
             (
                 prediction_id_column,
                 prediction_file,
@@ -555,6 +576,7 @@ class ValidationSession:
                 prediction_file=prediction_file,
                 prediction_format=prediction_format,
                 version=f"validate-{input.validation_key}",
+                keep_paths=reviewed_diff.paths,
             )
             if await deps.git.diff(deps.workspace) != reviewed_diff:
                 repair = await _decode_repair(

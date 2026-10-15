@@ -1,6 +1,7 @@
 ﻿"""真实临时仓库上的 LocalGitWorkspace 单元测试。"""
 
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -343,6 +344,79 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(GitWorkspaceError):
             await self.manager.restore_paths(workspace, ("predictions.csv",))
+
+    async def test_discard_to_baseline_keeps_approved_paths_and_removes_untracked(
+        self,
+    ) -> None:
+        (self.repo / "keep1.txt").write_text("approved v1\n", encoding="utf-8")
+        (self.repo / "keep[1].txt").write_text("discard v1\n", encoding="utf-8")
+        self._git("add", "keep1.txt", "keep[1].txt")
+        self._git("commit", "--no-gpg-sign", "-m", "add discard fixtures")
+        self.base_commit = self._git("rev-parse", "HEAD").stdout.strip()
+        workspace = await self._create("experiment/discard-to-baseline")
+        root = Path(workspace.path)
+        approved = root / "keep1.txt"
+        bracketed = root / "keep[1].txt"
+        await self.manager.diff(workspace)
+
+        approved.write_text("approved v2\n", encoding="utf-8")
+        bracketed.write_text("discard v2\n", encoding="utf-8")
+        generated = root / "generated output.txt"
+        generated.write_text("temporary\n", encoding="utf-8")
+
+        discarded = await self.manager.discard_to_baseline(
+            workspace, keep_paths=("keep1.txt",)
+        )
+
+        self.assertEqual("approved v2\n", approved.read_text(encoding="utf-8"))
+        self.assertEqual("discard v1\n", bracketed.read_text(encoding="utf-8"))
+        self.assertFalse(generated.exists())
+        self.assertEqual({"keep[1].txt", "generated output.txt"}, set(discarded))
+
+    async def test_discard_to_baseline_unlinks_external_target_symlink(self) -> None:
+        workspace = await self._create("experiment/discard-symlink")
+        root = Path(workspace.path)
+        outside = Path(self._temp.name) / "outside-target.txt"
+        outside.write_text("must survive\n", encoding="utf-8")
+        link = root / "outside-link.txt"
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlink creation is unavailable: {error}")
+
+        discarded = await self.manager.discard_to_baseline(workspace)
+
+        self.assertEqual(("outside-link.txt",), discarded)
+        self.assertFalse(link.is_symlink())
+        self.assertEqual("must survive\n", outside.read_text(encoding="utf-8"))
+
+    async def test_discard_to_baseline_restores_through_symlinked_directory_entry(
+        self,
+    ) -> None:
+        nested = self.repo / "nested"
+        nested.mkdir()
+        (nested / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+        self._git("add", "nested/tracked.txt")
+        self._git("commit", "--no-gpg-sign", "-m", "add nested fixture")
+        self.base_commit = self._git("rev-parse", "HEAD").stdout.strip()
+        workspace = await self._create("experiment/reject-parent-symlink")
+        root = Path(workspace.path)
+        await self.manager.diff(workspace)
+
+        outside = Path(self._temp.name) / "outside-directory"
+        outside.mkdir()
+        outside_file = outside / "tracked.txt"
+        outside_file.write_text("outside data\n", encoding="utf-8")
+        shutil.rmtree(root / "nested")
+        try:
+            os.symlink(outside, root / "nested", target_is_directory=True)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"directory symlink creation is unavailable: {error}")
+
+        with self.assertRaises(GitWorkspaceError):
+            await self.manager.discard_to_baseline(workspace, keep_paths=("nested",))
+
+        self.assertEqual("outside data\n", outside_file.read_text(encoding="utf-8"))
 
     async def test_dirty_remove_requires_explicit_force(self) -> None:
         workspace = await self._create("experiment/discard")

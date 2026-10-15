@@ -12,9 +12,9 @@ verified behavior.
 - [x] Run a read-only GUI/gateway startup smoke check and inspect runtime errors.
 - [x] Record an explicit task-owned source/test/document path list, review the
   staged patch and check it for credential patterns before committing.
-- [ ] Integrate the five upstream commits; resolve overlapping research-loop,
+- [x] Integrate the five upstream commits; resolve overlapping research-loop,
   evaluator and validation contracts with independent review and regression tests.
-- [ ] Run relevant merged-state tests, build and formatting/style checks.
+- [x] Run relevant merged-state tests, build and formatting/style checks.
 - [ ] Write the publication report, close/archive the completed historical module
   ledger, remove completed plan pointers, commit and push to origin/main.
 - [ ] Verify the remote commit and preserve unrelated dirty worktree entries.

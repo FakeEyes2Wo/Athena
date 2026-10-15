@@ -43,6 +43,7 @@ class _RepairProvider:
     def __init__(self) -> None:
         self.calls = 0
         self.feedback_seen = ""
+        self.write_candidate = True
 
     async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
         self.calls += 1
@@ -51,7 +52,7 @@ class _RepairProvider:
             for message in messages
             for part in getattr(message, "parts", ())
         )
-        if self.calls in (1, 3):
+        if self.write_candidate and self.calls in (1, 3):
             yield StreamEvent(
                 kind="function_call",
                 data={
@@ -151,7 +152,7 @@ class _Harness:
         self.input = None
         self.result_ref = None
         self.checkpoints: list[str] = []
-        self.restore_calls: list[tuple[str, ...]] = []
+        self.discard_calls: list[tuple[str, ...]] = []
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         return subprocess.run(
@@ -161,7 +162,7 @@ class _Harness:
             text=True,
         ).stdout.strip()
 
-    async def start(self) -> None:
+    async def start(self, *, include_manifest: bool = False) -> None:
         self.repo.mkdir()
         self._git("init", "-b", "main")
         self._git("config", "user.name", "Athena Test")
@@ -176,6 +177,17 @@ class _Harness:
             "Path('predictions/pred.csv').write_text('id,pred\\n1,0\\n', encoding='utf-8')\n",
             encoding="utf-8",
         )
+        if include_manifest:
+            (self.repo / "experiment.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "commands": [["python", "predict.py"]],
+                        "outputs": {"predictions": "predictions"},
+                    }
+                ),
+                encoding="utf-8",
+            )
         (self.repo / "predictions").mkdir()
         (self.repo / "predictions" / "pred.csv").write_text(
             "id,pred\nreviewed,1\n", encoding="utf-8"
@@ -189,13 +201,13 @@ class _Harness:
 
         self.git = LocalGitWorkspace(self.repo, self.worktrees, write_diff)
         self.branch = await self.git.create(sota, "athena/validate")
-        restore_paths = self.git.restore_paths
+        discard_to_baseline = self.git.discard_to_baseline
 
-        async def record_restore(workspace, paths):
-            self.restore_calls.append(paths)
-            await restore_paths(workspace, paths)
+        async def record_discard(workspace, *, keep_paths=()):
+            self.discard_calls.append(tuple(keep_paths))
+            return await discard_to_baseline(workspace, keep_paths=keep_paths)
 
-        self.git.restore_paths = record_restore
+        self.git.discard_to_baseline = record_discard
         registry = AgentTypeRegistry()
         runtime = ExecutionRuntime(
             project_root=Path(self.branch.path), store=self.store
@@ -248,7 +260,7 @@ class _Harness:
         self.result_ref = result_ref
         self.checkpoints.append(result_ref)
 
-    async def run(self):
+    async def run(self, *, options: ValidationOptions | None = None):
         deps = ValidationDeps(
             agents=self.agents,
             git=self.git,
@@ -262,7 +274,7 @@ class _Harness:
         return await run_validation_plan(
             input=self.input,
             deps=deps,
-            options=ValidationOptions(),
+            options=options or ValidationOptions(),
             result_ref=self.result_ref,
         )
 
@@ -281,7 +293,7 @@ async def test_validate_uses_stable_validate_agent_plan_and_workspace(tmp_path) 
     assert result.validation_commit != result.sota_commit
     assert harness.review_execution_counts == [0]
     assert "predictions" in harness.review_prompts[-1]
-    assert harness.restore_calls == [("predictions",)]
+    assert set(harness.discard_calls) == {("experiment.json", "solution/runtime.py")}
     assert (Path(harness.branch.path) / "predictions" / "pred.csv").read_text(
         encoding="utf-8"
     ) == "id,pred\nreviewed,1\n"
@@ -326,8 +338,52 @@ async def test_command_source_mutation_is_rejected_before_score(tmp_path) -> Non
 async def test_missing_review_evidence_restarts_review_before_commit(tmp_path) -> None:
     harness = _Harness(tmp_path)
     await harness.start()
+    original_score = harness.evaluator.score
+
+    async def interrupt_after_prediction_checkpoint(**_kwargs):
+        raise RuntimeError("simulated interruption before validation commit")
+
+    harness.evaluator.score = interrupt_after_prediction_checkpoint
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        await harness.run()
+
+    review_calls = harness.review_calls
+    payload = json.loads(await harness.store.get_text(harness.result_ref))
+    assert payload["predictions_ref"]
+    assert payload["evidence_ref"]
+    assert payload["validation_commit"] is None
+    payload["evidence_ref"] = None
+    payload["status"] = "FAILED"
+    harness.result_ref = await harness.store.put_text(json.dumps(payload))
+    harness.evaluator.score = original_score
+
+    resumed = await harness.run()
+
+    assert resumed.predictions_ref == payload["predictions_ref"]
+    assert harness.review_calls == review_calls + 1
+    assert harness.review_execution_counts[-1] == 1
+    assert harness.execution.calls == 2
+    assert resumed.generalization_gap == pytest.approx(0.03)
+    assert resumed.generalization_warning is True
+    await harness.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncommitted_edit", [False, True])
+async def test_missing_review_evidence_after_validation_commit_fails_closed(
+    tmp_path, uncommitted_edit: bool
+) -> None:
+    harness = _Harness(tmp_path)
+    await harness.start()
     first = await harness.run()
     review_calls = harness.review_calls
+    execution_calls = harness.execution.calls
+    model_calls = harness.provider.calls
+    score_calls = harness.evaluator.calls
+    if uncommitted_edit:
+        (Path(harness.branch.path) / "solution" / "runtime.py").write_text(
+            "UNREVIEWED = True\n", encoding="utf-8"
+        )
     payload = json.loads(await harness.store.get_text(harness.result_ref))
     payload["final_test_score"] = None
     payload["evidence_ref"] = None
@@ -335,14 +391,89 @@ async def test_missing_review_evidence_restarts_review_before_commit(tmp_path) -
     payload["status"] = "FAILED"
     harness.result_ref = await harness.store.put_text(json.dumps(payload))
 
-    resumed = await harness.run()
+    with pytest.raises(
+        RuntimeError, match="non-SOTA commit without reviewed diff evidence"
+    ):
+        await harness.run()
 
-    assert first.predictions_ref == resumed.predictions_ref
-    assert harness.review_calls == review_calls + 1
-    assert harness.review_execution_counts[-1] == 1
-    assert harness.execution.calls == 2
-    assert resumed.generalization_gap == pytest.approx(0.03)
-    assert resumed.generalization_warning is True
+    assert first.validation_commit is not None
+    assert harness.review_calls == review_calls
+    assert harness.execution.calls == execution_calls
+    assert harness.provider.calls == model_calls
+    assert harness.evaluator.calls == score_calls
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_diff_uses_frozen_prediction_contract(
+    tmp_path, monkeypatch
+) -> None:
+    import athena.research.supervisor.validation as validation
+
+    harness = _Harness(tmp_path)
+    await harness.start(include_manifest=True)
+    harness.provider.write_candidate = False
+    final_features = tmp_path / "final_features.csv"
+    final_features.write_text("sample_key,feature\nrow-1,1\n", encoding="utf-8")
+    evaluator_dir = tmp_path / "final_eval"
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 2,
+                "task_id": "heldout",
+                "task_type": "binary_classification",
+                "primary_metric": "f1",
+                "class_labels": ["0", "1"],
+                "prediction_file": "predictions.opaque",
+                "prediction_id_column": "sample_key",
+                "prediction_column": "score",
+                "prediction_format": "opaque_json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    execution_calls = []
+
+    class _OpaquePredictionExecution:
+        async def run(self, _context, request):
+            execution_calls.append(request)
+            output = Path(request.workdir) / "predictions"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "predictions.opaque").write_text("{}", encoding="utf-8")
+
+            class _Ok:
+                ok = True
+                stdout = ""
+                stderr = ""
+                exit_code = 0
+
+            return _Ok()
+
+    harness.execution = _OpaquePredictionExecution()
+    covered_contracts = []
+    assert_coverage = validation.assert_predictions_cover
+
+    def record_coverage(*args, **kwargs):
+        covered_contracts.append(kwargs.copy())
+        return assert_coverage(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "assert_predictions_cover", record_coverage)
+    result = await harness.run(
+        options=ValidationOptions(predict_features=final_features)
+    )
+
+    assert result.result_id == harness.input.validation_key
+    assert harness.review_calls == 0
+    assert len(execution_calls) == 1
+    assert covered_contracts == [
+        {
+            "prediction_file": "predictions.opaque",
+            "prediction_id_column": "sample_key",
+            "expected_id_column": "sample_key",
+            "prediction_format": "opaque_json",
+        }
+    ]
     await harness.close()
 
 
