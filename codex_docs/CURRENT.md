@@ -1,13 +1,19 @@
 ﻿# Current Athena Work
 
-Active runtime verification and authorized commit/push:
-- `docs/codex_docs/2026-10-15-publish-verification-plan.md`
+Completed runtime verification and authorized commit/push:
+- `docs/codex_docs/2026-10-15-publication-completion.md`
+
+Source integration bb4c3397 is pushed to origin/main and the remote SHA was
+verified. Final integrated backend suite: 3,156 passed, 1 skipped, 52 subtests
+passed and one existing Windows subprocess-finalizer warning. GUI tests, the
+production build, isolated gateway startup, strict style and commit hooks passed.
+Local data, runtime artifacts and unrelated worktree changes remain uncommitted.
 
 Completed whole-repository engineering and code-standard optimization:
 - `docs/codex_docs/2026-10-15-engineering-optimization-completion.md`
 - `docs/reviews/2026-10-15-engineering-optimization/README.md`
 
-Fresh default backend suite: 3,126 passed, 1 skipped, 52 subtests passed and one
+Engineering-pass backend suite: 3,126 passed, 1 skipped, 52 subtests passed and one
 existing Windows subprocess-finalizer warning. Frontend: 259 GUI tests, 5 build
 tests and 1 launcher test passed; production build passed. Rust workspace: 92
 tests; Tauri bridge: 10 tests. Strict Python style, Black and Rust Clippy passed.
@@ -66,11 +72,9 @@ Completed local baseline-authority mode:
 Completed controller wiring and bounded environment repair mechanism:
 - `docs/codex_docs/2026-09-06-controller-repair-completion.md`
 
-Completed lightweight existing-split and FINAL lifecycle patch:
-- `docs/codex_docs/2026-09-06-lightweight-final-completion.md`
-
-Completed TESS submission-material assembly (review draft; submission blockers remain):
-- `docs/codex_docs/2026-09-06-tess-submission-material-completion.md`
+The local-only lightweight FINAL and TESS submission-material reports are
+preserved outside this publication; stale links to their absent tracked copies
+have been removed. They are not active implementation instructions.
 
 Active GUI-first repository closeout:
 - `docs/codex_docs/2026-09-06-gui-first-closeout-plan.md`
@@ -85,6 +89,7 @@ Active error-ledger repair work:
 - `docs/codex_docs/2026-09-06-error-ledger-repair-plan.md`
 
 Most recent completed work:
+- `docs/codex_docs/2026-10-15-publication-completion.md`
 - `docs/codex_docs/2026-10-15-engineering-optimization-completion.md`
 - `docs/codex_docs/2026-10-15-hypothesis-repair-completion.md`
 - `docs/codex_docs/2026-10-13-tui-logo-completion.md`
@@ -100,13 +105,14 @@ Most recent completed work:
 - `docs/codex_docs/2026-09-03-frontend-responsiveness-completion-report.md`
 - `docs/codex_docs/2026-09-03-frontend-workspace-session-fixes-completion-report.md`
 
-Historical module-review ledger (original remote-delivery closeout remains):
-- `docs/codex_docs/2026-09-05-module-simplification-plan.md`
+Completed module-review archive:
+- `docs/reviews/2026-10-15-engineering-optimization/module-review-ledger.md`
 
 All extant module-review rows are reconciled with the 2026-10-15 reports. Missing
-paths are explicitly retired. Local review and validation are complete; the
-historical commit/push requirement was not performed by this local optimization
-task. Other active GUI-first and error-ledger plans retain their existing scope.
+paths are explicitly retired. Local review, integrated validation and the
+historical main-branch commit/push requirement are complete. The ledger retains
+chronological evidence as an archive, not an active implementation plan. Other
+active GUI-first and error-ledger plans retain their existing scope.
 
 The former `docs/superpowers` planning/spec directory was archived and removed
 from the distributable documentation tree on 2026-09-06. Current behavior is

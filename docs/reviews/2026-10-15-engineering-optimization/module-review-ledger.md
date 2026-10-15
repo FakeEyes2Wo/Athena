@@ -1,19 +1,16 @@
-# Module-by-module simplification review
+# Module-by-module review ledger (archived 2026-10-15)
 
-2026-10-15 reconciliation: local module review and integrated validation are
-complete under the user's current whole-repository optimization scope. The
-remaining 136 extant Pending rows now link to file-level decisions; 226 missing
-baseline paths are explicitly retired, including the removed athena_ts tree.
-The original chronological notes below retain their historical test counts and
-coverage statements. New current sources and final verification are recorded in
-`docs/reviews/2026-10-15-engineering-optimization/README.md` and
-`docs/codex_docs/2026-10-15-engineering-optimization-completion.md`.
+The local module review, integrated validation and original main-branch delivery
+are complete. The user subsequently authorized commit and push. Current delivery
+and verification are recorded in the [publication report](../../codex_docs/2026-10-15-publication-completion.md).
+This file preserves the historical review decisions; it is no longer an active
+implementation plan.
 
-This historical plan remains open only for its original remote-delivery closeout.
-The current task did not authorize publishing the combined dirty worktree; no
-new commit/push is claimed. The integrated-application part of its last task is
-verified by the completion report, while historical publishing/removal remains
-unchecked. Other active plans are not closed by this reconciliation.
+The baseline contains 602 paths. All 136 formerly Pending paths still present in
+the workspace have file-level decisions; 226 absent baseline paths are retired,
+including the removed athena_ts tree. Current additional paths are recorded in
+[the review index](README.md). Chronological counts and comments below describe
+their original slices; final totals and limits belong to the completion reports.
 
 Baseline: `4b9dbaa`. Scope: tracked backend, TUI, gateway, GUI source, Rust bridge, Rust/TypeScript implementations, and development scripts. Tests and assets embedded in these roots remain listed so coverage cannot silently shrink.
 
@@ -23,7 +20,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 
 Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScript checkpoint now and do not spend further simplification time in `athena_ts`. Remaining unreviewed TypeScript ledger entries are deferred, not counted as reviewed. Continue the repository-wide review on Python, GUI, gateway, Rust, and development scripts directly on `main`.
 
-Delivery rule: complete each reviewed slice on `main`, push it to `origin/main`, and remove any task-owned temporary branch or worktree before reporting delivery. Never treat user-owned untracked directories as task worktrees or delete them during cleanup.
+Historical delivery rule: complete each reviewed slice on `main`, push it to `origin/main`, and remove any task-owned temporary branch or worktree before reporting delivery. Never treat user-owned untracked directories as task worktrees or delete them during cleanup.
 
 ## Tasks
 
@@ -79,7 +76,7 @@ Delivery rule: complete each reviewed slice on `main`, push it to `origin/main`,
 - [x] Review compute diagnostics and derive redundant status fields.
 - [x] Simplify the SSH backend construction and workspace lifecycle.
 - [x] Simplify the remote channel/agent protocol and consolidate job state.
-- [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
+- [x] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
 ## TUI module review

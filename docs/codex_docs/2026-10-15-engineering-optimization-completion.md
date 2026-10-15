@@ -2,6 +2,9 @@
 
 日期：2026-10-15。范围由用户明确选择为全仓逐模块优化。
 
+本报告记录本地工程优化阶段；后续上游合并、最终回归和已核验的提交推送见
+[发布完成报告](2026-10-15-publication-completion.md)。
+
 本轮通过并行模块审查和交叉复核，完成 Python 核心、Agent、研究流水线、执行层、
 GUI/TUI/gateway、检索、Kaggle、预测服务、开发脚本和 Rust 的必要修复及回归。
 以本轮开始时的工作区副本为比较基准，保留上一轮 hypothesis 修复和会话恢复
@@ -72,7 +75,7 @@ Windows asyncio 的 subprocess finalizer 仍有一条既有 closed-loop 警告�
 另外核对基线之外的当前新增文件，并保留各模块原有已审结论及本轮差异复查。
 [审查索引](../reviews/2026-10-15-engineering-optimization/README.md)列出
 56 个当前代码/源文件路径及其模块记录；这些路径不重复计入 602 个基线文件。
-[历史台账](2026-09-05-module-simplification-plan.md)已更新现存文件和退役路径的状态。
+[历史台账](../reviews/2026-10-15-engineering-optimization/module-review-ledger.md)已更新现存文件和退役路径的状态，并在后续发布完成后归档。
 本轮实施计划在验收后移除，CURRENT 更新为完成报告；其他 GUI/error-ledger
 工作保持原状态。未把未完成的历史远端发布事项标记成已执行。
 

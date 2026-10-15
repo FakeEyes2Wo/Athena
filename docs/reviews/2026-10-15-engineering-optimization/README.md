@@ -19,7 +19,7 @@ Local implementation and verification are complete. The module reports distingui
 
 The older inventory has 602 numeric baseline rows. Of its 231 previous Pending rows, all 136 still-present paths now have file-level decisions; 95 are absent historical paths. Missing files were not counted as newly reviewed code.
 
-Across the complete baseline, 226 paths are absent, including 138 retired athena_ts paths. The remaining historical ledger is at [module review plan](../../codex_docs/2026-09-05-module-simplification-plan.md); only its old remote-delivery closeout remains open. Its current source/test rows were reconciled, and unrelated plans were retained.
+Across the complete baseline, 226 paths are absent, including 138 retired athena_ts paths. The [archived module review ledger](module-review-ledger.md) preserves the historical decisions. Its current source/test rows were reconciled, integrated validation and main-branch delivery are complete, and unrelated plans retain their existing scope.
 
 The following 56 current code/source paths are outside the original numeric baseline. Some already appeared as New rows in that ledger; they are listed here without double-counting the 602-file baseline. Module decisions are in the reports above.
 
@@ -85,3 +85,5 @@ The following 56 current code/source paths are outside the original numeric base
 ## Verification and limits
 
 [Completion report](../../codex_docs/2026-10-15-engineering-optimization-completion.md) records final suites, skipped/warning cases, standards, scope limits and the recovered encoding incident. Raw logs and snapshots remain under ignored `submission/reproduction/2026-10-15-engineering-optimization/`. No new paid SEARCH/model session or external release was performed.
+
+The subsequent [publication report](../../codex_docs/2026-10-15-publication-completion.md) records upstream integration, the final 3,156-test backend run, startup checks, ignore rules and verified source delivery to origin/main.
