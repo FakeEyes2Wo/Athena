@@ -75,6 +75,21 @@ class GitWorkspace(ABC):
     ) -> None:
         """Restore only these paths to the last reviewed tree."""
 
+    async def discard_to_baseline(
+        self,
+        workspace: GitWorkBranch,
+        *,
+        keep_paths: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        """Discard tracked changes beyond ``keep_paths`` and return what went.
+
+        ``restore_paths`` puts paths back to the last *reviewed* tree, which is
+        what the platform needs after it ran a candidate itself.  It cannot undo
+        churn that was already present when that review was taken — for that the
+        paths must go back to the branch baseline.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     async def remove(
         self,

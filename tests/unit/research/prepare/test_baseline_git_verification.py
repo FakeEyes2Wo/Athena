@@ -81,6 +81,141 @@ def test_fresh_import_ignores_agent_writable_cwd_and_path(
     assert result.stdout.strip() == str(trusted_path)
 
 
+def test_operator_override_supplies_a_nonstandard_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A custom Git location is usable when the operator names it explicitly."""
+
+    real_git = shutil.which("git")
+    if real_git is None:
+        pytest.skip("Git is not installed on this host")
+    declared = tmp_path / Path(real_git).name
+    shutil.copy2(Path(real_git).resolve(), declared)
+    monkeypatch.setenv("ATHENA_TRUSTED_GIT", str(declared))
+
+    assert source_verification._operator_git_override() == str(declared.resolve())
+
+
+def test_operator_override_ignores_unusable_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The override never widens the boundary to missing or foreign files."""
+
+    monkeypatch.setenv("ATHENA_TRUSTED_GIT", str(tmp_path / "git.exe"))
+    assert source_verification._operator_git_override() is None
+
+    decoy = tmp_path / "not-git.exe"
+    decoy.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ATHENA_TRUSTED_GIT", str(decoy))
+    assert source_verification._operator_git_override() is None
+
+    monkeypatch.delenv("ATHENA_TRUSTED_GIT", raising=False)
+    assert source_verification._operator_git_override() is None
+
+
+def test_fresh_import_prefers_the_operator_override_over_path(
+    tmp_path: Path,
+) -> None:
+    """The declared install wins even when a fake Git sits earlier on PATH."""
+
+    real_git = shutil.which("git")
+    if real_git is None:
+        pytest.skip("Git is not installed on this host")
+    source = Path(real_git).resolve()
+    declared = tmp_path / "declared" / source.name
+    declared.parent.mkdir()
+    shutil.copy2(source, declared)
+    fake_bin = tmp_path / "agent-bin"
+    fake_bin.mkdir()
+    shutil.copy2(source, fake_bin / source.name)
+    environment = dict(os.environ)
+    environment["PATH"] = str(fake_bin)
+    environment["ATHENA_TRUSTED_GIT"] = str(declared)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from athena.research.prepare.source_verification import "
+            "_GIT_EXECUTABLE; print(_GIT_EXECUTABLE or '')",
+        ],
+        cwd=fake_bin,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(declared.resolve())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://127.0.0.1:10808",
+        "https://proxy.example:3128",
+        "socks5h://127.0.0.1:1080",
+    ],
+)
+def test_operator_proxy_accepts_credential_free_urls(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("ATHENA_TRUSTED_GIT_PROXY", raw)
+
+    assert source_verification._operator_git_proxy() == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "http://user:secret@127.0.0.1:10808",
+        "ftp://127.0.0.1:10808",
+        "127.0.0.1:10808",
+        "http://127.0.0.1:10808/path",
+        "http://127.0.0.1:10808?x=1",
+        "   ",
+    ],
+)
+def test_operator_proxy_rejects_unusable_urls(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("ATHENA_TRUSTED_GIT_PROXY", raw)
+
+    assert source_verification._operator_git_proxy() is None
+
+
+def test_operator_proxy_is_absent_unless_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ATHENA_TRUSTED_GIT_PROXY", raising=False)
+
+    assert source_verification._operator_git_proxy() is None
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_routes_through_the_declared_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared proxy replaces the explicit no-proxy setting, env stays bare."""
+
+    monkeypatch.setattr(source_verification, "_GIT_PROXY", "http://127.0.0.1:10808")
+    runner = FakeRunner()
+
+    await GitCloneVerifier(runner=runner).verify("https://github.com/org/repo.git")
+
+    clone_argv = runner.calls[0][0]
+    assert "http.proxy=http://127.0.0.1:10808" in clone_argv
+    assert "http.proxy=" not in clone_argv
+    for _, _, environment, _ in runner.calls:
+        assert not {key.casefold() for key in environment} & {
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        }
+
+
 @pytest.mark.asyncio
 async def test_git_verifier_uses_restricted_shallow_no_checkout_clone() -> None:
     runner = FakeRunner()
@@ -564,10 +699,13 @@ async def test_git_verifier_isolates_git_environment_and_config_for_both_command
         assert "http.cookieFile=" in argv
         assert "http.saveCookies=false" in argv
         assert "http.extraHeader=" in argv
-        assert "http.sslCert=" in argv
-        assert "http.sslKey=" in argv
         assert "http.sslCertPasswordProtected=false" in argv
         assert "http.proxy=" in argv
+        # An empty client-certificate override is not inert: it aborts the
+        # schannel handshake on Windows. The allowlisted environment and the
+        # nulled system/global configuration already keep TLS material out.
+        assert not any(key.startswith("http.sslCert=") for key in argv)
+        assert not any(key.startswith("http.sslKey=") for key in argv)
 
 
 @pytest.mark.asyncio

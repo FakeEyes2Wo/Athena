@@ -38,6 +38,7 @@ class EvaluatorSpec(BaseModel):
     prediction_file: str = Field(min_length=1)
     prediction_id_column: str = Field(min_length=1)
     prediction_column: str = Field(min_length=1)
+    label_column: str | None = None
     probability_columns: list[str] = Field(default_factory=list)
     metrics_file: str = Field(default="metrics_public_test.csv", min_length=1)
     eval_script: str = Field(default="eval_metrics.py", min_length=1)

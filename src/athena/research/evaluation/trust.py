@@ -132,8 +132,35 @@ def _probability(value: str, column: str) -> str:
     return "1.0" if suffix and suffix == value.strip().lower() else "0.0"
 
 
+_LABEL_COLUMN_SOURCE_RE = re.compile(
+    r"^\s*LABEL_COLUMN\s*=\s*[`'\"](?P<name>[A-Za-z_][A-Za-z0-9_]*)[`'\"]",
+    re.MULTILINE,
+)
+
+
+def extract_label_column_from_source(evaluator_source: str) -> str | None:
+    """Extract the labels CSV target column from an evaluator's source.
+
+    The property probe builds its perfect-prediction file from the label file's
+    own target column, so it must know that column's name. Most evaluators
+    declare it as a module-level ``LABEL_COLUMN`` constant next to the
+    prediction column they already declare; a labels CSV may also carry extra
+    non-target columns (sample keys, star ids), so guessing by position reads
+    the wrong column.
+    """
+
+    if not evaluator_source:
+        return None
+    for match in _LABEL_COLUMN_SOURCE_RE.finditer(evaluator_source):
+        return match.group("name")
+    return None
+
+
 def _parse_labels(
-    labels_csv: str, *, id_column: str | None = None
+    labels_csv: str,
+    *,
+    id_column: str | None = None,
+    target_column: str | None = None,
 ) -> tuple[list[str], list[str], str]:
     reader = csv.DictReader(io.StringIO(labels_csv))
     if not reader.fieldnames:
@@ -144,7 +171,19 @@ def _parse_labels(
     target_fields = [field for field in reader.fieldnames if field != id_column]
     if not target_fields:
         raise ValueError("labels CSV must contain a target column")
-    target_field = target_fields[0]
+    if target_column is None:
+        # Positional fallback for the simple two-column form. A labels CSV may
+        # legitimately carry extra non-target columns (sample keys, star ids),
+        # and taking the first one after the identity column silently scores
+        # against an identifier: the perfect-prediction probe then reads the
+        # single most common identifier as the label universe.
+        target_field = target_fields[0]
+    else:
+        if target_column not in reader.fieldnames:
+            raise ValueError(f"labels CSV must contain target column {target_column!r}")
+        if target_column == id_column:
+            raise ValueError("labels CSV target column must differ from the identity column")
+        target_field = target_column
     rows = list(reader)
     ids = [row[id_column].strip() for row in rows]
     values = [row[target_field] for row in rows]
@@ -158,6 +197,7 @@ async def validate_evaluator_properties(
     seed: int = 0,
     prediction_column: str | None = None,
     prediction_id_column: str | None = None,
+    label_column: str | None = None,
     probability_columns: Sequence[str] = (),
 ) -> dict[str, bool | str]:
     """Run row-order and value-permutation checks against a scoring callable.
@@ -168,7 +208,7 @@ async def validate_evaluator_properties(
     if not prediction_column:
         raise ValueError("evaluator must declare a prediction column")
     ids, values, prediction_id_column = _parse_labels(
-        labels_csv, id_column=prediction_id_column
+        labels_csv, id_column=prediction_id_column, target_column=label_column
     )
     if len(ids) < 2:
         return {"ok": False, "reason": "need at least two labeled rows"}

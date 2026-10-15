@@ -15,6 +15,7 @@ from athena.research.evaluation.spec import (
     load_evaluator_spec,
 )
 from athena.research.evaluation.trust import (
+    extract_label_column_from_source,
     extract_prediction_column,
     extract_prediction_column_from_source,
     validate_evaluator_properties,
@@ -22,7 +23,7 @@ from athena.research.evaluation.trust import (
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import load_agent_result
-from athena.research.supervisor.plans import PlanDecision
+from athena.research.supervisor.plans import PlanDecision, plan_budget_note
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,47 @@ def _evaluator_readme(root: Path, *, entrypoint: str, prediction_format: str) ->
     )
 
 
+def _resolve_prediction_column(
+    declared: str | None, evaluator_root: Path, entrypoint: str
+) -> str:
+    """Return the prediction CSV column the property probe must synthesise.
+
+    The declared contract wins. ``metric.json`` is machine-readable and is what
+    the evaluator itself reads back, so it is authoritative; the prose and
+    source fallbacks exist only for legacy descriptors that declare no column.
+
+    Deriving the column from HANDOFF.md first let an arbitrary word in the
+    handoff prose override the declared name. The probe then wrote a prediction
+    file the evaluator rejected, every scoring call returned the evaluator's
+    error sentinel, and the permutation check saw an unchanged score — so a
+    correct evaluator was rejected and the run died in PREPARE.
+    """
+    if declared:
+        return declared
+    handoff_path = evaluator_root / "HANDOFF.md"
+    handoff_text = (
+        handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+    )
+    from_handoff = extract_prediction_column(handoff_text)
+    if from_handoff is not None:
+        return from_handoff
+    source_path = evaluator_root / entrypoint
+    source = (
+        source_path.read_text(encoding="utf-8", errors="replace")
+        if source_path.is_file()
+        else ""
+    )
+    from_source = extract_prediction_column_from_source(source)
+    if from_source is not None:
+        return from_source
+    raise ValueError(
+        "cannot determine the tabular prediction CSV column from the declared "
+        "metric contract, HANDOFF.md, or the evaluator source; declare "
+        "prediction_column in metric.json (or in HANDOFF.md for a legacy "
+        "descriptor) so the property probe can build a synthetic prediction file"
+    )
+
+
 async def _validate_frozen_evaluator(
     *,
     root: Path,
@@ -187,28 +229,19 @@ async def _validate_frozen_evaluator(
     else:
         raise ValueError("no labels found for evaluator property tests")
 
-    # Read the declared prediction column, then fall back to evaluator source.
-    handoff_path = evaluator_root / "HANDOFF.md"
-    handoff_text = (
-        handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+    prediction_column = _resolve_prediction_column(
+        prediction_column_from_spec, evaluator_root, entrypoint
     )
-    prediction_column = extract_prediction_column(handoff_text)
-    if prediction_column is None:
-        prediction_column = prediction_column_from_spec
-    if prediction_column is None:
+
+    label_column = spec.label_column if spec is not None else None
+    if label_column is None:
         source_path = evaluator_root / entrypoint
         source = (
             source_path.read_text(encoding="utf-8", errors="replace")
             if source_path.is_file()
             else ""
         )
-        prediction_column = extract_prediction_column_from_source(source)
-    if prediction_column is None:
-        raise ValueError(
-            "cannot determine the tabular prediction CSV column from either "
-            "HANDOFF.md or the evaluator source; declare it in HANDOFF.md or "
-            "make evaluate.py read a clearly named prediction column"
-        )
+        label_column = extract_label_column_from_source(source)
 
     prediction_file = spec.prediction_file if spec is not None else "predictions.csv"
 
@@ -229,6 +262,7 @@ async def _validate_frozen_evaluator(
         score,
         prediction_column=prediction_column,
         prediction_id_column=id_column,
+        label_column=label_column,
         probability_columns=spec.probability_columns if spec is not None else (),
     )
     if not outcome.get("ok"):
@@ -292,7 +326,8 @@ async def run_evaluator_plan(
             if decision.decision != "submit":
                 feedback = (
                     f"Return submit to advance; got {decision.decision!r}. "
-                    "Continue means keep repairing the evaluator, not accept it."
+                    "Continue means keep repairing the evaluator, not accept it. "
+                    + plan_budget_note(turn=turn, max_turns=max_turns)
                 )
                 continue
             try:

@@ -175,3 +175,27 @@ class PlanDecision(BaseModel):
 
     decision: Literal["continue", "submit", "abandon"]
     reason: str
+
+
+def plan_budget_note(*, turn: int, max_turns: int) -> str:
+    """Escalating budget warning appended to a non-submit repair feedback.
+
+    A PlanAgent turn that answers ``continue`` after its artifact is already in
+    place costs the whole turn and produces no new information for the model;
+    without a visible countdown a thorough Agent can spend the entire budget
+    re-verifying and fail the Plan with the work actually complete.  The note
+    is delivered at the start of the *next* turn, so it reports the turns the
+    Agent still has left to act on.
+    """
+    remaining = max(0, max_turns - turn - 1)
+    if remaining <= 2:
+        return (
+            f"Only {remaining} turn(s) remain before this Plan FAILS and the whole "
+            'run aborts. Stop re-verifying: reply exactly {"decision":"submit",'
+            '"reason":"..."} as soon as the required artifacts are in place, and '
+            "reply abandon only if no acceptable version is achievable."
+        )
+    return (
+        f"{remaining} turn(s) remain. Reply submit as soon as the required "
+        "artifacts are in place instead of spending the budget on more checks."
+    )

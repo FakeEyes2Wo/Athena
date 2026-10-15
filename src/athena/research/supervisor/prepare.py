@@ -19,7 +19,12 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.evaluation.spec import read_eval_handoff
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
-from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
+from athena.research.supervisor.plans import (
+    PlanDecision,
+    PlanInput,
+    PlanState,
+    plan_budget_note,
+)
 from athena.research.supervisor.prompt_context import handoff_block
 
 PREPARE_AGENT_ID = "prepare"
@@ -311,7 +316,11 @@ async def run_prepare_plan(
                 subprocess.SubprocessError,
                 GitWorkspaceError,
             ) as error:
-                feedback = _feedback_from_exception(error)
+                feedback = (
+                    _feedback_from_exception(error)
+                    + " "
+                    + plan_budget_note(turn=turn, max_turns=max_turns)
+                )
                 continue
     finally:
         await _reap_agent(agents, PREPARE_AGENT_ID)

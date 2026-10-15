@@ -383,6 +383,69 @@ class LocalGitWorkspace(GitWorkspace):
                 )
                 candidate.unlink(missing_ok=True)
 
+    async def discard_to_baseline(
+        self,
+        workspace: GitWorkBranch,
+        *,
+        keep_paths: tuple[str, ...] = (),
+    ) -> tuple[str, ...]:
+        """Discard every change beyond ``keep_paths`` by restoring the baseline.
+
+        Returns the discarded paths.  ``keep_paths`` keeps an approved repair in
+        place; everything else — including untracked files a run created — goes
+        back to the branch baseline, so the worktree afterwards differs from the
+        baseline only by ``keep_paths``.
+        """
+        async with self._lock:
+            state = self._get_state(workspace)
+            baseline = state.review.baseline if state.review else workspace.base_commit
+            root = Path(workspace.path).resolve()
+            keep = set(keep_paths)
+
+            names = await self._git(
+                "diff", "--name-only", "-z", baseline, cwd=root
+            )
+            changed = {name for name in names.decode("utf-8").split("\0") if name}
+            others = await self._git(
+                "ls-files", "--others", "--exclude-standard", "-z", cwd=root
+            )
+            changed.update(name for name in others.decode("utf-8").split("\0") if name)
+
+            discarded: list[str] = []
+            for rel in sorted(changed):
+                if rel in keep:
+                    continue
+                relative = Path(rel)
+                candidate = (root / relative).resolve()
+                if (
+                    not rel
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                    or candidate == root
+                    or not candidate.is_relative_to(root)
+                ):
+                    raise GitWorkspaceError("discard path escapes workspace")
+                in_baseline = await self._git(
+                    "ls-tree", "--name-only", "-z", baseline, "--", rel, cwd=root
+                )
+                if in_baseline:
+                    await self._git(
+                        "restore",
+                        f"--source={baseline}",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        rel,
+                        cwd=root,
+                    )
+                else:
+                    await self._git(
+                        "rm", "--cached", "--ignore-unmatch", "--", rel, cwd=root
+                    )
+                    candidate.unlink(missing_ok=True)
+                discarded.append(rel)
+            return tuple(discarded)
+
     @staticmethod
     def _record_commit(
         state: _WorkspaceState,
