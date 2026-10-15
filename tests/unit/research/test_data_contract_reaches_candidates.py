@@ -113,10 +113,12 @@ async def test_every_search_turn_carries_the_data_contract() -> None:
 
     def plan_state():
         state = SimpleNamespace(
+            kind="SEARCH",
             turns_used=0,
             turn_limit=4,
             patience=2,
             stale_rounds=0,
+            rejected_rounds=0,
             context_ref="sha256:ctx",
             best_ref=None,
             last_failure=None,
@@ -154,10 +156,12 @@ async def test_no_contract_means_no_block_in_the_turn() -> None:
             return SimpleNamespace(status="completed", response_ref=None)
 
     state = SimpleNamespace(
+        kind="SEARCH",
         turns_used=0,
         turn_limit=4,
         patience=2,
         stale_rounds=0,
+        rejected_rounds=0,
         context_ref="sha256:ctx",
         best_ref=None,
         last_failure=None,

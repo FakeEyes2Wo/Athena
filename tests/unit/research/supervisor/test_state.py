@@ -55,6 +55,7 @@ def test_search_plan_round_trips_with_exact_durable_fields(tmp_path: Path) -> No
         "turn_limit",
         "patience",
         "stale_rounds",
+        "rejected_rounds",
         "best_ref",
     }
 

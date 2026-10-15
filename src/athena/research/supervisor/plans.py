@@ -21,6 +21,28 @@ from athena.research.supervisor.prompt_context import failure_block
 DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
 """Default wall-clock budget for one experiment command (seconds)."""
 
+SEARCH_TURN_LIMIT = 12
+"""Turn ceiling for one SEARCH Plan when its Hypothesis sets none.
+
+SEARCH Plans previously ran without any turn ceiling and relied on ``patience``
+alone.  With the default ``patience=0`` that gate degenerates: it settles the
+Plan on the first turn that produced no trusted score, so a candidate that is
+still implementing is settled as a failure, while the guard-rejection retry
+path stays unbounded.  The ceiling bounds the retry paths so a Plan cannot loop
+forever.
+"""
+
+REJECTION_RETRY_LIMIT = 8
+"""Consecutive candidate-quality rejections a SEARCH Plan may repair.
+
+A guard rejection (``no_change`` or ``diff_rejected``) means the turn produced
+no measurable experiment, which is a reason to keep working rather than a
+result.  The best candidate of a 40-slot run needed five consecutive
+rejections to wire its module into the frozen command, so the allowance has to
+sit above that; it is finite so a Plan that never implements anything still
+settles and releases its slot.
+"""
+
 _LEGACY_PLAN_INPUT_FIELDS = frozenset(
     {"active_ancestor_hypotheses", "initial_turn_limit", "initial_patience"}
 )
@@ -86,24 +108,27 @@ class PlanState(BaseModel):
     turn_limit: int | None = Field(ge=0)
     patience: int | None = Field(default=None, ge=0)
     stale_rounds: int = Field(default=0, ge=0)
+    rejected_rounds: int = Field(default=0, ge=0)
     best_ref: _TrustedArtifactRef | None = None
     last_failure: str | None = Field(default=None, max_length=1200)
 
     @model_validator(mode="after")
     def _validate_search_only_fields(self) -> "PlanState":
-        search_fields = {"patience", "stale_rounds", "best_ref"}
+        search_fields = {"patience", "stale_rounds", "rejected_rounds", "best_ref"}
         if self.kind == "SEARCH":
             if self.patience is None:
                 raise ValueError("SEARCH Plan requires patience")
         elif search_fields & self.model_fields_set:
-            raise ValueError("patience, stale_rounds and best_ref are SEARCH-only")
+            raise ValueError(
+                "patience, stale_rounds, rejected_rounds and best_ref are SEARCH-only"
+            )
         return self
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         payload = handler(self)
         if self.kind != "SEARCH":
-            for field in ("patience", "stale_rounds", "best_ref"):
+            for field in ("patience", "stale_rounds", "rejected_rounds", "best_ref"):
                 payload.pop(field, None)
         if self.last_failure is None:
             payload.pop("last_failure", None)
@@ -198,4 +223,26 @@ def plan_budget_note(*, turn: int, max_turns: int) -> str:
     return (
         f"{remaining} turn(s) remain. Reply submit as soon as the required "
         "artifacts are in place instead of spending the budget on more checks."
+    )
+
+
+def search_retry_note(*, rejected_rounds: int) -> str:
+    """Escalating note about the candidate-quality retry allowance.
+
+    A guard rejection costs a whole turn and, unlike a scoring failure, is
+    always the Agent's own doing: it either changed nothing, or changed
+    something the frozen command never runs.  The note is delivered at the
+    start of the *next* turn and only escalates once the allowance is nearly
+    spent.
+    """
+
+    remaining = max(0, REJECTION_RETRY_LIMIT - rejected_rounds)
+    if rejected_rounds == 0 or remaining > 2:
+        return ""
+    return (
+        f"\n\nOnly {remaining} rejected-turn allowance(s) remain before this "
+        "candidate is settled as a failure. A rejected turn is one that changed "
+        "nothing measurable: either no source file changed at all, or the change "
+        "never reaches the command the frozen manifest runs. Land the "
+        "implementation in that command's path now."
     )
