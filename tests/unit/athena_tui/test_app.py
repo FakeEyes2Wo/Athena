@@ -16,6 +16,7 @@ from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.utils import get_cwidth
 
 from athena.research.supervisor.events import OutputEvent, StateEvent
 from athena_tui.app import AthenaApp, apply_event
@@ -719,3 +720,24 @@ async def test_send_failure_restores_exact_multiline_draft() -> None:
     assert app._composer.buffer.cursor_position == 5
     assert app.state.history[-1].text == draft
     assert "offline" in app.state.last_error
+
+
+def test_history_scrollbar_track_sits_in_rightmost_column() -> None:
+    app = AthenaApp(FakeRuntime(), Path("/tmp"))
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="short"))
+
+    rows = fragment_list_to_text(app._history_fragments()).split("\n")
+
+    # 短行补齐到内容宽度：轨道不能紧贴文字，而要落在鼠标处理识别的最右列。
+    assert rows[0].startswith("● short")
+    assert all(get_cwidth(row) == app._render_width() for row in rows)
+    assert all(row[-1] in "│█" for row in rows)
+
+
+def test_empty_history_scrollbar_also_sits_in_rightmost_column() -> None:
+    app = AthenaApp(FakeRuntime(), Path("/tmp"))
+
+    rows = fragment_list_to_text(app._history_fragments()).split("\n")
+
+    assert any("Athena" in row for row in rows)
+    assert all(get_cwidth(row) == app._render_width() for row in rows)

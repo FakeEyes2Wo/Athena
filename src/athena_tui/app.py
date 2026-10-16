@@ -23,6 +23,7 @@ from athena_tui.render import (
     HELP_TEXT,
     composer_height,
     join_lines,
+    pad_line,
     render_bottom_pane,
     render_header,
     render_history_lines,
@@ -416,7 +417,8 @@ class AthenaApp:
             self._app.invalidate()
 
     def _history_fragments(self) -> StyleAndTextTuples:
-        lines = render_history_lines(self.state, self._history_content_width())
+        width = self._history_content_width()
+        lines = render_history_lines(self.state, width)
         height = self._history_height()
         if not lines and self._history_selection_lines is None:
             return render_welcome(self._history_content_width(), height)
@@ -432,8 +434,9 @@ class AthenaApp:
             total = len(lines)
             start = 0
             end = total
+        # 补齐到内容宽度，滚动条轨道才会落在最右列（鼠标处理按该列识别滚动条）。
         visible = tuple(
-            self._apply_history_selection(line, row)
+            self._apply_history_selection(pad_line(line, width), row)
             for row, line in enumerate(lines[start:end])
         )
         if total <= height:
